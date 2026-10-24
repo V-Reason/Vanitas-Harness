@@ -26,6 +26,7 @@ from .errors import (
     VanitasError,
 )
 from .repl import Repl
+from .progress import Spinner
 from .ui import Palette, resolve_enabled
 
 USAGE = "用法：vanitas [--config-dir DIR] [-v] <models|status|serve|stop|chat|translate|batch>"
@@ -127,8 +128,7 @@ def _ensure_engine(
     if client.health():
         return client, port
     record = launcher.start(config, model, profile, background=True, palette=palette)
-    elapsed = launcher.wait_ready(config, record)
-    print(palette.ok(f"已就绪 · {elapsed:.1f}s"))
+    launcher.wait_ready(config, record, palette)
     return EngineClient.for_model(config, model, record.port), record.port
 
 
@@ -207,8 +207,7 @@ def _cmd_serve(config: AppConfig, args: argparse.Namespace, palette: Palette) ->
     record = launcher.start(
         config, model, profile, background=True, palette=palette, verbose=verbose
     )
-    elapsed = launcher.wait_ready(config, record)
-    print(palette.ok(f"已就绪 · {elapsed:.1f}s"))
+    launcher.wait_ready(config, record, palette)
     return 0
 
 
@@ -261,9 +260,22 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
     for raw in args.inputs:
         source = Path(raw).expanduser()
         try:
-            outcome = translate.translate_file(
-                chat, source, config.settings.translate, out_dir=out_dir
-            )
+            with Spinner(f"正在翻译 {source.name}", palette) as spin:
+                outcome = translate.translate_file(
+                    chat,
+                    source,
+                    config.settings.translate,
+                    out_dir=out_dir,
+                    on_segment=(
+                        lambda done, total, name=source.name: spin.update(
+                            f"正在翻译 {name}（{done}/{total}）"
+                        )
+                    ),
+                )
+                target = outcome.output.name if outcome.output else "—"
+                spin.done(
+                    f"{outcome.source.name} → {target} · {outcome.segments} 段"
+                )
         except TranslateError as exc:
             print(palette.err(f"{raw}：{exc}"), file=sys.stderr)
             failures += 1
@@ -276,10 +288,6 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                 file=sys.stderr,
             )
         failures += len(outcome.failures)
-        target = outcome.output.name if outcome.output else "—"
-        print(
-            palette.ok(f"{outcome.source.name} → {target} · {outcome.segments} 段")
-        )
     if failures:
         print(
             palette.warn(f"完成，但 {failures} 处失败（失败段保留原文）"),

@@ -18,6 +18,7 @@ from . import guard, launcher, prompts, tools
 from .config import AppConfig, ModelSpec, ProfileSpec
 from .engine import EngineClient
 from .errors import ConfigError, EngineError, GuardError, LaunchError, ToolDenied
+from .progress import Spinner
 from .render import StreamRenderer
 from .session import Session, context_budget, default_save_path
 from .ui import SYMBOLS, Palette
@@ -173,7 +174,7 @@ class Repl:
                 palette=self.palette,
                 verbose=self.verbose,
             )
-            elapsed = launcher.wait_ready(self.config, record)
+            launcher.wait_ready(self.config, record, self.palette)
         except GuardError as exc:
             _stdout, stderr_lines = guard.format_for_cli(
                 guard.GuardResult(exc.code, [], list(exc.messages)), self.palette
@@ -184,7 +185,6 @@ class Repl:
         except LaunchError as exc:
             print(self.palette.err(str(exc)), file=sys.stderr)
             return False
-        print(self.palette.ok(f"已就绪 · {elapsed:.1f}s"))
         self.model = model
         self.profile = profile
         self.port = record.port
@@ -303,10 +303,8 @@ class Repl:
         usage: dict | None = None
         reasoning_chars = 0
         try:
-            for event in self.client.chat_stream(
-                self.session.api_messages(),
-                max_tokens=max_tokens,
-                temperature=0.2,
+            for event in self._stream_events(
+                self.session.api_messages(), max_tokens
             ):
                 if event["type"] == "delta":
                     renderer.feed(event["content"])
@@ -349,6 +347,22 @@ class Repl:
                 ),
                 file=sys.stderr,
             )
+
+    def _stream_events(self, messages: list[dict], max_tokens: int):
+        """首字前显示覆盖式进度，首字到达立刻擦除，避免等待行与 stdout 混屏。"""
+        spin = Spinner("正在生成", self.palette)
+        spin.__enter__()
+        first = True
+        try:
+            for event in self.client.chat_stream(
+                messages, max_tokens=max_tokens, temperature=0.2
+            ):
+                if first and event["type"] == "delta":
+                    first = False
+                    spin.__exit__(None, None, None)
+                yield event
+        finally:
+            spin.__exit__(None, None, None)
 
     # ------------------------------------------------------------------ #
     # 命令分派

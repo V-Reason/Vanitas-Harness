@@ -129,7 +129,9 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         target = out_dir / "sample.zh.srt"
         self.assertTrue(target.is_file())
-        self.assertIn("2 段", out)
+        # 完成行与进度同走 stderr，避免与 stdout 混排
+        self.assertIn("2 段", err)
+        self.assertNotIn("\x1b[", err)
 
     def test_translate_missing_file_exit_5(self) -> None:
         with clean_env():

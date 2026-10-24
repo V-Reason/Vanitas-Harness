@@ -19,6 +19,7 @@ from . import guard
 from .config import AppConfig, ModelSpec, ProfileSpec
 from .engine import EngineClient
 from .errors import GuardError, LaunchError
+from .progress import Spinner
 from .ui import Palette
 
 SERVER_EXE = "llama-server.exe"
@@ -267,35 +268,49 @@ def endpoint(config: AppConfig, port: int) -> str:
     return f"http://{config.settings.host}:{port}"
 
 
-def wait_ready(config: AppConfig, record: RunRecord) -> float:
-    """轮询 /health；进程提前退出立刻失败并附日志尾部，避免「启动即退出、无日志」。"""
+def wait_ready(
+    config: AppConfig,
+    record: RunRecord,
+    palette: Palette | None = None,
+    *,
+    progress: bool = True,
+) -> float:
+    """轮询 /health；进程提前退出立刻失败并附日志尾部，避免「启动即退出、无日志」。
+
+    等待期在 TTY 上显示覆盖式进度；非 TTY（管道/CI）静默，只在就绪时打印一行结论。
+    """
+    paint = palette or Palette({}, enabled=False)
     client = EngineClient(
         config.settings.request, config.settings.host, record.port, template_kwargs={}
     )
     deadline = time.monotonic() + config.settings.launcher.health_timeout_sec
     interval = config.settings.launcher.health_poll_interval_ms / 1000.0
     started = time.monotonic()
-    while time.monotonic() < deadline:
-        if not pid_running(record.pid):
-            tail = read_log_tail(record.log_path)
-            clear_record(record.model_id)
-            raise LaunchError(
-                f"llama-server（PID {record.pid}）在就绪前退出。日志尾部：\n{tail}"
-            )
-        if client.health(timeout=3.0):
-            ids = client.model_ids()
-            if record.alias not in ids:
+    with Spinner("正在加载模型", paint, enabled=None if progress else False) as spin:
+        while time.monotonic() < deadline:
+            if not pid_running(record.pid):
+                tail = read_log_tail(record.log_path)
+                clear_record(record.model_id)
                 raise LaunchError(
-                    f"端口 {record.port} 上运行的模型标识为 {ids}，"
-                    f"与期望 {record.alias!r} 不一致（端口被别的实例占用？）"
+                    f"llama-server（PID {record.pid}）在就绪前退出。日志尾部：\n{tail}"
                 )
-            return time.monotonic() - started
-        time.sleep(interval)
-    tail = read_log_tail(record.log_path)
-    raise LaunchError(
-        f"等待 {config.settings.launcher.health_timeout_sec:.0f}s 后服务仍未就绪"
-        f"（PID {record.pid}，端口 {record.port}）。日志尾部：\n{tail}"
-    )
+            if client.health(timeout=3.0):
+                ids = client.model_ids()
+                if record.alias not in ids:
+                    raise LaunchError(
+                        f"端口 {record.port} 上运行的模型标识为 {ids}，"
+                        f"与期望 {record.alias!r} 不一致（端口被别的实例占用？）"
+                    )
+                elapsed = time.monotonic() - started
+                spin.done(f"已就绪 · {elapsed:.1f}s")
+                return elapsed
+            spin.update()
+            time.sleep(interval)
+        tail = read_log_tail(record.log_path)
+        raise LaunchError(
+            f"等待 {config.settings.launcher.health_timeout_sec:.0f}s 后服务仍未就绪"
+            f"（PID {record.pid}，端口 {record.port}）。日志尾部：\n{tail}"
+        )
 
 
 def run_foreground(

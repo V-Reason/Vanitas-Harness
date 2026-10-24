@@ -107,7 +107,7 @@
 # 1) 语法
 Get-ChildItem vanitas\*.py, tests\test_*.py | ForEach-Object { python -m py_compile $_.FullName }
 
-# 2) 单测（当前 81 例）
+# 2) 单测（当前 90 例）
 python -m unittest discover -s tests
 
 # 3) 静态红线
