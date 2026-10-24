@@ -1,6 +1,7 @@
 # Claude Code 交互范式笔记
 
-> 目的：为 `vanitas` CLI 重构提炼可移植的交互设计。**只读勘察、提炼机制、不复制源码**。
+> 目的：为 `vanitas` CLI 提炼可移植的交互设计。**只读勘察、提炼机制、不复制源码**。
+> 状态：D1–D6 已落地于 `vanitas\`（v0.3+），入口为仓库根 `vanitas.bat`。架构契约见 [总设计方案.md](总设计方案.md)。
 > 勘察对象（`<REFERENCE_PROJECTS>\`）：`Open-ClaudeCode`、`claude-code-haha`、`NanmiCoder-claude-code-haha`、`claude-code无补丁.zip`。
 > 阅读入口：`src/commands.ts`、`src/commands/*/index.ts`、`src/history.ts`、`src/types/permissions.ts`、`src/screens/REPL.tsx`、`src/replLauncher.tsx`、`claude-code-haha/README.md`、`claude-code-haha/package.json`。
 
@@ -54,7 +55,7 @@
 | Ink + React 虚拟 DOM 全屏重绘（`replLauncher.tsx` 注入 React `Root`；`REPL.tsx` 用 `useStdin`、`useInput`、React compiler runtime） | 需要 React 渲染器与终端布局引擎；`claude-code-haha/package.json` 有 62 个运行时依赖（`@anthropic-ai/sdk`、`@opentelemetry/*`、`react` 生态等）。本项目红线只允许 `prompt_toolkit`，引入即违约。 |
 | bun 打包 + `feature()` 编译期开关（`feature('KAIROS')`、`feature('DAEMON')` 等） | 属于「同一份源码编出不同产品形态」的构建体系，不是运行期可复制的交互设计。 |
 | OAuth/登录、遥测、GrowthBook、MCP、插件、Skills、远程会话（`/bridge`、`/teleport`、`/remote-setup`） | 对应云端产品面与多端协同；本机是单机离线推理套件，没有账号、没有远端。 |
-| 自动工具调用循环、auto-compact、prompt caching、多 Agent 协作 | 依赖大上下文与 token 预算模型，且任务书 D1=B 明确排除自动循环；本机 `-np 1`、8 GB 显存，先保证单轮稳定。 |
+| 自动工具调用循环、auto-compact、prompt caching、多 Agent 协作 | 依赖大上下文与 token 预算模型，且项目边界（D1=B）明确排除自动循环；本机 `-np 1`、8 GB 显存，先保证单轮稳定。 |
 | Vim 模式、键位自定义、剪贴板图片粘贴、语音、主题 | 交互增强层，对「能稳定跑通一轮对话 + 批量翻译」不构成瓶颈，属于过度设计。 |
 
 ---
