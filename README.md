@@ -57,7 +57,7 @@ Vanitas-Harness\
 ├── vanitas\                    # CLI 实现（标准库 + prompt_toolkit）
 ├── tests\
 │   ├── multi_model_benchmark.py
-│   ├── test_*.py               # 61 个单元测试
+│   ├── test_*.py               # 90 个单元测试
 │   └── reports\                # 评测与冒烟产物（不入库）
 └── docs\                       # 总设计方案 / 项目现状 / 使用手册 / 范式笔记
 ```
@@ -86,6 +86,7 @@ python -m vanitas stop
 
 ## 版本
 
+`v0.4.1` — 界面现代化：符号化输出（`✓ ✗ ⚠ ⋯ ·`）+ `ui` 主题配置、提示符 `qwen7b@1 › `、移除全部 `[标签]`、三处等待进度；90 个单测。
 `v0.4.0` — 入口迁到根目录 `vanitas.bat`；文档重组为总设计方案 / 项目现状 / 用户使用手册 / 范式笔记 + `AGENTS.md`。
 `v0.3.1` — `/exec` 支持 cmd 内置命令，并拒绝 `& | < > ^ %` 串联。
 `v0.3.0` — CLI 化重构：配置驱动、Python 守卫、REPL、批量翻译/批处理，端口迁到 4060–4063。

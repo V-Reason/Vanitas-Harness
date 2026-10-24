@@ -130,7 +130,7 @@ python -m vanitas stop
 
 ## 8. Git 规范
 
-- `main` 始终可用；改动走短生命周期分支，完成后 `--no-ff` 合并并打 annotated tag（当前 `v0.4.0`）。
+- `main` 始终可用；改动走短生命周期分支，完成后 `--no-ff` 合并并打 annotated tag（当前 `v0.4.1`）。
 - Conventional Commits + 中文主题：`feat(cli): …`、`fix(tools): …`、`docs(status): …`、`chore!:`（破坏性）。
 - 一次提交只做一件事；删除与替代文件放同一提交，保证一次 revert 可回退。
 - 回滚优先 `git revert`；禁止改写已推送历史；无远端时也不得滥用 `reset --hard` 丢失现场。
@@ -141,6 +141,8 @@ python -m vanitas stop
 ## 9. 当前边界
 
 - 并发（`-np 1`）、长上下文质量、持续压测、TTY 交互、`--foreground`、`.md/.txt` 真机翻译、5xx 重试路径尚未验证。
+- v0.4.1 的 16 色配色与三处覆盖式进度未做真人 TTY 验收（仅伪 TTY 单测 + 强制 `always` 抓字节）。
+- 混合换行的 `.srt` 会静默产出 `0 段`（已定位未修，见现状第 5 节）。
 - HY-MT2 显存余量约 500 MiB，是本机最紧的模型。
 - 完整清单与取证见 [docs/项目现状.md](docs/项目现状.md) 第 5、6 节；不得把未验证项写成已结论。
 
