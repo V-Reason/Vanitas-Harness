@@ -51,6 +51,10 @@ PERF_PROMPT = (
     "Explain the difference between optimistic concurrency control and "
     "pessimistic locking in a database engine."
 )
+# 模板级思考开关：llama-server 会把 chat_template_kwargs 透传给 Jinja 模板。
+# MiniCPM5 等模板定义了 enable_thinking，关闭后 content 直接给最终答案；
+# Qwen2.5/HY 模板不引用该变量，传了也无副作用。报告会记录本次取值。
+THINKING_KWARGS = {"enable_thinking": False}
 
 
 class ProbeError(RuntimeError):
@@ -134,6 +138,7 @@ def chat(
     temperature: float = 0.2,
     response_format: dict | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    chat_template_kwargs: dict | None = THINKING_KWARGS,
 ) -> dict:
     payload: dict = {
         "messages": messages,
@@ -142,6 +147,8 @@ def chat(
     }
     if response_format is not None:
         payload["response_format"] = response_format
+    if chat_template_kwargs is not None:
+        payload["chat_template_kwargs"] = chat_template_kwargs
     return request_json(port, "/v1/chat/completions", payload, timeout=timeout, host=host)
 
 
@@ -212,6 +219,7 @@ def measure_streaming(
         "max_tokens": max_tokens,
         "temperature": 0.2,
         "stream": True,
+        "chat_template_kwargs": THINKING_KWARGS,
     }
     url = f"http://{host}:{port}/v1/chat/completions"
     request = urllib.request.Request(
@@ -308,10 +316,14 @@ def run_agent_suite(port: int, host: str, timeout: float) -> dict:
             timeout=timeout,
         )
         format_mode = "json_object（fallback）"
-    raw = (result["choices"][0]["message"]["content"] or "").strip()
+    raw = (result["choices"][0]["message"].get("content") or "").strip()
+    reasoning = (result["choices"][0]["message"].get("reasoning_content") or "").strip()
     candidate, fenced = _extract_json_object(raw)
 
     failures: list[str] = []
+    if not raw and reasoning:
+        # 思考模型若不支持/未关闭思考，content 会为空，所有 token 都进 reasoning_content
+        failures.append("content 为空、仅返回 reasoning_content（思考未关闭或 token 预算不足）")
     parsed: dict | None = None
     try:
         parsed_value = json.loads(candidate)
@@ -335,7 +347,8 @@ def run_agent_suite(port: int, host: str, timeout: float) -> dict:
         "response_format": format_mode,
         "fenced": fenced,
         "failures": failures,
-        "raw_preview": raw[:240],
+        "raw_preview": raw[:240] or reasoning[:240],
+        "reasoning_preview": reasoning[:240],
         "parsed": parsed,
     }
 
@@ -397,10 +410,11 @@ def build_report(args: argparse.Namespace, model_id: str, ready_s: float, perf: 
 
     return {
         "tool": "vanitas-bench",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
         "endpoint": f"http://{args.host}:{args.port}",
         "model": model_id,
+        "chat_template_kwargs": THINKING_KWARGS,
         "ready_seconds": round(ready_s, 2),
         "performance": perf,
         "streaming": stream,

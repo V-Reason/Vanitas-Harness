@@ -5,7 +5,7 @@ setlocal enableextensions
 :: ============================================================================
 :: run_hymt2_7b_q6.bat - 翻译专精模型启动器（默认端口 8082）
 :: 用法: run_hymt2_7b_q6.bat [模型路径] [档位 1|2|3]
-::   模型路径省略 -> models\hy-mt2-7b-q6_k.gguf
+::   模型路径省略 -> models\HY-MT2-7B-Q6_K.gguf
 ::   档位省略     -> VANITAS_PROFILE -> 交互输入 -> 1
 ::   VANITAS_PORT -> 覆盖端口，仅用于冲突逃生与自动化测试
 :: 7B 级权重 + 长上下文会同时挤压 KV，默认 Q8_0 KV，F16 仅显存全空时手动选 3。
@@ -13,7 +13,7 @@ setlocal enableextensions
 
 set "BASE_DIR=<REPOSITORY_ROOT>"
 set "BIN_DIR=%BASE_DIR%\bin"
-set "DEFAULT_MODEL=%BASE_DIR%\models\hy-mt2-7b-q6_k.gguf"
+set "DEFAULT_MODEL=%BASE_DIR%\models\HY-MT2-7B-Q6_K.gguf"
 set "PORT=8082"
 set "HOST=127.0.0.1"
 
@@ -30,8 +30,8 @@ if not "%PROFILE%"=="" goto :PROFILE_READY
 
 echo ==============================================================================
 echo 请选择 HY-MT2-7B Q6_K 翻译运行档位:
-echo [1] 4K 上下文 + Q8_0 KV   术语精度优先，应用侧显存约 6.3 GB（默认）
-echo [2] 8K 上下文 + Q4_0 KV   长文档翻译，应用侧显存约 6.35 GB
+echo [1] 4K 上下文 + Q8_0 KV   术语精度优先，应用侧显存约 6.0 GB（默认）
+echo [2] 8K 上下文 + Q4_0 KV   长文档翻译，应用侧显存约 6.1 GB
 echo [3] 4K 上下文 + F16 KV    理论最优精度，需空闲显存 ≥ 7.2 GB
 echo ==============================================================================
 set /p PROFILE="请输入选项代号 [默认 1]: "
@@ -67,11 +67,8 @@ if errorlevel 1 (
     exit /b %errorlevel%
 )
 
-set "MODEL_MB=?"
-for /f "delims=" %%M in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "[math]::Round((Get-Item -LiteralPath '%MODEL_PATH%').Length/1MB)"') do set "MODEL_MB=%%M"
-
 echo ==============================================================================
-echo [LAUNCH] 模型: %MODEL_ALIAS% (%MODEL_MB% MB)
+echo [LAUNCH] 模型: %MODEL_ALIAS%
 echo [LAUNCH] 档位: %MODE_DESC%
 echo [LAUNCH] 上下文: %CTX_SIZE% tokens, KV: %KV_K%
 echo [LAUNCH] 地址: http://%HOST%:%PORT%  (Web UI 与 OpenAI 兼容 API)
