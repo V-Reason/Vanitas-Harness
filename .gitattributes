@@ -1,0 +1,9 @@
+* text=auto eol=lf
+
+# 批处理必须保持 CRLF：cmd 对 LF-only 的标签跳转与续行行为不可靠
+*.bat text eol=crlf
+
+# 二进制资产永不参与行尾转换
+*.gguf binary
+*.dll binary
+*.exe binary

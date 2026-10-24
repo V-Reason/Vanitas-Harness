@@ -1,0 +1,13 @@
+# 运行时二进制与模型权重（合计 >3 GB，绝不入库；无远端可恢复，禁用 git clean -x）
+/bin/
+/models/
+
+# 评测运行产物
+/tests/reports/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 临时日志
+*.log
