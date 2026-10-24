@@ -336,6 +336,7 @@ def stop_all(config: AppConfig) -> list[int]:
 
 
 def inspect(config: AppConfig) -> list[RunStatus]:
+    """D6：端点可见性——pid 记录 + /health + 当前模型，供 /status 与 /model 使用。"""
     statuses: list[RunStatus] = []
     for record in read_records():
         alive = pid_running(record.pid)

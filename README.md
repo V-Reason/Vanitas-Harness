@@ -76,6 +76,7 @@ vanitas batch tasks.jsonl --model qwen7b
 | `qwen3b` | 4063 | 8K + Q4_0 KV | 4K + F16 KV | — |
 
 - 环境变量：`VANITAS_PORT` 覆盖端口，`VANITAS_PROFILE` 覆盖档位，`VANITAS_CONFIG_DIR` 覆盖配置目录。
+- **单实例策略**：一次只服务一个模型；`serve` 会先回收存量 `llama-server`（8 GB 显存禁不起双实例），再启动目标模型。
 - 服务只监听 `127.0.0.1`，提供 OpenAI 兼容 API（`/v1/chat/completions`、`/v1/models`、`/health`）；本 CLI 不再使用浏览器 Web UI。
 - 新增模型只允许在 `config\models.json` 追加 `models[]` 条目，字段名不可改；`shards>1` 时 `path` 必须指向 `-00001-of-0000N` 首片。
 
@@ -136,5 +137,5 @@ python tests\multi_model_benchmark.py --port 4062 --suite translation --runs 3
 
 ## 版本
 
-`v0.3.0` — CLI 化重构：配置驱动、Python 守卫、REPL 与 13 个内置命令、批量翻译/批处理，端口迁到 4060–4063。
+`v0.3.0` — CLI 化重构：配置驱动、Python 守卫、REPL 与 12 个内置命令、批量翻译/批处理，端口迁到 4060–4063。
 `v0.2.0` — 三模型真实权重实测；7B 分片自动续载与守卫全分片校验。

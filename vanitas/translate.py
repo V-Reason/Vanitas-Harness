@@ -220,7 +220,10 @@ def translate_prose(
     output: list[str] = []
     for position, (paragraph, separator) in enumerate(split_prose(text), start=1):
         match = re.match(r"^(\s*)(.*?)(\s*)$", paragraph, re.DOTALL)
-        assert match is not None
+        if match is None:  # re 已保证可匹配；这里只是防御，绝不吞掉内容
+            output.append(paragraph)
+            output.append(separator)
+            continue
         leading, core, trailing = match.groups()
         if not core:
             output.append(paragraph)

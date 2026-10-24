@@ -116,7 +116,8 @@ class EngineClient:
             if attempt + 1 >= attempts:
                 break
             self._sleep_backoff(attempt)
-        assert last_failure is not None
+        if last_failure is None:
+            raise EngineError(f"{request.full_url} 请求失败：未知原因")
         raise last_failure
 
     def _get_json(self, path: str, timeout: float, retries: int | None = None) -> dict:
@@ -253,7 +254,8 @@ class EngineClient:
                 if attempt + 1 >= attempts:
                     break
                 self._sleep_backoff(attempt)
-        assert last_failure is not None
+        if last_failure is None:
+            raise EngineError("流式请求失败：未知原因")
         raise last_failure
 
     # ------------------------------------------------------------------ #

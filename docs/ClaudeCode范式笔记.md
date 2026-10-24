@@ -62,7 +62,7 @@
 ## 三、本项目的取舍
 
 1. **纯文本增量渲染，不做全屏重绘**：流式 token 直接写 stdout 并 flush；代码围栏内缩进 4 空格表示等宽块；不使用 ANSI 光标控制，保证 `| tee`、重定向、CI 抓取都可读（D3）。
-2. **13 个 `/` 命令，一张表**：`/help /model /profile /system /task /clear /save /load /exec /stop /status /quit`（`/exit` 为 `/quit` 别名），全部在 `repl.py` 的 `COMMANDS` 中声明 `name/description/aliases/arg_hint`，`/help` 自动生成（D1）。
+2. **12 个 `/` 命令，一张表**：`/help /model /profile /system /task /clear /save /load /exec /stop /status /quit`（`/exit` 为 `/quit` 别名），全部在 `repl.py` 的 `COMMANDS` 中声明 `name/description/aliases/arg_hint`，`/help` 自动生成（D1）。
 3. **单引擎、单模型、单档位**：一次只服务一个 llama-server；`/model` 切换前用 pidfile + `/health` 验就绪，不自动起停（D6）。理由：8 GB 显存禁不起双实例，静默启动比报错更危险。
 4. **`/exec` 手动、默认关闭、逐次确认**：只做「白名单内、可见、可拒绝」的最小安全面，不实现自动循环，也不预留空钩子（D4）。
 5. **会话与历史分离**：`/save` 存业务消息（可跨进程恢复），输入历史交给 `prompt_toolkit`；`/clear` 保留系统提示（D2、D5）。

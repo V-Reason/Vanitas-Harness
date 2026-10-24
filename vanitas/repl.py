@@ -519,7 +519,7 @@ class Repl:
         else:
             print("[STATUS] 无运行记录（serve 会在 ~/.vanitas_run/ 下写入）")
         gpu = guard.gpu_status()
-        print(gpu or "[STATUS] GPU 信息不可用（nvidia-smi 未找到）")
+        print(f"[STATUS] {gpu}" if gpu else "[STATUS] GPU 信息不可用（nvidia-smi 未找到）")
         print(
             f"[STATUS] 会话 {len(self.session.messages)} 条消息 · 约 {self.session.message_tokens()} tokens"
         )
@@ -533,6 +533,7 @@ class Repl:
     # ------------------------------------------------------------------ #
 
     def _get_prompt_session(self):
+        # D2：输入历史与业务会话分离；文件权限尽量收到 0600，失败只告警不阻断。
         if self._prompt_ready:
             return self._prompt_session
         self._prompt_ready = True

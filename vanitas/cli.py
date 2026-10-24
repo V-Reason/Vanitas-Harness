@@ -39,6 +39,12 @@ def _configure_stdio() -> None:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except AttributeError:  # 被重定向到非 TextIOWrapper 时跳过
             pass
+    # 管道输入的默认编码是本地代码页（cp936），与 pwsh/CI 的 UTF-8 不一致；
+    # 不统一会导致中文变成孤立代理字符并在 json.dumps 时崩溃。
+    try:
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 
 def _err(message: object) -> None:
