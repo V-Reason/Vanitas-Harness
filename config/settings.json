@@ -26,5 +26,17 @@
     "source_suffixes": [".txt", ".md", ".srt"],
     "chunk_chars": 1500,
     "output_suffix": ".zh"
+  },
+  "ui": {
+    "color": "auto",
+    "theme": {
+      "prompt": "cyan",
+      "success": "green",
+      "error": "red",
+      "warn": "yellow",
+      "info": "cyan",
+      "muted": "bright_black",
+      "accent": "magenta"
+    }
   }
 }

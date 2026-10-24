@@ -170,6 +170,58 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 load_config(self.root / "nope", base_dir=self.root)
 
+    # ------------------------------------------------------------------ #
+    # settings.ui
+    # ------------------------------------------------------------------ #
+
+    def test_ui_default_theme_loads(self) -> None:
+        with clean_env():
+            config = load_config()
+        self.assertEqual(config.settings.ui.color, "auto")
+        self.assertEqual(config.settings.ui.theme.muted, "bright_black")
+        self.assertEqual(config.settings.ui.theme.accent, "magenta")
+
+    def test_ui_bad_color_mode_rejected(self) -> None:
+        self.settings["ui"]["color"] = "yes"
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError) as ctx:
+                self.load()
+        self.assertIn("auto/always/never", str(ctx.exception))
+
+    def test_ui_bad_color_name_rejected(self) -> None:
+        self.settings["ui"]["theme"]["error"] = "purple"
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError) as ctx:
+                self.load()
+        self.assertIn("purple", str(ctx.exception))
+
+    def test_ui_unknown_theme_key_rejected(self) -> None:
+        self.settings["ui"]["theme"]["extra"] = "red"
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError) as ctx:
+                self.load()
+        self.assertIn("extra", str(ctx.exception))
+
+    def test_ui_section_optional(self) -> None:
+        # 旧 settings.json 没有 ui 段时不得报错，必须回落到内置默认主题
+        del self.settings["ui"]
+        self.write_settings()
+        with clean_env():
+            config = self.load()
+        self.assertEqual(config.settings.ui.color, "auto")
+        self.assertEqual(config.settings.ui.theme.success, "green")
+
+    def test_ui_incomplete_theme_rejected(self) -> None:
+        del self.settings["ui"]["theme"]["warn"]
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError) as ctx:
+                self.load()
+        self.assertIn("warn", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
