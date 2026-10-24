@@ -3,17 +3,18 @@ chcp 65001 >nul
 setlocal enableextensions
 
 :: ============================================================================
-:: run_minicpm5_2b_q6.bat - 轻量高质模型启动器（默认端口 8081）
-:: 用法: run_minicpm5_2b_q6.bat [模型路径] [档位 1|2]
-::   模型路径省略 -> models\minicpm5-2b-instruct-q6_k.gguf
+:: run_minicpm5_2b_q8.bat - 轻量高质模型启动器（默认端口 8081）
+:: 用法: run_minicpm5_2b_q8.bat [模型路径] [档位 1|2]
+::   模型路径省略 -> models\MiniCPM5-2B-Q8_0.gguf
 ::   档位省略     -> VANITAS_PROFILE -> 交互输入 -> 1
 ::   VANITAS_PORT -> 覆盖端口，仅用于冲突逃生与自动化测试
-:: 2B 权重约 1.8 GB，8G 卡余量充足，因此两档均保持 F16 KV 不做量化。
+:: 实际权重为 Q8_0（非早期文档假设的 Q6_K），约 2.56 GiB，8G 卡余量充足，
+:: 因此两档均保持 F16 KV 不做量化；文件名即真实量化级别，禁止改成 q6。
 :: ============================================================================
 
 set "BASE_DIR=<REPOSITORY_ROOT>"
 set "BIN_DIR=%BASE_DIR%\bin"
-set "DEFAULT_MODEL=%BASE_DIR%\models\minicpm5-2b-instruct-q6_k.gguf"
+set "DEFAULT_MODEL=%BASE_DIR%\models\MiniCPM5-2B-Q8_0.gguf"
 set "PORT=8081"
 set "HOST=127.0.0.1"
 
@@ -29,9 +30,9 @@ if "%PROFILE%"=="" set "PROFILE=%VANITAS_PROFILE%"
 if not "%PROFILE%"=="" goto :PROFILE_READY
 
 echo ==============================================================================
-echo 请选择 MiniCPM5-2B Q6_K 运行档位:
-echo [1] 8K 上下文 + F16 KV  极速极稳，应用侧显存约 2.2 GB（默认）
-echo [2] 32K 上下文 + F16 KV 长文实验，应用侧显存约 2.6 GB
+echo 请选择 MiniCPM5-2B Q8_0 运行档位:
+echo [1] 8K 上下文 + F16 KV   极速极稳，应用侧显存约 2.7 GB（默认）
+echo [2] 32K 上下文 + F16 KV  长文实验，应用侧显存约 3.8 GB
 echo ==============================================================================
 set /p PROFILE="请输入选项代号 [默认 1]: "
 
@@ -57,11 +58,8 @@ if errorlevel 1 (
     exit /b %errorlevel%
 )
 
-set "MODEL_MB=?"
-for /f "delims=" %%M in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "[math]::Round((Get-Item -LiteralPath '%MODEL_PATH%').Length/1MB)"') do set "MODEL_MB=%%M"
-
 echo ==============================================================================
-echo [LAUNCH] 模型: %MODEL_ALIAS% (%MODEL_MB% MB)
+echo [LAUNCH] 模型: %MODEL_ALIAS%
 echo [LAUNCH] 档位: %MODE_DESC%
 echo [LAUNCH] 上下文: %CTX_SIZE% tokens, KV: f16
 echo [LAUNCH] 地址: http://%HOST%:%PORT%  (Web UI 与 OpenAI 兼容 API)

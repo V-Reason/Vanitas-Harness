@@ -27,11 +27,11 @@ echo ===========================================================================
 echo   实例状态: %RUNNING%            显存: %VRAM%
 echo ------------------------------------------------------------------------------
 echo [1] 启动 Qwen2.5-7B-Instruct (Q6_K)  - [Port: 8080] 通用主力 / Agent
-echo [2] 启动 MiniCPM5-2B (Q6_K)          - [Port: 8081] 轻量高质 / 长文
+echo [2] 启动 MiniCPM5-2B (Q8_0)          - [Port: 8081] 轻量高质 / 长文
 echo [3] 启动 HY-MT2-7B (Q6_K)            - [Port: 8082] 专业翻译
 echo [4] 停止当前所有推理实例 (彻底释放显存)
 echo [5] 查看运行状态 (进程 / 端口 / 显存)
-echo [6] 临时验证: Qwen2.5-3B Q4_K_M      - [Port: 8080] 仅管道验收，不代表 7B 性能
+echo [6] 对照基线: Qwen2.5-3B Q4_K_M      - [Port: 8080] 管线回归，不代表 7B 性能
 echo [7] 退出总控
 echo ==============================================================================
 set /p CHOICE="请输入操作序号 [1-7]: "
@@ -53,7 +53,7 @@ call :LAUNCH "Vanitas :: Qwen2.5-7B" "run_qwen2.5_7b_q6.bat" ""
 goto :MENU
 
 :START_MINICPM
-call :LAUNCH "Vanitas :: MiniCPM5-2B" "run_minicpm5_2b_q6.bat" ""
+call :LAUNCH "Vanitas :: MiniCPM5-2B" "run_minicpm5_2b_q8.bat" ""
 goto :MENU
 
 :START_HYMT
@@ -67,7 +67,7 @@ if not exist "%TEMP_MODEL%" (
     pause
     goto :MENU
 )
-call :LAUNCH "Vanitas :: Qwen2.5-3B (临时验证)" "run_qwen2.5_7b_q6.bat" "%TEMP_MODEL%"
+call :LAUNCH "Vanitas :: Qwen2.5-3B (对照基线)" "run_qwen2.5_7b_q6.bat" "%TEMP_MODEL%"
 goto :MENU
 
 :STOP_ALL
