@@ -1,12 +1,14 @@
 """手动 /exec（范式笔记 D4）：白名单 + 逐次确认。
 
 任务书 D1=B 明确不实现工具调用自动循环：这里只提供「人按一次、命令跑一次」的最小面。
-shell=False 是安全边界：& | > 只能作为字面参数，无法串联第二条命令。
+普通程序 shell=False：& | > 只能作为字面参数，无法串联第二条命令；
+cmd 内置命令（echo/dir/type…）没有 .exe，改走受控 `cmd /c`，并先拒绝元字符。
 """
 
 from __future__ import annotations
 
 import locale
+import os
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -16,6 +18,10 @@ from .config import AppConfig
 from .errors import ToolDenied
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+WINDOWS_BUILTINS = frozenset(
+    {"echo", "dir", "type", "set", "ver", "cls", "copy", "del", "md", "rd", "cd", "title", "vol"}
+)
+SHELL_METACHARS = frozenset("&|<>^%")
 
 
 @dataclass
@@ -64,6 +70,19 @@ def split_command(command: str) -> list[str]:
     return cleaned
 
 
+def resolve_argv(command: str) -> list[str]:
+    """决定实际启动参数：普通程序 shell=False；cmd 内置命令走受控的 `cmd /c`。"""
+    argv = split_command(command)
+    if os.name == "nt" and argv[0].lower() in WINDOWS_BUILTINS:
+        if any(char in command for char in SHELL_METACHARS):
+            raise ToolDenied(
+                "内置命令不允许包含 & | < > ^ %（避免串联第二条命令）；"
+                "需要组合命令请拆成多次 /exec"
+            )
+        return ["cmd", "/d", "/s", "/c", command]
+    return argv
+
+
 def _ask(prompt: str) -> str:
     try:
         return input(prompt)
@@ -95,7 +114,7 @@ def run_exec(
         if answer.strip().lower() not in {"y", "yes", "是"}:
             raise ToolDenied("用户取消执行（未确认）")
 
-    argv = split_command(command)
+    argv = resolve_argv(command)
     timeout = config.settings.request.timeout_sec
     try:
         completed = subprocess.run(
