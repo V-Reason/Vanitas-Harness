@@ -36,7 +36,7 @@ MODEL_FIELDS = frozenset(
 )
 PROFILE_FIELDS = frozenset({"ctx", "kv_k", "kv_v", "desc"})
 SETTINGS_FIELDS = frozenset(
-    {"version", "host", "request", "launcher", "repl", "tools", "translate"}
+    {"version", "host", "request", "launcher", "repl", "tools", "translate", "ui"}
 )
 REQUEST_FIELDS = frozenset(
     {"timeout_sec", "max_retries", "backoff_base_ms", "backoff_jitter_ms"}
@@ -47,6 +47,41 @@ LAUNCHER_FIELDS = frozenset(
 REPL_FIELDS = frozenset({"history_file", "max_context_tokens", "stream"})
 TOOLS_FIELDS = frozenset({"exec_enabled", "exec_whitelist", "exec_require_confirm"})
 TRANSLATE_FIELDS = frozenset({"source_suffixes", "chunk_chars", "output_suffix"})
+UI_FIELDS = frozenset({"color", "theme"})
+THEME_KEYS = frozenset({"prompt", "success", "error", "warn", "info", "muted", "accent"})
+COLOR_MODES = frozenset({"auto", "always", "never"})
+# 与 vanitas/ui.py::COLOR_NAMES 逐字一致。刻意本地再定义一份：config 是最底层，
+# 不 import ui，避免 ui 将来引入 config 时出现循环依赖。
+COLOR_NAMES = frozenset(
+    {
+        "black",
+        "red",
+        "green",
+        "yellow",
+        "blue",
+        "magenta",
+        "cyan",
+        "white",
+        "bright_black",
+        "bright_red",
+        "bright_green",
+        "bright_yellow",
+        "bright_blue",
+        "bright_magenta",
+        "bright_cyan",
+        "bright_white",
+        "default",
+    }
+)
+DEFAULT_THEME = {
+    "prompt": "cyan",
+    "success": "green",
+    "error": "red",
+    "warn": "yellow",
+    "info": "cyan",
+    "muted": "bright_black",
+    "accent": "magenta",
+}
 
 
 @dataclass(frozen=True)
@@ -113,6 +148,27 @@ class TranslateSettings:
 
 
 @dataclass(frozen=True)
+class UiTheme:
+    prompt: str
+    success: str
+    error: str
+    warn: str
+    info: str
+    muted: str
+    accent: str
+
+
+@dataclass(frozen=True)
+class UiSettings:
+    color: str
+    theme: UiTheme
+
+
+def _default_ui() -> UiSettings:
+    return UiSettings(color="auto", theme=UiTheme(**DEFAULT_THEME))
+
+
+@dataclass(frozen=True)
 class Settings:
     version: int
     host: str
@@ -121,6 +177,7 @@ class Settings:
     repl: ReplSettings
     tools: ToolsSettings
     translate: TranslateSettings
+    ui: UiSettings
 
 
 @dataclass(frozen=True)
@@ -388,6 +445,32 @@ def _load_models(document: dict, base_dir: Path) -> tuple:
 # --------------------------------------------------------------------------- #
 
 
+def _load_ui(entry: object) -> UiSettings:
+    """严格校验 settings.ui；整段缺失时由 _load_settings 回落到默认主题。"""
+    label = "settings.ui"
+    _as_mapping(entry, label)
+    _reject_unknown(entry, UI_FIELDS, label)
+
+    raw_color = entry.get("color")
+    color = raw_color.strip() if isinstance(raw_color, str) else ""
+    if color not in COLOR_MODES:
+        _fail(f"{label}.color", f"必须是 auto/always/never，实际为 {raw_color!r}")
+
+    theme_label = f"{label}.theme"
+    raw_theme = _as_mapping(entry.get("theme"), theme_label)
+    _reject_unknown(raw_theme, THEME_KEYS, theme_label)
+    missing = sorted(THEME_KEYS - set(raw_theme))
+    if missing:
+        _fail(theme_label, f"缺少字段 {missing}；必须完整给出 {sorted(THEME_KEYS)}")
+    values: dict[str, str] = {}
+    for key in sorted(THEME_KEYS):
+        value = _as_str(raw_theme, key, theme_label)
+        if value not in COLOR_NAMES:
+            _fail(f"{theme_label}.{key}", f"不支持的颜色名 {value!r}；允许：{sorted(COLOR_NAMES)}")
+        values[key] = value
+    return UiSettings(color=color, theme=UiTheme(**values))
+
+
 def _load_settings(document: dict) -> Settings:
     _reject_unknown(document, SETTINGS_FIELDS, "config\\settings.json")
     if document.get("version") != 1:
@@ -464,6 +547,8 @@ def _load_settings(document: dict) -> Settings:
         output_suffix=output_suffix,
     )
 
+    ui_settings = _load_ui(document["ui"]) if "ui" in document else _default_ui()
+
     return Settings(
         version=1,
         host=host,
@@ -472,6 +557,7 @@ def _load_settings(document: dict) -> Settings:
         repl=repl_settings,
         tools=tools_settings,
         translate=translate_settings,
+        ui=ui_settings,
     )
 
 

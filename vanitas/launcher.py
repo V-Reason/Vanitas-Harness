@@ -19,6 +19,8 @@ from . import guard
 from .config import AppConfig, ModelSpec, ProfileSpec
 from .engine import EngineClient
 from .errors import GuardError, LaunchError
+from .progress import Spinner
+from .ui import Palette
 
 SERVER_EXE = "llama-server.exe"
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -106,7 +108,7 @@ def clear_record(model_id: str) -> None:
     except FileNotFoundError:
         pass
     except OSError as exc:
-        print(f"[WARN] 无法删除运行记录 {record_path(model_id)}：{exc}", file=sys.stderr)
+        print(f"⚠ 无法删除运行记录 {record_path(model_id)}：{exc}", file=sys.stderr)
 
 
 def clear_records() -> None:
@@ -166,7 +168,9 @@ def _log_path(model: ModelSpec) -> Path:
     return log_dir() / f"{model.id}-{stamp}.log"
 
 
-def _guard_or_raise(config: AppConfig, model: ModelSpec, port: int) -> None:
+def _guard_or_raise(
+    config: AppConfig, model: ModelSpec, port: int, palette: Palette | None
+) -> None:
     result = guard.evaluate(
         port,
         model.path,
@@ -175,9 +179,10 @@ def _guard_or_raise(config: AppConfig, model: ModelSpec, port: int) -> None:
         allow_kill=True,
         kill_wait_sec=config.settings.launcher.kill_wait_sec,
     )
-    guard.emit(result)
     if result.code != 0:
+        # 失败行交给调用方统一上色打印，避免「守卫打一遍、CLI 再打一遍」
         raise GuardError(result.code, result.stderr or result.stdout)
+    guard.emit(result, palette=palette)
 
 
 def _spawn(
@@ -228,10 +233,13 @@ def start(
     profile: ProfileSpec,
     *,
     background: bool = True,
+    palette: Palette | None = None,
+    verbose: bool = False,
 ) -> RunRecord:
+    paint = palette or Palette({}, enabled=False)
     _ensure_dirs()
     port = config.effective_port(model)
-    _guard_or_raise(config, model, port)
+    _guard_or_raise(config, model, port, palette)
     log_path = _log_path(model)
     process = _spawn(config, model, profile, port, log_path)
     record = RunRecord(
@@ -244,11 +252,15 @@ def start(
         log_path=str(log_path),
     )
     _write_record(record)
-    print(
-        f"[LAUNCH] {model.display} · 档位 {profile.key}（{profile.desc}）"
-        f" · ctx {profile.ctx} · KV {profile.kv_k}/{profile.kv_v}"
-    )
-    print(f"[LAUNCH] 地址 {endpoint(config, port)}  日志 {log_path}")
+    print(paint.meta(f"{model.display} · 档位 {profile.key}"))
+    if verbose:
+        print(
+            paint.meta(
+                f"ctx {profile.ctx} · KV {profile.kv_k}/{profile.kv_v}"
+                f" · {endpoint(config, port)} · PID {record.pid}"
+            )
+        )
+        print(paint.meta(f"日志 {log_path}"))
     return record
 
 
@@ -256,44 +268,67 @@ def endpoint(config: AppConfig, port: int) -> str:
     return f"http://{config.settings.host}:{port}"
 
 
-def wait_ready(config: AppConfig, record: RunRecord) -> float:
-    """轮询 /health；进程提前退出立刻失败并附日志尾部，避免「启动即退出、无日志」。"""
+def wait_ready(
+    config: AppConfig,
+    record: RunRecord,
+    palette: Palette | None = None,
+    *,
+    progress: bool = True,
+) -> float:
+    """轮询 /health；进程提前退出立刻失败并附日志尾部，避免「启动即退出、无日志」。
+
+    等待期在 TTY 上显示覆盖式进度；非 TTY（管道/CI）静默，只在就绪时打印一行结论。
+    """
+    paint = palette or Palette({}, enabled=False)
     client = EngineClient(
         config.settings.request, config.settings.host, record.port, template_kwargs={}
     )
     deadline = time.monotonic() + config.settings.launcher.health_timeout_sec
     interval = config.settings.launcher.health_poll_interval_ms / 1000.0
     started = time.monotonic()
-    while time.monotonic() < deadline:
-        if not pid_running(record.pid):
-            tail = read_log_tail(record.log_path)
-            clear_record(record.model_id)
-            raise LaunchError(
-                f"llama-server（PID {record.pid}）在就绪前退出。日志尾部：\n{tail}"
-            )
-        if client.health(timeout=3.0):
-            ids = client.model_ids()
-            if record.alias not in ids:
+    with Spinner("正在加载模型", paint, enabled=None if progress else False) as spin:
+        while time.monotonic() < deadline:
+            if not pid_running(record.pid):
+                tail = read_log_tail(record.log_path)
+                clear_record(record.model_id)
                 raise LaunchError(
-                    f"端口 {record.port} 上运行的模型标识为 {ids}，"
-                    f"与期望 {record.alias!r} 不一致（端口被别的实例占用？）"
+                    f"llama-server（PID {record.pid}）在就绪前退出。日志尾部：\n{tail}"
                 )
-            return time.monotonic() - started
-        time.sleep(interval)
-    tail = read_log_tail(record.log_path)
-    raise LaunchError(
-        f"等待 {config.settings.launcher.health_timeout_sec:.0f}s 后服务仍未就绪"
-        f"（PID {record.pid}，端口 {record.port}）。日志尾部：\n{tail}"
-    )
+            if client.health(timeout=3.0):
+                ids = client.model_ids()
+                if record.alias not in ids:
+                    raise LaunchError(
+                        f"端口 {record.port} 上运行的模型标识为 {ids}，"
+                        f"与期望 {record.alias!r} 不一致（端口被别的实例占用？）"
+                    )
+                elapsed = time.monotonic() - started
+                spin.done(f"已就绪 · {elapsed:.1f}s")
+                return elapsed
+            spin.update()
+            time.sleep(interval)
+        tail = read_log_tail(record.log_path)
+        raise LaunchError(
+            f"等待 {config.settings.launcher.health_timeout_sec:.0f}s 后服务仍未就绪"
+            f"（PID {record.pid}，端口 {record.port}）。日志尾部：\n{tail}"
+        )
 
 
-def run_foreground(config: AppConfig, model: ModelSpec, profile: ProfileSpec) -> int:
+def run_foreground(
+    config: AppConfig,
+    model: ModelSpec,
+    profile: ProfileSpec,
+    *,
+    palette: Palette | None = None,
+    verbose: bool = False,
+) -> int:
+    paint = palette or Palette({}, enabled=False)
     port = config.effective_port(model)
-    _guard_or_raise(config, model, port)
+    _guard_or_raise(config, model, port, palette)
     args = build_args(model, profile, port, config.settings.host, config.base_dir)
     bin_dir = Path(config.base_dir) / "bin"
-    print(f"[LAUNCH] {model.display} · 档位 {profile.key}（{profile.desc}）")
-    print(f"[LAUNCH] 地址 {endpoint(config, port)}  参数：{' '.join(args[1:])}")
+    print(paint.meta(f"{model.display} · 档位 {profile.key}（前台）"))
+    if verbose:
+        print(paint.meta(f"地址 {endpoint(config, port)}  参数：{' '.join(args[1:])}"))
     try:
         process = subprocess.Popen(args, cwd=str(bin_dir))
     except OSError as exc:
@@ -310,7 +345,7 @@ def run_foreground(config: AppConfig, model: ModelSpec, profile: ProfileSpec) ->
             process.kill()
             code = process.wait()
         raise
-    print(f"[EXIT] llama-server 已退出，退出码 {code}")
+    print(paint.meta(f"llama-server 已退出，退出码 {code}"))
     return code
 
 

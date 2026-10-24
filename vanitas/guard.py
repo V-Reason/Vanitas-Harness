@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import BASE_DIR, SHARD_RE
+from .ui import FALLBACK_THEME, Palette, resolve_enabled
 
 RUNTIME_FILES = ("llama-server.exe", "llama.dll", "ggml-base.dll", "ggml-cuda.dll")
 MIN_MODEL_BYTES = 100 * 1024 * 1024
@@ -180,39 +181,18 @@ def evaluate(
     try:
         port_number = int(str(port).strip())
     except (TypeError, ValueError):
-        return GuardResult(
-            9,
-            out,
-            [
-                f"[GUARD-FATAL] 端口必须是整数：{port!r}",
-                "[GUARD-FATAL] 用法: python -m vanitas.guard --port <端口> --model <模型路径>",
-            ],
-        )
+        return GuardResult(9, out, [f"✗ 端口必须是整数：{port!r}"])
     if not 1 <= port_number <= 65535:
-        return GuardResult(
-            9,
-            out,
-            [f"[GUARD-FATAL] 端口必须在 1–65535 之间：{port_number}"],
-        )
+        return GuardResult(9, out, [f"✗ 端口必须在 1–65535 之间：{port_number}"])
     if not str(model_path).strip():
-        return GuardResult(
-            9,
-            out,
-            [
-                "[GUARD-FATAL] 缺少模型路径参数",
-                "[GUARD-FATAL] 用法: python -m vanitas.guard --port <端口> --model <模型路径>",
-            ],
-        )
-
-    out.append(f"[GUARD] 目标端口 {port_number}")
-    out.append(f"[GUARD] 目标模型 \"{model_path}\"")
+        return GuardResult(9, out, ["✗ 缺少模型路径"])
 
     # 1) 运行时完整性：缺 DLL 时 llama-server 只会抛 0xc0000135，先替操作者挡住
     missing = [name for name in RUNTIME_FILES if not (root / "bin" / name).is_file()]
     if missing:
         for name in missing:
-            err.append(f"[GUARD-FATAL] 运行时缺失: \"{root / 'bin' / name}\"")
-        err.append("[GUARD-FATAL] 请将 llama.cpp CUDA 预编译包完整解压到 bin\\ 目录。")
+            err.append(f"✗ 缺少运行组件：\"{root / 'bin' / name}\"")
+        err.append("提示：请将 llama.cpp CUDA 包完整解压到 bin\\ 目录")
         return GuardResult(3, out, err)
 
     target = Path(model_path).expanduser()
@@ -222,17 +202,17 @@ def evaluate(
 
     # 2) 模型校验：存在性 -> 分片完整性 -> 体积下限 -> GGUF magic
     if not target.is_file():
-        err.append(f"[GUARD-FATAL] 模型文件缺失: \"{target}\"")
-        err.append("[GUARD-FATAL] 请核对 models\\ 下的文件名，或先完成下载。")
+        err.append(f"✗ 找不到模型文件：\"{target}\"")
+        err.append("提示：核对 models\\ 下的文件名，或先完成下载")
         return GuardResult(2, out, err)
 
     split = _split_shards(target)
     if split == "SHARD_ORDER":
-        err.append(f"[GUARD-FATAL] 分片序号错误：必须传入第 1 个分片，收到 \"{target.name}\"。")
-        err.append("[GUARD-FATAL] 正确入口形如 models\\<前缀>-00001-of-0000N.gguf。")
+        err.append(f"✗ 启动入口错误：必须使用第 1 个分片，收到 \"{target.name}\"")
+        err.append("提示：正确入口形如 models\\<前缀>-00001-of-0000N.gguf")
         return GuardResult(2, out, err)
     if split == "BAD_SHARD_COUNT":
-        err.append(f"[GUARD-FATAL] 分片总数非法（必须为正整数）: \"{target}\"")
+        err.append(f"✗ 分片编号不合法：\"{target}\"")
         return GuardResult(2, out, err)
 
     if split == "SINGLE":
@@ -245,8 +225,8 @@ def evaluate(
         missing_shards = [item for item in files if not item.is_file()]
         if missing_shards:
             for item in missing_shards:
-                err.append(f"[GUARD-FATAL] 模型分片缺失: \"{item}\"")
-            err.append("[GUARD-FATAL] 分片必须同目录、同前缀、编号连续；补齐后再启动。")
+                err.append(f"✗ 分片缺失：\"{item}\"")
+            err.append("提示：分片必须同目录、同前缀、编号连续")
             return GuardResult(2, out, err)
 
     total_bytes = 0
@@ -254,12 +234,12 @@ def evaluate(
         try:
             total_bytes += item.stat().st_size
         except OSError as exc:
-            err.append(f"[GUARD-FATAL] 无法读取模型分片: \"{item}\"（{exc.strerror or exc}）")
+            err.append(f"✗ 无法读取分片：\"{item}\"（{exc.strerror or exc}）")
             return GuardResult(2, out, err)
     if total_bytes < min_bytes:
         err.append(
-            f"[GUARD-FATAL] 模型体积不足 {min_bytes // (1024 * 1024)} MB，"
-            f"疑似下载未完成: \"{target}\""
+            f"✗ 模型体积不足 {min_bytes // (1024 * 1024)} MB，"
+            f"疑似下载未完成：\"{target}\""
         )
         return GuardResult(2, out, err)
 
@@ -267,18 +247,21 @@ def evaluate(
         with target.open("rb") as handle:
             magic = handle.read(4)
     except OSError as exc:
-        err.append(f"[GUARD-FATAL] 无法读取模型文件头: \"{target}\"（{exc.strerror or exc}）")
+        err.append(f"✗ 无法读取文件头：\"{target}\"（{exc.strerror or exc}）")
         return GuardResult(2, out, err)
     if magic != b"GGUF":
-        err.append(f"[GUARD-FATAL] 文件头不是 GGUF，可能把网页或压缩包存成了 .gguf: \"{target}\"")
+        err.append(f"✗ 文件不是有效的 GGUF 模型：\"{target}\"")
         return GuardResult(2, out, err)
 
     # 3) 清理存量实例：8 GB 显存禁不起双实例，宁可杀错不可放过
     if allow_kill:
         stale = _llama_pids()
-        for pid in stale:
-            out.append(f"[GUARD-WARN] 发现存量 llama-server 实例 PID={pid}，正在强制回收显存...")
         if stale:
+            out.append(
+                "⚠ 发现遗留服务，正在清理（PID "
+                + "、".join(str(pid) for pid in stale)
+                + "）"
+            )
             _run(["taskkill", "/f", "/im", "llama-server.exe"])
             deadline = time.monotonic() + max(0.0, kill_wait_sec)
             while time.monotonic() < deadline:
@@ -287,8 +270,7 @@ def evaluate(
                 time.sleep(0.2)
             if _llama_pids():
                 err.append(
-                    f"[GUARD-FATAL] 存量 llama-server 实例 {kill_wait_sec:.0f} 秒内未退出，"
-                    "请手动结束进程后重试。"
+                    f"✗ 旧服务 {kill_wait_sec:.0f} 秒内未退出，请手动结束进程后重试"
                 )
                 return GuardResult(4, out, err)
 
@@ -296,45 +278,54 @@ def evaluate(
     owner = _port_owner(port_number, host)
     if owner is not None:
         pid, name = owner
-        err.append(f"[GUARD-FATAL] 端口 {port_number} 被 PID {pid} ({name}) 占用。")
-        err.append(
-            f"[GUARD-FATAL] 处置：结束该进程；或 set \"VANITAS_PORT=<空闲端口>\" 后重新启动。"
-        )
+        err.append(f"✗ 端口 {port_number} 被 PID {pid} ({name}) 占用")
+        err.append("提示：结束该进程，或设置环境变量 VANITAS_PORT=<空闲端口>")
         return GuardResult(1, out, err)
 
     # 5) 显存快照：只展示不拦截，阈值随档位变化，不替操作者拍板
     snapshot = _gpu_snapshot()
     if snapshot:
-        out.append(f"[GUARD] {snapshot}")
+        out.append(f"· {snapshot}")
 
     size_mb = round(total_bytes / (1024 * 1024))
-    if shard_count == 1:
-        out.append(
-            f"[GUARD] 环境核验通过：模型 {size_mb} MB（单文件），"
-            f"端口 {port_number} 空闲，显存通道已独占。"
-        )
-    else:
-        out.append(
-            f"[GUARD] 环境核验通过：模型 {size_mb} MB（{shard_count} 个分片，校验完整），"
-            f"端口 {port_number} 空闲，显存通道已独占。"
-        )
+    shard_desc = "单文件" if shard_count == 1 else f"{shard_count} 个分片，校验完整"
+    out.append(
+        f"✓ 环境核验通过 · 模型 {size_mb} MB（{shard_desc}）"
+        f" · 端口 {port_number} 空闲 · 显存通道已独占"
+    )
     return GuardResult(0, out, err)
 
 
-def format_for_cli(result: GuardResult) -> tuple[list[str], list[str]]:
-    """CLI 包装：stderr 首行加 [GUARD-CODE=N]，与守卫原始消息同一行，两个契约同时满足。"""
-    stdout_lines = list(result.stdout)
-    stderr_lines = list(result.stderr)
-    if stderr_lines:
-        stderr_lines[0] = f"[GUARD-CODE={result.code}] {stderr_lines[0]}"
+_PREFIX_METHODS = (
+    ("✓ ", "ok"),
+    ("✗ ", "err"),
+    ("⚠ ", "warn"),
+    ("⋯ ", "spin"),
+    ("· ", "meta"),
+)
+_HINT_PREFIX = "提示："
+
+
+def _colorize_line(line: str, palette: Palette) -> str:
+    """按首字符选语义色；符号由 Palette 重新拼回，不改变文本内容。"""
+    if line.startswith(_HINT_PREFIX):
+        return palette.hint(line[len(_HINT_PREFIX):])
+    for prefix, method in _PREFIX_METHODS:
+        if line.startswith(prefix):
+            return getattr(palette, method)(line[len(prefix):])
+    return line
+
+
+def format_for_cli(result: GuardResult, palette: Palette | None = None) -> tuple[list[str], list[str]]:
+    """只做着色，不加任何前缀：退出码本身就是机读契约，消息只负责人读。"""
+    painter = palette or Palette({}, enabled=False)
+    stdout_lines = [_colorize_line(line, painter) for line in result.stdout]
+    stderr_lines = [_colorize_line(line, painter) for line in result.stderr]
     return stdout_lines, stderr_lines
 
 
-def emit(result: GuardResult, *, cli_prefix: bool = False) -> None:
-    stdout_lines, stderr_lines = format_for_cli(result) if cli_prefix else (
-        result.stdout,
-        result.stderr,
-    )
+def emit(result: GuardResult, *, palette: Palette | None = None) -> None:
+    stdout_lines, stderr_lines = format_for_cli(result, palette)
     for line in stdout_lines:
         print(line)
     for line in stderr_lines:
@@ -387,7 +378,12 @@ def main(argv: list[str]) -> int:
         host=args.host,
         allow_kill=not args.no_kill,
     )
-    emit(result)
+    # 独立入口没有 settings 可读，固定用默认主题，仅 auto 判断终端能力
+    palette = Palette(
+        FALLBACK_THEME,
+        resolve_enabled("auto", sys.stdout) and resolve_enabled("auto", sys.stderr),
+    )
+    emit(result, palette=palette)
     return result.code
 
 

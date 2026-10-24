@@ -142,6 +142,23 @@ class TranslateTests(unittest.TestCase):
         with self.assertRaises(TranslateError):
             translate_file(echo_chat, source, SETTINGS)
 
+    def test_on_segment_called_per_block(self) -> None:
+        text = "Para one.\n\nPara two.\n\nPara three.\n"
+        source = self.write("three.md", text)
+        calls: list[tuple[int, int]] = []
+        outcome = translate_file(
+            echo_chat, source, SETTINGS, on_segment=lambda done, total: calls.append((done, total))
+        )
+        self.assertEqual(calls, [(1, 3), (2, 3), (3, 3)])
+        self.assertEqual(outcome.segments, 3)
+
+    def test_on_segment_optional(self) -> None:
+        # 不传回调时行为与旧版完全一致（向后兼容）
+        source = self.write("three.md", "A.\n\nB.\n\nC.\n")
+        outcome = translate_file(echo_chat, source, SETTINGS)
+        self.assertEqual(outcome.segments, 3)
+        self.assertEqual(outcome.failures, [])
+
     def test_missing_file_rejected(self) -> None:
         with self.assertRaises(TranslateError):
             translate_file(echo_chat, self.dir / "nope.srt", SETTINGS)

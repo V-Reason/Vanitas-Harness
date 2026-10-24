@@ -190,9 +190,12 @@ def translate_srt(
     source: str,
     eol: str,
     failures: list[TranslationFailure],
+    on_segment: Callable[[int, int], None] | None = None,
 ) -> str:
     blocks = parse_srt(text, eol)
-    for position, (subtitle, _separator) in enumerate(blocks, start=1):
+    total = sum(1 for subtitle, _ in blocks if subtitle.index and subtitle.text.strip())
+    done = 0
+    for subtitle, _separator in blocks:
         if not subtitle.text.strip() or not subtitle.index:
             continue
         result = _translate_chunks(
@@ -206,6 +209,9 @@ def translate_srt(
         if result is not None:
             subtitle.text = result
         # 失败时保留原文，继续下一条
+        done += 1
+        if on_segment is not None:
+            on_segment(done, total)
     return rebuild_srt(blocks, eol)
 
 
@@ -216,28 +222,37 @@ def translate_prose(
     chunk_chars: int,
     source: str,
     failures: list[TranslationFailure],
+    on_segment: Callable[[int, int], None] | None = None,
 ) -> str:
+    paragraphs = split_prose(text)
+    total = sum(1 for paragraph, _ in paragraphs if paragraph.strip())
+    done = 0
     output: list[str] = []
-    for position, (paragraph, separator) in enumerate(split_prose(text), start=1):
+    for position, (paragraph, separator) in enumerate(paragraphs, start=1):
         match = re.match(r"^(\s*)(.*?)(\s*)$", paragraph, re.DOTALL)
-        if match is None:  # re 已保证可匹配；这里只是防御，绝不吞掉内容
+        if match is None:
+            # re 已保证可匹配；这里只是防御，绝不吞掉内容
             output.append(paragraph)
             output.append(separator)
             continue
         leading, core, trailing = match.groups()
         if not core:
             output.append(paragraph)
-        else:
-            result = _translate_chunks(
-                chat,
-                core,
-                chunk_chars=chunk_chars,
-                source=source,
-                label=f"block {position}",
-                failures=failures,
-            )
-            output.append(leading + (result if result is not None else core) + trailing)
+            output.append(separator)
+            continue  # 空白段落不计入进度
+        result = _translate_chunks(
+            chat,
+            core,
+            chunk_chars=chunk_chars,
+            source=source,
+            label=f"block {position}",
+            failures=failures,
+        )
+        output.append(leading + (result if result is not None else core) + trailing)
         output.append(separator)
+        done += 1
+        if on_segment is not None:
+            on_segment(done, total)
     return "".join(output)
 
 
@@ -271,6 +286,7 @@ def translate_file(
     settings,
     *,
     out_dir: Path | None = None,
+    on_segment: Callable[[int, int], None] | None = None,
 ) -> TranslationOutcome:
     source = Path(source)
     if not source.is_file():
@@ -286,7 +302,7 @@ def translate_file(
     segments = 0
     if suffix == ".srt":
         blocks = parse_srt(text, eol)
-        segments = sum(1 for subtitle, _ in blocks if subtitle.index)
+        segments = sum(1 for subtitle, _ in blocks if subtitle.index and subtitle.text.strip())
         translated = translate_srt(
             chat,
             text,
@@ -294,6 +310,7 @@ def translate_file(
             source=str(source),
             eol=eol,
             failures=failures,
+            on_segment=on_segment,
         )
     else:
         segments = sum(1 for paragraph, _ in split_prose(text) if paragraph.strip())
@@ -303,6 +320,7 @@ def translate_file(
             chunk_chars=settings.chunk_chars,
             source=str(source),
             failures=failures,
+            on_segment=on_segment,
         )
 
     target = output_path(source, out_dir, settings.output_suffix)
