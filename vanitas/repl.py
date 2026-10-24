@@ -2,6 +2,8 @@
 
 只有「以 / 开头且第 2 个字符不是空格」的行才当命令；其余整行都是用户输入，
 这样用户想问 "/model 是什么意思" 时仍能正常发问。
+
+所有用户可见文本都经 Palette 上色/加符号，本模块不拼接 ANSI 转义。
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from .engine import EngineClient
 from .errors import ConfigError, EngineError, GuardError, LaunchError, ToolDenied
 from .render import StreamRenderer
 from .session import Session, context_budget, default_save_path
+from .ui import SYMBOLS, Palette
 
 
 @dataclass(frozen=True)
@@ -59,9 +62,13 @@ class Repl:
         profile: str | None = None,
         *,
         auto_start: bool = False,
+        palette: Palette | None = None,
+        verbose: bool = False,
     ) -> None:
         self.config = config
         self.auto_start = auto_start
+        self.palette = palette or Palette({}, enabled=False)
+        self.verbose = verbose
         self.prompt_dir = config.config_dir / "prompts"
         default_model = model or config.models[0]
         self.profile: ProfileSpec = config.resolve_profile(default_model, profile)
@@ -82,7 +89,7 @@ class Repl:
 
     def run(self) -> int:
         self._bootstrap()
-        print("[HINT] /help 查看命令，/quit 退出")
+        print(self.palette.hint("/help 查看全部命令，/quit 退出"))
         while True:
             try:
                 line = self._read_line(self._prompt_text())
@@ -100,7 +107,7 @@ class Repl:
                     break
             else:
                 self._chat(text)
-        print("[BYE] 已退出")
+        print(self.palette.meta("再见"))
         return 0
 
     @staticmethod
@@ -108,7 +115,8 @@ class Repl:
         return len(text) > 1 and text.startswith("/") and text[1] != " "
 
     def _prompt_text(self) -> str:
-        return f"vanitas[{self.model.id}:{self.profile.key}]> "
+        head = self.palette.accent(f"{self.model.id}@{self.profile.key}")
+        return f"{head} {SYMBOLS['prompt']} "
 
     def _read_line(self, prompt: str) -> str:
         interactive = sys.stdin.isatty()
@@ -132,7 +140,11 @@ class Repl:
             self._start_engine(self.model, self.profile)
             return
         if not sys.stdin.isatty():
-            print("[HINT] 非交互模式且没有就绪的服务端：先运行 vanitas serve <id>")
+            print(
+                self.palette.hint(
+                    "非交互模式且没有就绪的服务端：先运行 vanitas serve <id>"
+                )
+            )
             return
         chosen = self._prompt_model()
         if chosen is None:
@@ -144,18 +156,35 @@ class Repl:
             f"于端口 {port}？[Y/n] "
         ).strip().lower()
         if answer not in {"", "y", "yes", "是"}:
-            print("[HINT] 已跳过启动；可稍后用 vanitas serve 启动，或 /model 切换")
+            print(
+                self.palette.hint(
+                    "已跳过启动；可稍后用 vanitas serve 启动，或 /model 切换"
+                )
+            )
             return
         self._start_engine(chosen, profile)
 
     def _start_engine(self, model: ModelSpec, profile: ProfileSpec) -> bool:
         try:
-            record = launcher.start(self.config, model, profile)
+            record = launcher.start(
+                self.config,
+                model,
+                profile,
+                palette=self.palette,
+                verbose=self.verbose,
+            )
             elapsed = launcher.wait_ready(self.config, record)
-        except (GuardError, LaunchError) as exc:
-            print(f"[ERROR] {exc}", file=sys.stderr)
+        except GuardError as exc:
+            _stdout, stderr_lines = guard.format_for_cli(
+                guard.GuardResult(exc.code, [], list(exc.messages)), self.palette
+            )
+            for message in stderr_lines:
+                print(message, file=sys.stderr)
             return False
-        print(f"[SERVE] 就绪 {elapsed:.1f}s")
+        except LaunchError as exc:
+            print(self.palette.err(str(exc)), file=sys.stderr)
+            return False
+        print(self.palette.ok(f"已就绪 · {elapsed:.1f}s"))
         self.model = model
         self.profile = profile
         self.port = record.port
@@ -165,9 +194,12 @@ class Repl:
         return True
 
     def _prompt_model(self) -> ModelSpec | None:
-        print("可用模型：")
+        print(self.palette.meta("可用模型："))
         for index, item in enumerate(self.config.models, start=1):
-            print(f"  [{index}] {item.id:<10} {item.display}（端口 {self.config.effective_port(item)}）")
+            print(
+                f"  [{index}] {item.id:<10} {item.display}"
+                f"（端口 {self.config.effective_port(item)}）"
+            )
         try:
             raw = input("选择编号 [默认 1]：").strip()
         except EOFError:
@@ -177,10 +209,10 @@ class Repl:
         try:
             index = int(raw)
         except ValueError:
-            print(f"[WARN] 编号必须是整数，收到 {raw!r}")
+            print(self.palette.warn(f"编号必须是整数，收到 {raw!r}"))
             return None
         if not 1 <= index <= len(self.config.models):
-            print(f"[WARN] 编号超出 1–{len(self.config.models)}")
+            print(self.palette.warn(f"编号超出 1–{len(self.config.models)}"))
             return None
         return self.config.models[index - 1]
 
@@ -214,7 +246,11 @@ class Repl:
             self.profile = self.config.resolve_profile(model, record.profile)
             self.session.model_id = model.id
             self.session.profile = self.profile.key
-            print(f"[ENGINE] 已连接 {model.display} · {launcher.endpoint(self.config, port)} · 档位 {self.profile.key}")
+            print(
+                self.palette.ok(
+                    f"已连接 {model.display} · 档位 {self.profile.key}"
+                )
+            )
             return True
         for model in self.config.models:
             probed = self._probe(model)
@@ -227,7 +263,11 @@ class Repl:
             self.profile = self.config.resolve_profile(model)
             self.session.model_id = model.id
             self.session.profile = self.profile.key
-            print(f"[ENGINE] 已连接 {model.display} · {launcher.endpoint(self.config, port)} · 档位 {self.profile.key}")
+            print(
+                self.palette.ok(
+                    f"已连接 {model.display} · 档位 {self.profile.key}"
+                )
+            )
             return True
         return False
 
@@ -237,7 +277,11 @@ class Repl:
 
     def _chat(self, text: str) -> None:
         if self.client is None:
-            print("[HINT] 服务端未就绪：先运行 vanitas serve <id>，或用 /model 查看可用模型")
+            print(
+                self.palette.hint(
+                    "服务端未就绪：先运行 vanitas serve <id>，或用 /model 查看可用模型"
+                )
+            )
             return
         budget = context_budget(
             self.profile.ctx, self.config.settings.repl.max_context_tokens
@@ -247,12 +291,12 @@ class Repl:
                 text, self.prompt_dir, self.model.alias
             )
         except ConfigError as exc:
-            print(f"[ERROR] {exc}", file=sys.stderr)
+            print(self.palette.err(str(exc)), file=sys.stderr)
             return
         self.session.add_user(user_message)
         dropped = self.session.trim(budget)
         if dropped:
-            print(f"[CTX] 预算 {budget} tokens，已裁剪 {dropped} 轮最早对话")
+            print(self.palette.warn(f"上下文已满，丢弃最早 {dropped} 轮对话"))
 
         max_tokens = max(128, min(1024, self.profile.ctx // 8))
         renderer = StreamRenderer()
@@ -272,12 +316,12 @@ class Repl:
                     usage = event["usage"]
         except EngineError as exc:
             print()
-            print(f"[ERROR] {exc}", file=sys.stderr)
+            print(self.palette.err(str(exc)), file=sys.stderr)
             self.session.pop_last_user()
             return
         except KeyboardInterrupt:
             print()
-            print("[CTX] 本轮已中断，未写入历史")
+            print(self.palette.meta("本轮已中断，未写入历史"))
             self.session.pop_last_user()
             return
 
@@ -296,11 +340,13 @@ class Repl:
             pieces.append(f"首字 {meta['first_ms']:.0f} ms")
         if tokens and seconds > 0:
             pieces.append(f"{tokens / seconds:.1f} t/s")
-        print(f"[META] {' · '.join(pieces)}")
+        print(self.palette.meta(" · ".join(pieces)))
         if not answer.strip() and reasoning_chars:
             print(
-                "[HINT] 仅返回 reasoning_content，content 为空："
-                "检查模型的 chat_template_kwargs（enable_thinking）或提高 max_tokens",
+                self.palette.hint(
+                    "仅返回 reasoning_content，content 为空："
+                    "检查模型的 chat_template_kwargs（enable_thinking）或提高 max_tokens"
+                ),
                 file=sys.stderr,
             )
 
@@ -312,13 +358,13 @@ class Repl:
         name, _, rest = line[1:].partition(" ")
         command = COMMAND_MAP.get(name.lower())
         if command is None:
-            print(f"[HINT] 未知命令 /{name}；输入 /help 查看全部")
+            print(self.palette.hint(f"未知命令 /{name}，输入 /help 查看全部"))
             return True
         handler: Callable[[str], bool] = getattr(self, f"_cmd_{command.name}")
         return handler(rest.strip())
 
     def _cmd_help(self, rest: str) -> bool:
-        print("内置命令：")
+        print(self.palette.accent("内置命令："))
         for command in COMMANDS:
             head = f"/{command.name}" + (f" {command.arg_hint}" if command.arg_hint else "")
             print(f"  {head:<24}{command.description}")
@@ -332,26 +378,28 @@ class Repl:
                 marker = "*" if item.id == self.model.id else " "
                 record = records.get(item.id)
                 if record is not None and launcher.pid_running(record.pid):
-                    state = f"运行中 pid={record.pid} 档位 {record.profile}"
+                    state = "运行中"
                 elif record is not None:
                     state = "残留记录（进程已退出）"
                 else:
                     state = "未运行"
                 print(f" {marker} {item.id:<10} {item.display:<26} port {port:<5} {state}")
-            print("[HINT] 切换模型只切换连接，不会自动启停服务端")
+            print(self.palette.hint("切换模型只切换连接，不会自动启停服务端"))
             return True
         try:
             model = self.config.model(rest)
         except ConfigError as exc:
-            print(f"[ERROR] {exc}", file=sys.stderr)
+            print(self.palette.err(str(exc)), file=sys.stderr)
             return True
         if model.id == self.model.id:
-            print(f"[MODEL] 已经是当前模型 {model.id}")
+            print(self.palette.meta(f"已经是当前模型 {model.id}"))
             return True
         probed = self._probe(model)
         if probed is None:
             print(
-                f"[HINT] {model.display} 未就绪；先运行：vanitas serve {model.id} [--profile N]"
+                self.palette.hint(
+                    f"{model.display} 未就绪；先运行：vanitas serve {model.id} [--profile N]"
+                )
             )
             return True
         client, port = probed
@@ -364,31 +412,42 @@ class Repl:
         self.profile = self.config.resolve_profile(model, record.profile if record else None)
         self.session.model_id = model.id
         self.session.profile = self.profile.key
-        print(f"[MODEL] 已切换到 {model.display} · {launcher.endpoint(self.config, port)} · 档位 {self.profile.key}")
+        print(self.palette.ok(f"已切换到 {model.display} · 档位 {self.profile.key}"))
         return True
 
     def _cmd_profile(self, rest: str) -> bool:
         if not rest:
-            print(f"[PROFILE] 当前 {self.profile.key}：{self.profile.desc}")
+            print(
+                self.palette.meta(
+                    f"当前档位 {self.profile.key}：{self.profile.desc}"
+                )
+            )
             for key in self.model.profile_keys:
                 profile = self.model.profiles[key]
-                print(f"  [{key}] ctx {profile.ctx:<6} KV {profile.kv_k}/{profile.kv_v}  {profile.desc}")
-            print("[HINT] 修改档位只影响下次 serve")
+                print(
+                    f"  [{key}] ctx {profile.ctx:<6}"
+                    f" KV {profile.kv_k}/{profile.kv_v}  {profile.desc}"
+                )
+            print(self.palette.hint("修改档位只影响下次 serve"))
             return True
         try:
             profile = self.config.resolve_profile(self.model, rest)
         except ConfigError as exc:
-            print(f"[ERROR] {exc}", file=sys.stderr)
+            print(self.palette.err(str(exc)), file=sys.stderr)
             return True
         self.profile = profile
         self.session.profile = profile.key
-        print(f"[PROFILE] 已设为 {profile.key}（{profile.desc}）；下次 serve 生效")
+        print(self.palette.ok(f"档位已设为 {profile.key} · 下次启动生效"))
         return True
 
     def _cmd_system(self, rest: str) -> bool:
         if not rest:
             current = self.session.system.strip()
-            print(f"[SYSTEM] {current if current else '（空：使用模型默认行为）'}")
+            print(
+                self.palette.meta(
+                    f"当前系统提示：{current if current else '（空：使用模型默认行为）'}"
+                )
+            )
             return True
         candidate = Path(rest).expanduser()
         try:
@@ -399,31 +458,43 @@ class Repl:
             try:
                 text = candidate.read_text(encoding="utf-8")
             except OSError as exc:
-                print(f"[ERROR] 系统提示读取失败：{candidate}（{exc.strerror or exc}）", file=sys.stderr)
+                print(
+                    self.palette.err(
+                        f"系统提示读取失败：{candidate}（{exc.strerror or exc}）"
+                    ),
+                    file=sys.stderr,
+                )
                 return True
         else:
             text = rest
         self.session.system = text.strip()
-        print(f"[SYSTEM] 已设置 {len(self.session.system)} 字符")
+        print(self.palette.ok(f"已更新系统提示（{len(self.session.system)} 字符）"))
         return True
 
     def _cmd_task(self, rest: str) -> bool:
         names = prompts.task_names(self.prompt_dir)
         if not rest:
-            print(f"[TASK] 当前：{self.session.task or '（未应用）'}；可用：{'、'.join(names) or '无'}")
+            print(
+                self.palette.meta(
+                    f"当前任务：{self.session.task or '（未应用）'}"
+                    f"；可用：{'、'.join(names) or '无'}"
+                )
+            )
             return True
         try:
             prompts.load_task(self.prompt_dir, rest)
         except ConfigError as exc:
-            print(f"[ERROR] {exc}", file=sys.stderr)
+            print(self.palette.err(str(exc)), file=sys.stderr)
             return True
         self.session.task = rest
-        print(f"[TASK] 已应用 task_{rest}.md；每轮输入会填入 {{input}}")
+        print(
+            self.palette.ok(f"已应用 task_{rest}.md · 每轮输入填入 {{input}}")
+        )
         return True
 
     def _cmd_clear(self, rest: str) -> bool:
         self.session.clear_messages()
-        print("[CLEAR] 对话历史已清空（系统提示与任务模板保留）")
+        print(self.palette.ok("对话历史已清空（系统提示与任务模板保留）"))
         return True
 
     def _cmd_save(self, rest: str) -> bool:
@@ -431,19 +502,21 @@ class Repl:
         try:
             saved = self.session.save(target)
         except ConfigError as exc:
-            print(f"[ERROR] {exc}", file=sys.stderr)
+            print(self.palette.err(str(exc)), file=sys.stderr)
             return True
-        print(f"[SAVE] {saved}（{len(self.session.messages)} 条消息）")
+        print(
+            self.palette.ok(f"已保存到 {saved}（{len(self.session.messages)} 条消息）")
+        )
         return True
 
     def _cmd_load(self, rest: str) -> bool:
         if not rest:
-            print("[ERROR] 用法：/load <path>", file=sys.stderr)
+            print(self.palette.hint("用法：/load <path>"), file=sys.stderr)
             return True
         try:
             loaded = Session.load(rest)
         except ConfigError as exc:
-            print(f"[ERROR] {exc}", file=sys.stderr)
+            print(self.palette.err(str(exc)), file=sys.stderr)
             return True
         self.session = loaded
         if loaded.system == "":
@@ -452,7 +525,7 @@ class Repl:
             try:
                 model = self.config.model(loaded.model_id)
             except ConfigError as exc:
-                print(f"[WARN] {exc}", file=sys.stderr)
+                print(self.palette.warn(str(exc)), file=sys.stderr)
             else:
                 self.model = model
                 probed = self._probe(model)
@@ -464,64 +537,91 @@ class Repl:
             try:
                 self.profile = self.config.resolve_profile(self.model, loaded.profile)
             except ConfigError as exc:
-                print(f"[WARN] {exc}", file=sys.stderr)
-        print(f"[LOAD] 已载入 {len(self.session.messages)} 条消息（模型 {self.model.id}）")
+                print(self.palette.warn(str(exc)), file=sys.stderr)
+        print(
+            self.palette.ok(
+                f"已载入 {len(self.session.messages)} 条消息 · 模型 {self.model.id}"
+            )
+        )
         return True
 
     def _cmd_exec(self, rest: str) -> bool:
         if not rest:
-            print("[ERROR] 用法：/exec <命令>", file=sys.stderr)
+            print(self.palette.hint("用法：/exec <命令>"), file=sys.stderr)
             return True
         try:
             result = tools.run_exec(self.config, rest)
         except ToolDenied as exc:
-            print(f"[DENY] {exc}", file=sys.stderr)
+            print(self.palette.err(str(exc)), file=sys.stderr)
             return True
         if result.stdout:
             print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
         if result.stderr:
-            print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
-        print(f"[EXEC] 退出码 {result.exit_code}")
+            print(
+                result.stderr,
+                end="" if result.stderr.endswith("\n") else "\n",
+                file=sys.stderr,
+            )
+        print(self.palette.meta(f"退出码 {result.exit_code}"))
         return True
 
     def _cmd_stop(self, rest: str) -> bool:
         try:
             pids = launcher.stop_all(self.config)
         except LaunchError as exc:
-            print(f"[ERROR] {exc}", file=sys.stderr)
+            print(self.palette.err(str(exc)), file=sys.stderr)
             return True
         self.client = None
         if pids:
-            print(f"[STOP] 已结束 PID {', '.join(str(pid) for pid in pids)}")
+            print(self.palette.ok(f"已停止 {len(pids)} 个服务"))
+            if self.verbose:
+                print(
+                    self.palette.meta("PID " + "、".join(str(pid) for pid in pids))
+                )
         else:
-            print("[STOP] 没有运行中的 llama-server")
+            print(self.palette.meta("没有运行中的服务"))
         return True
 
     def _cmd_status(self, rest: str) -> bool:
-        print(f"[STATUS] 模型 {self.model.id} · {self.model.display}")
+        print(self.palette.meta(f"模型 {self.model.id} · {self.model.display}"))
         print(
-            f"[STATUS] 档位 {self.profile.key}（{self.profile.desc}）"
-            f" · ctx {self.profile.ctx} · KV {self.profile.kv_k}/{self.profile.kv_v}"
+            self.palette.meta(
+                f"档位 {self.profile.key} · {self.profile.desc}"
+                f" · ctx {self.profile.ctx} · KV {self.profile.kv_k}/{self.profile.kv_v}"
+            )
         )
         ready = bool(self.client and self.client.health(timeout=2.0))
-        print(
-            f"[STATUS] 端口 {self.port} · {launcher.endpoint(self.config, self.port)}"
-            f" · {'就绪' if ready else '未就绪'}"
-        )
+        state = self.palette.ok("就绪") if ready else self.palette.err("未就绪")
+        head = self.palette.meta(f"端口 {self.port}")
+        print(f"{head}  {state}")
         records = launcher.read_records()
         if records:
             for record in records:
                 alive = launcher.pid_running(record.pid)
-                print(
-                    f"[STATUS] 记录 {record.model_id} pid={record.pid} port={record.port}"
-                    f" 档位 {record.profile} {'存活' if alive else '已退出'}"
-                )
+                if self.verbose:
+                    detail = (
+                        f"{record.model_id} PID {record.pid} 端口 {record.port}"
+                        f" 档位 {record.profile} {'存活' if alive else '已退出'}"
+                    )
+                else:
+                    detail = (
+                        f"{record.model_id} "
+                        f"{'运行中' if alive else '残留记录（进程已退出）'}"
+                    )
+                print(self.palette.meta(detail))
         else:
-            print("[STATUS] 无运行记录（serve 会在 ~/.vanitas_run/ 下写入）")
+            print(self.palette.meta("无运行记录（serve 会在 ~/.vanitas_run/ 下写入）"))
         gpu = guard.gpu_status()
-        print(f"[STATUS] {gpu}" if gpu else "[STATUS] GPU 信息不可用（nvidia-smi 未找到）")
         print(
-            f"[STATUS] 会话 {len(self.session.messages)} 条消息 · 约 {self.session.message_tokens()} tokens"
+            self.palette.meta(gpu)
+            if gpu
+            else self.palette.meta("GPU 信息不可用（nvidia-smi 未找到）")
+        )
+        print(
+            self.palette.meta(
+                f"会话 {len(self.session.messages)} 条消息"
+                f" · 约 {self.session.message_tokens()} tokens"
+            )
         )
         return True
 
@@ -542,8 +642,10 @@ class Repl:
             from prompt_toolkit.history import FileHistory
         except ImportError:
             print(
-                "[WARN] 未安装 prompt_toolkit，已降级为 input()："
-                "pip install prompt_toolkit 可获得历史与行编辑",
+                self.palette.warn(
+                    "未安装 prompt_toolkit，已降级为 input()："
+                    "pip install prompt_toolkit 可获得历史与行编辑"
+                ),
                 file=sys.stderr,
             )
             return None
@@ -555,10 +657,13 @@ class Repl:
             if path.exists():
                 os.chmod(path, 0o600)
         except OSError as exc:
-            print(f"[WARN] 输入历史不可用：{exc}", file=sys.stderr)
+            print(self.palette.warn(f"输入历史不可用：{exc}"), file=sys.stderr)
         try:
             self._prompt_session = PromptSession(history=history)
         except (OSError, ValueError) as exc:
-            print(f"[WARN] prompt_toolkit 初始化失败，降级为 input()：{exc}", file=sys.stderr)
+            print(
+                self.palette.warn(f"prompt_toolkit 初始化失败，降级为 input()：{exc}"),
+                file=sys.stderr,
+            )
             self._prompt_session = None
         return self._prompt_session

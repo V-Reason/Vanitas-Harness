@@ -19,6 +19,7 @@ from . import guard
 from .config import AppConfig, ModelSpec, ProfileSpec
 from .engine import EngineClient
 from .errors import GuardError, LaunchError
+from .ui import Palette
 
 SERVER_EXE = "llama-server.exe"
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -106,7 +107,7 @@ def clear_record(model_id: str) -> None:
     except FileNotFoundError:
         pass
     except OSError as exc:
-        print(f"[WARN] 无法删除运行记录 {record_path(model_id)}：{exc}", file=sys.stderr)
+        print(f"⚠ 无法删除运行记录 {record_path(model_id)}：{exc}", file=sys.stderr)
 
 
 def clear_records() -> None:
@@ -166,7 +167,9 @@ def _log_path(model: ModelSpec) -> Path:
     return log_dir() / f"{model.id}-{stamp}.log"
 
 
-def _guard_or_raise(config: AppConfig, model: ModelSpec, port: int) -> None:
+def _guard_or_raise(
+    config: AppConfig, model: ModelSpec, port: int, palette: Palette | None
+) -> None:
     result = guard.evaluate(
         port,
         model.path,
@@ -175,9 +178,10 @@ def _guard_or_raise(config: AppConfig, model: ModelSpec, port: int) -> None:
         allow_kill=True,
         kill_wait_sec=config.settings.launcher.kill_wait_sec,
     )
-    guard.emit(result)
     if result.code != 0:
+        # 失败行交给调用方统一上色打印，避免「守卫打一遍、CLI 再打一遍」
         raise GuardError(result.code, result.stderr or result.stdout)
+    guard.emit(result, palette=palette)
 
 
 def _spawn(
@@ -228,10 +232,13 @@ def start(
     profile: ProfileSpec,
     *,
     background: bool = True,
+    palette: Palette | None = None,
+    verbose: bool = False,
 ) -> RunRecord:
+    paint = palette or Palette({}, enabled=False)
     _ensure_dirs()
     port = config.effective_port(model)
-    _guard_or_raise(config, model, port)
+    _guard_or_raise(config, model, port, palette)
     log_path = _log_path(model)
     process = _spawn(config, model, profile, port, log_path)
     record = RunRecord(
@@ -244,11 +251,15 @@ def start(
         log_path=str(log_path),
     )
     _write_record(record)
-    print(
-        f"[LAUNCH] {model.display} · 档位 {profile.key}（{profile.desc}）"
-        f" · ctx {profile.ctx} · KV {profile.kv_k}/{profile.kv_v}"
-    )
-    print(f"[LAUNCH] 地址 {endpoint(config, port)}  日志 {log_path}")
+    print(paint.meta(f"{model.display} · 档位 {profile.key}"))
+    if verbose:
+        print(
+            paint.meta(
+                f"ctx {profile.ctx} · KV {profile.kv_k}/{profile.kv_v}"
+                f" · {endpoint(config, port)} · PID {record.pid}"
+            )
+        )
+        print(paint.meta(f"日志 {log_path}"))
     return record
 
 
@@ -287,13 +298,22 @@ def wait_ready(config: AppConfig, record: RunRecord) -> float:
     )
 
 
-def run_foreground(config: AppConfig, model: ModelSpec, profile: ProfileSpec) -> int:
+def run_foreground(
+    config: AppConfig,
+    model: ModelSpec,
+    profile: ProfileSpec,
+    *,
+    palette: Palette | None = None,
+    verbose: bool = False,
+) -> int:
+    paint = palette or Palette({}, enabled=False)
     port = config.effective_port(model)
-    _guard_or_raise(config, model, port)
+    _guard_or_raise(config, model, port, palette)
     args = build_args(model, profile, port, config.settings.host, config.base_dir)
     bin_dir = Path(config.base_dir) / "bin"
-    print(f"[LAUNCH] {model.display} · 档位 {profile.key}（{profile.desc}）")
-    print(f"[LAUNCH] 地址 {endpoint(config, port)}  参数：{' '.join(args[1:])}")
+    print(paint.meta(f"{model.display} · 档位 {profile.key}（前台）"))
+    if verbose:
+        print(paint.meta(f"地址 {endpoint(config, port)}  参数：{' '.join(args[1:])}"))
     try:
         process = subprocess.Popen(args, cwd=str(bin_dir))
     except OSError as exc:
@@ -310,7 +330,7 @@ def run_foreground(config: AppConfig, model: ModelSpec, profile: ProfileSpec) ->
             process.kill()
             code = process.wait()
         raise
-    print(f"[EXIT] llama-server 已退出，退出码 {code}")
+    print(paint.meta(f"llama-server 已退出，退出码 {code}"))
     return code
 
 

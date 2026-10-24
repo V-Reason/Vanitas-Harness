@@ -14,6 +14,7 @@ from typing import Callable
 
 from . import prompts
 from .errors import ConfigError, EngineError, VanitasError
+from .ui import Palette
 
 ChatFn = Callable[[str, str, int], str]
 
@@ -48,7 +49,9 @@ def run_batch(
     system_default: str,
     default_max_tokens: int = 512,
     echo: Callable[[str], None] = print,
+    palette: Palette | None = None,
 ) -> BatchResult:
+    paint = palette or Palette({}, enabled=False)
     tasks = Path(tasks)
     try:
         raw = tasks.read_text(encoding="utf-8")
@@ -73,13 +76,13 @@ def run_batch(
                     error=f"第 {line_number} 行不是合法 JSON：{exc.msg}",
                 )
             )
-            echo(f"[BATCH] {position}/{total} line{line_number} 失败：JSON 解析")
+            echo(paint.err(f"{position}/{total} line{line_number} 失败：JSON 解析"))
             continue
         if not isinstance(record, dict):
             result.items.append(
                 BatchItem(id=f"line{line_number}", ok=False, error="行内容必须是 JSON 对象")
             )
-            echo(f"[BATCH] {position}/{total} line{line_number} 失败：不是对象")
+            echo(paint.err(f"{position}/{total} line{line_number} 失败：不是对象"))
             continue
         item_id = str(record.get("id") or f"line{line_number}")
         prompt = record.get("prompt")
@@ -87,7 +90,7 @@ def run_batch(
             result.items.append(
                 BatchItem(id=item_id, ok=False, error="缺少非空字符串字段 prompt")
             )
-            echo(f"[BATCH] {position}/{total} {item_id} 失败：缺少 prompt")
+            echo(paint.err(f"{position}/{total} {item_id} 失败：缺少 prompt"))
             continue
         system = record.get("system")
         system_text = system.strip() if isinstance(system, str) and system.strip() else system_default
@@ -98,23 +101,23 @@ def run_batch(
                 prompt = prompts.render(template, {"input": prompt})
             except ConfigError as exc:
                 result.items.append(BatchItem(id=item_id, ok=False, error=str(exc)))
-                echo(f"[BATCH] {position}/{total} {item_id} 失败：模板")
+                echo(paint.err(f"{position}/{total} {item_id} 失败：模板"))
                 continue
         max_tokens = record.get("max_tokens", default_max_tokens)
         if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or not 1 <= max_tokens <= 8192:
             result.items.append(
                 BatchItem(id=item_id, ok=False, error=f"max_tokens 必须是 1–8192 的整数，实际 {max_tokens!r}")
             )
-            echo(f"[BATCH] {position}/{total} {item_id} 失败：max_tokens")
+            echo(paint.err(f"{position}/{total} {item_id} 失败：max_tokens"))
             continue
         try:
             output = chat(system_text, prompt, max_tokens)
         except (EngineError, ConfigError) as exc:
             result.items.append(BatchItem(id=item_id, ok=False, error=str(exc)))
-            echo(f"[BATCH] {position}/{total} {item_id} 失败：{exc}")
+            echo(paint.err(f"{position}/{total} {item_id} 失败：{exc}"))
             continue
         result.items.append(BatchItem(id=item_id, ok=True, output=output))
-        echo(f"[BATCH] {position}/{total} {item_id} 完成")
+        echo(paint.ok(f"{position}/{total} {item_id} 完成"))
 
     try:
         result.output_path.parent.mkdir(parents=True, exist_ok=True)

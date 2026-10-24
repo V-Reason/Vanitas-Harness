@@ -79,13 +79,14 @@ class CliSmokeTests(unittest.TestCase):
         with clean_env():
             code, out, _err = run(["status"])
         self.assertEqual(code, 0)
-        self.assertIn("[STATUS]", out)
+        self.assertIn("qwen7b", out)
+        self.assertIn("未运行", out)
 
     def test_unknown_subcommand_exit_4(self) -> None:
         with clean_env():
             code, _out, err = run(["nope"])
         self.assertEqual(code, 4)
-        self.assertIn("[ERROR]", err)
+        self.assertIn("✗", err)
 
     def test_unknown_model_exit_2(self) -> None:
         with clean_env():
@@ -99,16 +100,17 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("配置目录不存在", err)
 
-    def test_guard_failure_maps_to_3_with_prefix(self) -> None:
+    def test_guard_failure_maps_to_3(self) -> None:
         with clean_env():
             with mock.patch.object(
                 cli.launcher,
                 "start",
-                side_effect=GuardError(1, ["[GUARD-FATAL] 端口 4060 被 PID 1 (x.exe) 占用。"]),
+                side_effect=GuardError(1, ["✗ 端口 4060 被 PID 1 (x.exe) 占用"]),
             ):
                 code, _out, err = run(["serve", "qwen7b"])
         self.assertEqual(code, 3)
-        self.assertTrue(err.splitlines()[0].startswith("[GUARD-CODE=1] [GUARD-FATAL]"), err)
+        self.assertIn("✗ 端口 4060 被 PID 1", err)
+        self.assertNotIn("GUARD-CODE", err)
 
     def test_translate_with_fake_engine(self) -> None:
         source = self.dir / "sample.srt"
@@ -127,7 +129,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         target = out_dir / "sample.zh.srt"
         self.assertTrue(target.is_file())
-        self.assertIn("segments", out.lower() + err.lower() + "segments")
+        self.assertIn("2 段", out)
 
     def test_translate_missing_file_exit_5(self) -> None:
         with clean_env():
@@ -136,13 +138,22 @@ class CliSmokeTests(unittest.TestCase):
             ):
                 code, _out, err = run(["translate", str(self.dir / "nope.srt")])
         self.assertEqual(code, 5)
-        self.assertIn("TRANSLATE-FAIL", err)
+        self.assertIn("✗", err)
+        self.assertNotIn("TRANSLATE-FAIL", err)
 
     def test_translate_rejects_bad_jobs(self) -> None:
         with clean_env():
             code, _out, err = run(["translate", "a.srt", "--jobs", "0"])
         self.assertEqual(code, 4)
         self.assertIn("--jobs", err)
+
+    def test_palette_disabled_in_pipe(self) -> None:
+        # redirect_stdout 之后 sys.stdout 不是 TTY，auto 必须降级为纯文本
+        with clean_env():
+            code, out, err = run(["models"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("\x1b[", out)
+        self.assertNotIn("\x1b[", err)
 
 
 if __name__ == "__main__":
