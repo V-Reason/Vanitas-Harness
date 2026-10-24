@@ -50,18 +50,30 @@ class ToolsTests(unittest.TestCase):
         self.assertIn("取消", str(ctx.exception))
         runner.assert_not_called()
 
-    def test_metacharacters_are_literal_arguments(self) -> None:
-        config = make_config(whitelist=("echo",))
+    def test_metacharacters_are_literal_arguments_for_executables(self) -> None:
+        config = make_config(whitelist=("python",))
         fake = mock.Mock(
             return_value=subprocess.CompletedProcess([], 0, stdout=b"ok\n", stderr=b"")
         )
         with mock.patch("vanitas.tools.subprocess.run", fake):
-            result = tools.run_exec(config, "echo a & dir", confirm=lambda _: "y")
+            result = tools.run_exec(config, "python a & dir", confirm=lambda _: "y")
         argv = fake.call_args.args[0]
-        self.assertEqual(argv, ["echo", "a", "&", "dir"])
+        self.assertEqual(argv, ["python", "a", "&", "dir"])
         kwargs = fake.call_args.kwargs
         self.assertFalse(kwargs["shell"])
         self.assertEqual(result.exit_code, 0)
+
+    def test_builtin_command_goes_through_cmd(self) -> None:
+        config = make_config(whitelist=("echo",), confirm=True)
+        result = tools.run_exec(config, "echo hi", confirm=lambda _: "y")
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.stdout.strip(), "hi")
+
+    def test_builtin_rejects_chaining(self) -> None:
+        config = make_config(whitelist=("echo",), confirm=True)
+        with self.assertRaises(ToolDenied) as ctx:
+            tools.run_exec(config, "echo a & dir", confirm=lambda _: "y")
+        self.assertIn("内置命令", str(ctx.exception))
 
     def test_quoted_argument_kept_whole(self) -> None:
         self.assertEqual(tools.split_command('type "a b"'), ["type", "a b"])

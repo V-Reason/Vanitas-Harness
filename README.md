@@ -137,5 +137,6 @@ python tests\multi_model_benchmark.py --port 4062 --suite translation --runs 3
 
 ## 版本
 
+`v0.3.1` — `/exec` 支持 cmd 内置命令（echo/dir/type 等），同时拒绝 `& | < > ^ %` 串联。
 `v0.3.0` — CLI 化重构：配置驱动、Python 守卫、REPL 与 12 个内置命令、批量翻译/批处理，端口迁到 4060–4063。
 `v0.2.0` — 三模型真实权重实测；7B 分片自动续载与守卫全分片校验。
