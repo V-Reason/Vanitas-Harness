@@ -1,8 +1,8 @@
 """提示词模板加载与变量替换。
 
-模板只认五个占位符：{input} {context} {context_history} {date} {model}。
+模板只认六个占位符：{input} {context} {context_history} {date} {model} {cwd}。
 未知占位符直接报 ConfigError——模板写错比模型答错更难排查，必须在启动前拦住。
-{date} 默认是秒级本地时间，供 chat/agent 感知当前现实时间。
+{date} 默认是秒级本地时间，{cwd} 由会话层传入，供 Agent 感知工作目录。
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .errors import ConfigError
 
-ALLOWED = ("input", "context", "context_history", "date", "model")
+ALLOWED = ("input", "context", "context_history", "date", "model", "cwd")
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 VAR_RE = re.compile(r"\{([a-z][a-z0-9_]*)\}")
 DEFAULT_SYSTEM = "system_default"
@@ -40,7 +40,7 @@ def load_template(prompt_dir: Path, name: str) -> str:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise ConfigError(f"提示词模板读取失败：{path}（{exc.strerror or exc}）") from exc
+        raise ConfigError(f"提示词模板读取失败：{path}；{exc.strerror or exc}") from exc
     if not text.strip():
         raise ConfigError(f"提示词模板为空：{path}")
 
@@ -68,6 +68,7 @@ def render(template: str, values: dict | None = None) -> str:
         "context_history": "",
         "date": now_stamp(),
         "model": "",
+        "cwd": "",
     }
     for key, value in (values or {}).items():
         if key not in merged:

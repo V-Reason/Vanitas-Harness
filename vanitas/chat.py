@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -32,6 +33,16 @@ class TurnResult:
     interrupted: bool = False
     reasoning_chars: int = 0
     dropped_turns: int = 0
+
+
+class _DiscardStream:
+    """Agent 闭环不把原始 JSON 写屏；仍需一个可写流让 StreamRenderer 正常工作。"""
+
+    def write(self, text: str) -> int:
+        return len(text)
+
+    def flush(self) -> None:
+        return None
 
 
 class ChatRunner:
@@ -61,18 +72,59 @@ class ChatRunner:
         text: str,
         *,
         on_dropped: Callable[[int], None] | None = None,
+        display: bool = True,
     ) -> TurnResult:
         if self.client is None:
-            raise EngineError("服务端未就绪：先运行 vanitas serve <id>")
+            raise EngineError("服务端没有运行：先运行 vanitas serve <id>")
         budget = context_budget(
             self.profile.ctx,
             self.config.settings.repl.max_context_tokens,
             self.config.settings.repl.context_reserve_tokens,
         )
         user_message = self.session.build_user_message(
-            text, self.prompt_dir, self.model.alias
+            text,
+            self.prompt_dir,
+            self.model.alias,
+            cwd=os.getcwd(),
         )
         self.session.add_user(user_message)
+        return self._run_turn(
+            budget,
+            on_dropped=on_dropped,
+            display=display,
+        )
+
+    def run_followup(
+        self,
+        feedback: str,
+        *,
+        on_dropped: Callable[[int], None] | None = None,
+        display: bool = True,
+    ) -> TurnResult:
+        """把系统反馈直接作为 user 消息追加，不重复套任务模板。"""
+        if self.client is None:
+            raise EngineError("服务端没有运行：先运行 vanitas serve <id>")
+        budget = context_budget(
+            self.profile.ctx,
+            self.config.settings.repl.max_context_tokens,
+            self.config.settings.repl.context_reserve_tokens,
+        )
+        self.session.add_user(feedback)
+        return self._run_turn(
+            budget,
+            on_dropped=on_dropped,
+            display=display,
+        )
+
+    def _run_turn(
+        self,
+        budget: int,
+        *,
+        on_dropped: Callable[[int], None] | None,
+        display: bool,
+    ) -> TurnResult:
+        if self.client is None:
+            raise EngineError("服务端没有运行：先运行 vanitas serve <id>")
         dropped = self.session.trim(budget)
         if dropped and on_dropped is not None:
             on_dropped(dropped)
@@ -83,7 +135,7 @@ class ChatRunner:
             self.config.settings.repl.context_reserve_tokens,
             self.config.settings.repl.min_output_tokens,
         )
-        renderer = StreamRenderer()
+        renderer = StreamRenderer(stream=None if display else _DiscardStream())
         usage: dict | None = None
         done: dict | None = None
         reasoning_chars = 0

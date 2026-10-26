@@ -1,6 +1,6 @@
 # Vanitas-Harness
 
-单机本地推理 CLI：为 RTX 4060 Laptop（8 GB）准备的 llama.cpp 启动器、单实例守卫、交互式 REPL、批量翻译与批处理。模型、端口、上下文与 KV 类型全部由 `config\` 驱动。
+单机本地推理 CLI：为 RTX 4060 Laptop（8 GB）准备的 llama.cpp 启动器、单实例守卫、交互式 REPL、受控 Agent 闭环、批量翻译与批处理。模型、端口、上下文与 KV 类型全部由 `config\` 驱动。
 
 - 通用主力：Qwen2.5-7B-Instruct Q6_K（4060，2 分片，只传首片）
 - 轻量高质：MiniCPM5-2B **Q8_0**（4061）
@@ -34,7 +34,7 @@ vanitas.bat              :: 进入 REPL，无服务端时引导启动模型
 vanitas.bat models       :: 看模型/端口/档位/别名/路径
 vanitas.bat status       :: 看进程/端口/显存
 vanitas.bat serve qwen7b :: 后台启动并等待 /health
-vanitas.bat agent        :: Agent 规划模式（只输出 JSON，不自动执行）
+vanitas.bat agent        :: Agent 闭环；动作逐次确认，最多 5 步
 vanitas.bat translate a.srt :: 翻译并显示 5 段实况看板 + 终态统计
 vanitas.bat stop         :: 停止所有 llama-server
 ```
@@ -59,7 +59,7 @@ Vanitas-Harness\
 ├── vanitas\                    # CLI 实现（标准库 + prompt_toolkit）
 ├── tests\
 │   ├── multi_model_benchmark.py
-│   ├── test_*.py               # 179 个单元测试
+│   ├── test_*.py               # 202 个单元测试
 │   └── reports\                # 评测与冒烟产物（不入库）
 └── docs\                       # 总设计方案 / 项目现状 / 使用手册 / 范式笔记
 ```
@@ -73,6 +73,7 @@ Vanitas-Harness\
 - **端口**：4060–4063；`VANITAS_PORT` / `VANITAS_PROFILE` / `VANITAS_CONFIG_DIR` 可临时覆盖。
 - **退出码**：`0` 成功 / `1` 中断 / `2` 配置错误 / `3` 守卫失败 / `4` 参数错误 / `5` 引擎或网络失败。
 - **依赖红线**：标准库 + `prompt_toolkit`；`bin\`、`models\` 只读；禁止 `git clean -fdx`。
+- **Agent 沙盒**：`vanitas agent` 以当前工作目录为根；每步展示动作并 `[y/N]`，越界路径直接拒绝，单次输入最多 5 步。`/exec` 仍是手动逐次确认。
 - **行尾**：`*.bat` 为 UTF-8 无 BOM + CRLF，其余文本 LF。
 
 ## 验证
@@ -88,7 +89,7 @@ python -m vanitas stop
 
 ## 版本
 
-`v0.4.1` — 界面现代化 + 后续重构：符号化输出、`ui` 主题、Tab 补全、`/model` 自动切换、Stream 遥测、`vanitas agent` 规划模式、翻译 5 段看板/滑动上下文/截断重译；144 个单测。
+`v0.4.1` — 界面现代化 + 后续重构：符号化输出、`ui` 主题、Tab 补全、`/model` 自动切换、Stream 遥测、受控 Agent 闭环与 CWD 强沙盒、翻译 5 段看板/滑动上下文/截断重译；202 个单测。
 `v0.4.0` — 入口迁到根目录 `vanitas.bat`；文档重组为总设计方案 / 项目现状 / 用户使用手册 / 范式笔记 + `AGENTS.md`。
 `v0.3.1` — `/exec` 支持 cmd 内置命令，并拒绝 `& | < > ^ %` 串联。
 `v0.3.0` — CLI 化重构：配置驱动、Python 守卫、REPL、批量翻译/批处理，端口迁到 4060–4063。

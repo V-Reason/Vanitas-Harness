@@ -95,8 +95,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.settings.translate.output_ratio, 2.5)
         self.assertEqual(config.settings.translate.prompt_safety_tokens, 64)
         self.assertEqual(config.settings.translate.monitor_lines, 5)
-        self.assertFalse(config.settings.tools.exec_enabled)
+        self.assertTrue(config.settings.tools.exec_enabled)
         self.assertTrue(config.settings.tools.exec_require_confirm)
+        self.assertIn("ren", config.settings.tools.exec_whitelist)
 
     def test_new_budget_fields_are_optional(self) -> None:
         del self.settings["repl"]["context_reserve_tokens"]

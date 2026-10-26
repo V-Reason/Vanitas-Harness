@@ -74,23 +74,23 @@ def _add_verbose(parser: argparse.ArgumentParser) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = _Parser(prog="vanitas", description="Vanitas-Harness 本地推理 CLI（llama.cpp 后端）")
+    parser = _Parser(prog="vanitas", description="Vanitas-Harness 本地推理 CLI · llama.cpp 后端")
     parser.add_argument("--version", action="version", version=f"vanitas {__version__}")
-    parser.add_argument("--config-dir", default=None, help="覆盖 config 目录（默认 <仓库>/config）")
+    parser.add_argument("--config-dir", default=None, help="覆盖 config 目录，默认 <仓库>/config")
     parser.add_argument("-v", "--verbose", action="store_true", help=VERBOSE_HELP)
     sub = parser.add_subparsers(dest="command")
 
-    chat = sub.add_parser("chat", help="进入 REPL（必要时自动启动服务端）")
-    chat.add_argument("--model", default=None, help="模型 id（见 vanitas models）")
+    chat = sub.add_parser("chat", help="进入 REPL，必要时自动启动服务端")
+    chat.add_argument("--model", default=None, help="模型 id，见 vanitas models")
     chat.add_argument("--profile", default=None, help="档位编号")
     chat.add_argument("--system", default=None, help="系统提示文件路径")
-    chat.add_argument("--task", default=None, help="任务模板名（task_<name>.md）")
+    chat.add_argument("--task", default=None, help="任务模板名，task_<name>.md")
     _add_verbose(chat)
 
     agent = sub.add_parser(
-        "agent", help="进入 Agent 规划模式（仅输出 JSON，不自动执行）"
+        "agent", help="进入 Agent 闭环模式，动作需逐次确认"
     )
-    agent.add_argument("--model", default=None, help="模型 id（见 vanitas models）")
+    agent.add_argument("--model", default=None, help="模型 id，见 vanitas models")
     agent.add_argument("--profile", default=None, help="档位编号")
     agent.add_argument("--system", default=None, help="系统提示文件路径")
     _add_verbose(agent)
@@ -100,7 +100,7 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--profile", default=None, help="档位编号")
     mode = serve.add_mutually_exclusive_group()
     mode.add_argument("--foreground", action="store_true", help="前台运行，阻塞到进程退出")
-    mode.add_argument("--bg", action="store_true", help="后台运行（默认）")
+    mode.add_argument("--bg", action="store_true", help="后台运行，默认")
     _add_verbose(serve)
 
     stop = sub.add_parser("stop", help="停止所有 llama-server")
@@ -112,14 +112,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     translate_cmd = sub.add_parser("translate", help="批量翻译 txt/md/srt")
     translate_cmd.add_argument("inputs", nargs="+", help="待翻译文件")
-    translate_cmd.add_argument("--model", default=None, help="模型 id（默认 role=translate）")
+    translate_cmd.add_argument("--model", default=None, help="模型 id，默认 role=translate")
     translate_cmd.add_argument("--profile", default=None, help="档位编号")
-    translate_cmd.add_argument("--out-dir", default=None, help="输出目录（默认与原文件同目录）")
+    translate_cmd.add_argument("--out-dir", default=None, help="输出目录，默认与原文件同目录")
     translate_cmd.add_argument("--jobs", type=int, default=1, help="并发数；引擎为 -np 1，实际串行")
 
     batch_cmd = sub.add_parser("batch", help="按 JSONL 批量执行任务")
     batch_cmd.add_argument("tasks", help="tasks.jsonl 路径")
-    batch_cmd.add_argument("--model", default=None, help="模型 id（默认 role=general）")
+    batch_cmd.add_argument("--model", default=None, help="模型 id，默认 role=general")
     batch_cmd.add_argument("--profile", default=None, help="档位编号")
 
     return parser
@@ -174,13 +174,13 @@ def _cmd_status(config: AppConfig, args: argparse.Namespace, palette: Palette) -
         healthy = client.health(timeout=0.6)
         record = records.get(model.id)
         if record is not None and launcher.pid_running(record.pid):
-            state = palette.success(f"运行中 · 档位 {record.profile}")
+            state = palette.ok("运行")
         elif record is not None:
-            state = palette.warning("残留记录")
+            state = palette.warn("残留")
         elif healthy:
-            state = palette.success("运行中")
+            state = palette.ok("运行")
         else:
-            state = palette.muted("未运行")
+            state = palette.err("停止")
         print(f"{palette.meta(f'{model.id:<10} port {port:<5}')}  {state}")
         if verbose and record is not None:
             print(
@@ -192,7 +192,7 @@ def _cmd_status(config: AppConfig, args: argparse.Namespace, palette: Palette) -
     print(
         palette.meta(gpu)
         if gpu
-        else palette.meta("GPU 信息不可用（nvidia-smi 未找到）")
+        else palette.meta("GPU 信息不可用，nvidia-smi 未找到")
     )
     return 0
 
@@ -205,7 +205,7 @@ def _cmd_stop(config: AppConfig, args: argparse.Namespace, palette: Palette) -> 
         if verbose:
             print(palette.meta("PID " + "、".join(str(pid) for pid in pids)))
     else:
-        print(palette.meta("没有运行中的服务"))
+        print(palette.meta("没有服务在运行"))
     return 0
 
 
@@ -318,7 +318,7 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
         monitor.finish()
     if failures:
         print(
-            palette.warn(f"完成，但 {failures} 处失败（失败段保留原文）"),
+            palette.warn(f"完成，{failures} 处失败，失败段保留原文"),
             file=sys.stderr,
         )
         return 5

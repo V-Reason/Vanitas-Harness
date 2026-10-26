@@ -232,7 +232,7 @@ class TranslationEngineTests(unittest.TestCase):
         engine.translate("delta")
 
         first_prompt = client.calls[0]["messages"][-1]["content"]
-        self.assertIn("（无前文，故事开端）", first_prompt)
+        self.assertIn("无前文，故事开端", first_prompt)
         second_prompt = client.calls[1]["messages"][-1]["content"]
         self.assertIn("alpha", second_prompt)
         third_prompt = client.calls[2]["messages"][-1]["content"]

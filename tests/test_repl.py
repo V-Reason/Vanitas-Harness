@@ -205,7 +205,7 @@ class ReplSwitchTests(unittest.TestCase):
         _value, out, _err = quiet_run(lambda: self.repl._cmd_profile("2"))
         self.assertEqual(self.repl.profile.key, "1")
         self.assertEqual(self.repl.pending_profile.key, "2")
-        self.assertIn("下次启动/切换生效", out)
+        self.assertIn("已暂存，重启生效", out)
 
     def test_configure_system_and_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -263,12 +263,12 @@ class ReplMetaTests(unittest.TestCase):
         repl = Repl(self.config, palette=palette)
         with mock.patch.object(repl_mod.launcher, "read_records", return_value=[]):
             _value, out, _err = quiet_run(lambda: repl._cmd_model(""))
-        self.assertIn("\x1b[90m未运行\x1b[0m", out)
+        self.assertIn("\x1b[31m✗ 停止\x1b[0m", out)
         self.assertIn("\x1b[1m\x1b[35m", out)
         self.assertIn("\x1b[36mport", out)
         self.assertNotIn("✓ 未运行", out)
 
-    def test_status_uses_semantic_color_without_checkmark(self) -> None:
+    def test_status_uses_semantic_symbols(self) -> None:
         palette = Palette(DEFAULT_THEME, enabled=True)
         repl = Repl(self.config, palette=palette)
         with (
@@ -276,7 +276,7 @@ class ReplMetaTests(unittest.TestCase):
             mock.patch.object(repl_mod.guard, "gpu_status", return_value=None),
         ):
             _value, out, _err = quiet_run(lambda: repl._cmd_status(""))
-        self.assertIn("\x1b[31m未就绪\x1b[0m", out)
+        self.assertIn("\x1b[31m✗ 停止\x1b[0m", out)
         self.assertNotIn("✓ 就绪", out)
 
     def test_exec_denial_is_printed_without_exit_code(self) -> None:
@@ -289,6 +289,16 @@ class ReplMetaTests(unittest.TestCase):
         self.assertIn("安全限制", err)
         self.assertNotIn("退出码", out)
         self.assertNotIn("退出码", err)
+
+    def test_exec_cancel_is_meta_not_error(self) -> None:
+        with mock.patch.object(
+            repl_mod.tools,
+            "run_exec",
+            side_effect=ToolDenied(repl_mod.tools.CANCEL_MESSAGE),
+        ):
+            _value, out, err = quiet_run(lambda: self.repl._cmd_exec("echo hi"))
+        self.assertIn("· 已取消", out)
+        self.assertEqual(err, "")
 
 
 if __name__ == "__main__":

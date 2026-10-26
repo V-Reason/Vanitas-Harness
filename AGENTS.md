@@ -80,7 +80,7 @@
 | 第三方依赖 | 除 `prompt_toolkit` 外禁止 `psutil/requests/httpx/rich/click` 等 |
 | `.bat` | 只允许根目录 `vanitas.bat` 薄壳（≤5 行有效指令）；不得承载启动逻辑 |
 | 行尾 | `*.bat` 必须 UTF-8 无 BOM + CRLF；其余文本 LF |
-| 自动工具循环 | 不实现、不预留二期钩子；`/exec` 仅手动 + 逐次确认 |
+| 自动工具循环 | 仅允许 `vanitas agent` 的受控闭环：每步展示动作并 `[y/N]`，沙盒根为 CWD，最多 5 步；`/exec` 仍手动逐次确认。禁止后台队列、无人值守循环与绕过确认的钩子 |
 | 单实例 | 一次只允许一个 `llama-server`；启动新模型前由守卫回收旧实例 |
 | 评测脚本 | `tests\multi_model_benchmark.py` 的既有参数与退出码契约不得破坏 |
 
@@ -107,12 +107,13 @@
 # 1) 语法
 Get-ChildItem vanitas\*.py, tests\test_*.py | ForEach-Object { python -m py_compile $_.FullName }
 
-# 2) 单测（当前 179 例）
+# 2) 单测（当前 202 例）
 python -m unittest discover -s tests
 
 # 3) 静态红线
 Select-String -Path vanitas\*.py -Pattern '8080|8081|8082'                        # 期望空
 Select-String -Path vanitas\*.py -Pattern 'import (psutil|requests|httpx|rich|click)'  # 期望空
+Select-String -Path vanitas\*.py -Pattern '提示：'                                 # 期望空：提示行统一为 ·
 Select-String -Path vanitas\*.py -Pattern '\[GUARD-'                              # 期望空：旧守卫标签已移除
 Select-String -Path vanitas\*.py -Pattern '\[(SERVE|LAUNCH|META|HINT|ERROR|STATUS|STOP)\]'  # 期望空：旧 CLI 标签已移除
 Select-String -Path *.bat -Pattern 'llama-server'                                  # 期望空
@@ -142,6 +143,8 @@ python -m vanitas stop
 
 - 并发（`-np 1`）、长上下文质量、持续压测、TTY 交互、`--foreground`、`.md/.txt` 真机翻译、5xx 重试路径尚未验证。
 - v0.4.1 的 16 色配色与三处覆盖式进度未做真人 TTY 验收（仅伪 TTY 单测 + 强制 `always` 抓字节）。
+- `vanitas agent` 闭环仅在 fake 模型与临时目录下验证；真实模型是否稳定输出动作、真实终端 `[y/N]` 观感与真实改名/删除尚未验收。
+- Agent 路径约束是参数级沙盒，不是 OS 级隔离；程序内部自行写文件仍需人工判断。
 - 混合换行的 `.srt` 会静默产出 `0 段`（已定位未修，见现状第 5 节）。
 - HY-MT2 显存余量约 500 MiB，是本机最紧的模型。
 - 完整清单与取证见 [docs/项目现状.md](docs/项目现状.md) 第 5、6 节；不得把未验证项写成已结论。

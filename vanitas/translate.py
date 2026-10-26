@@ -64,7 +64,7 @@ def extract_content(result: dict) -> str:
     message = choices[0].get("message") or {}
     content = (message.get("content") or "").strip()
     if not content and message.get("reasoning_content"):
-        raise EngineError("模型只返回了 reasoning_content，content 为空（思考未关闭？）")
+        raise EngineError("模型只返回了 reasoning_content，content 为空；思考未关闭？")
     if not content:
         raise EngineError("模型返回空内容")
     return content
@@ -153,7 +153,7 @@ class TranslationEngine:
 
     def _context_text(self) -> str:
         if not self._history:
-            return "（无前文，故事开端）"
+            return "无前文，故事开端"
         limit = max(20, int(self._options.context_summary_chars))
         lines: list[str] = []
         for index, (source, translation) in enumerate(self._history, start=1):
@@ -487,13 +487,13 @@ def _read_text(path: Path) -> tuple[str, bool, str]:
     try:
         raw = path.read_bytes()
     except OSError as exc:
-        raise TranslateError(f"读取失败：{path}（{exc.strerror or exc}）") from exc
+        raise TranslateError(f"读取失败：{path}；{exc.strerror or exc}") from exc
     has_bom = raw.startswith(BOM)
     try:
         text = raw[len(BOM):].decode("utf-8") if has_bom else raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise TranslateError(
-            f"文件不是 UTF-8：{path}（第 {exc.start} 字节；请先转码）"
+            f"文件不是 UTF-8：{path}；第 {exc.start} 字节，请先转码"
         ) from exc
     return text, has_bom, _detect_eol(text)
 
@@ -552,7 +552,7 @@ def translate_file(
         data = translated.encode("utf-8")
         target.write_bytes(BOM + data if has_bom else data)
     except OSError as exc:
-        raise TranslateError(f"写入失败：{target}（{exc.strerror or exc}）") from exc
+        raise TranslateError(f"写入失败：{target}；{exc.strerror or exc}") from exc
 
     outcome = TranslationOutcome(
         source=source, output=target, segments=segments, failures=failures

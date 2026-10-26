@@ -192,7 +192,7 @@ def evaluate(
     if missing:
         for name in missing:
             err.append(f"✗ 缺少运行组件：\"{root / 'bin' / name}\"")
-        err.append("提示：请将 llama.cpp CUDA 包完整解压到 bin\\ 目录")
+        err.append("· 请将 llama.cpp CUDA 包完整解压到 bin\\ 目录")
         return GuardResult(3, out, err)
 
     target = Path(model_path).expanduser()
@@ -203,13 +203,13 @@ def evaluate(
     # 2) 模型校验：存在性 -> 分片完整性 -> 体积下限 -> GGUF magic
     if not target.is_file():
         err.append(f"✗ 找不到模型文件：\"{target}\"")
-        err.append("提示：核对 models\\ 下的文件名，或先完成下载")
+        err.append("· 核对 models\\ 下的文件名，或先完成下载")
         return GuardResult(2, out, err)
 
     split = _split_shards(target)
     if split == "SHARD_ORDER":
         err.append(f"✗ 启动入口错误：必须使用第 1 个分片，收到 \"{target.name}\"")
-        err.append("提示：正确入口形如 models\\<前缀>-00001-of-0000N.gguf")
+        err.append("· 正确入口形如 models\\<前缀>-00001-of-0000N.gguf")
         return GuardResult(2, out, err)
     if split == "BAD_SHARD_COUNT":
         err.append(f"✗ 分片编号不合法：\"{target}\"")
@@ -226,7 +226,7 @@ def evaluate(
         if missing_shards:
             for item in missing_shards:
                 err.append(f"✗ 分片缺失：\"{item}\"")
-            err.append("提示：分片必须同目录、同前缀、编号连续")
+            err.append("· 分片必须同目录、同前缀、编号连续")
             return GuardResult(2, out, err)
 
     total_bytes = 0
@@ -234,7 +234,7 @@ def evaluate(
         try:
             total_bytes += item.stat().st_size
         except OSError as exc:
-            err.append(f"✗ 无法读取分片：\"{item}\"（{exc.strerror or exc}）")
+            err.append(f"✗ 无法读取分片：\"{item}\"；{exc.strerror or exc}")
             return GuardResult(2, out, err)
     if total_bytes < min_bytes:
         err.append(
@@ -247,7 +247,7 @@ def evaluate(
         with target.open("rb") as handle:
             magic = handle.read(4)
     except OSError as exc:
-        err.append(f"✗ 无法读取文件头：\"{target}\"（{exc.strerror or exc}）")
+        err.append(f"✗ 无法读取文件头：\"{target}\"；{exc.strerror or exc}")
         return GuardResult(2, out, err)
     if magic != b"GGUF":
         err.append(f"✗ 文件不是有效的 GGUF 模型：\"{target}\"")
@@ -258,9 +258,8 @@ def evaluate(
         stale = _llama_pids()
         if stale:
             out.append(
-                "⚠ 发现遗留服务，正在清理（PID "
+                "⚠ 发现遗留服务，正在清理 · PID "
                 + "、".join(str(pid) for pid in stale)
-                + "）"
             )
             _run(["taskkill", "/f", "/im", "llama-server.exe"])
             deadline = time.monotonic() + max(0.0, kill_wait_sec)
@@ -279,7 +278,7 @@ def evaluate(
     if owner is not None:
         pid, name = owner
         err.append(f"✗ 端口 {port_number} 被 PID {pid} ({name}) 占用")
-        err.append("提示：结束该进程，或设置环境变量 VANITAS_PORT=<空闲端口>")
+        err.append("· 结束该进程，或设置环境变量 VANITAS_PORT=<空闲端口>")
         return GuardResult(1, out, err)
 
     # 5) 显存快照：只展示不拦截，阈值随档位变化，不替操作者拍板
@@ -290,7 +289,7 @@ def evaluate(
     size_mb = round(total_bytes / (1024 * 1024))
     shard_desc = "单文件" if shard_count == 1 else f"{shard_count} 个分片，校验完整"
     out.append(
-        f"✓ 环境核验通过 · 模型 {size_mb} MB（{shard_desc}）"
+        f"✓ 环境核验通过 · 模型 {size_mb} MB · {shard_desc}"
         f" · 端口 {port_number} 空闲 · 显存通道已独占"
     )
     return GuardResult(0, out, err)
@@ -303,13 +302,10 @@ _PREFIX_METHODS = (
     ("⋯ ", "spin"),
     ("· ", "meta"),
 )
-_HINT_PREFIX = "提示："
 
 
 def _colorize_line(line: str, palette: Palette) -> str:
     """按首字符选语义色；符号由 Palette 重新拼回，不改变文本内容。"""
-    if line.startswith(_HINT_PREFIX):
-        return palette.hint(line[len(_HINT_PREFIX):])
     for prefix, method in _PREFIX_METHODS:
         if line.startswith(prefix):
             return getattr(palette, method)(line[len(prefix):])
@@ -353,13 +349,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         description="Vanitas-Harness 守卫：运行时 / 模型完整性 / 旧实例 / 端口",
     )
     parser.add_argument("--port", required=False, help="目标端口")
-    parser.add_argument("--model", required=False, help="模型路径（分片只传首片）")
+    parser.add_argument("--model", required=False, help="模型路径，分片只传首片")
     parser.add_argument("--base-dir", default=None, help="仓库根，默认按包位置推断")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument(
         "--no-kill",
         action="store_true",
-        help="不回收存量 llama-server（测试用；生产必须允许回收）",
+        help="不回收存量 llama-server，测试用；生产必须允许回收",
     )
     return parser.parse_args(argv)
 

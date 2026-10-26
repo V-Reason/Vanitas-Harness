@@ -56,7 +56,7 @@ def run_batch(
     try:
         raw = tasks.read_text(encoding="utf-8")
     except OSError as exc:
-        raise VanitasError(f"批处理文件读取失败：{tasks}（{exc.strerror or exc}）") from exc
+        raise VanitasError(f"批处理文件读取失败：{tasks}；{exc.strerror or exc}") from exc
 
     lines = raw.splitlines()
     result = BatchResult(output_path=output_path_for(tasks))
@@ -136,6 +136,6 @@ def run_batch(
         result.output_path.write_text(payload + ("\n" if payload else ""), encoding="utf-8")
     except OSError as exc:
         raise VanitasError(
-            f"批处理结果写入失败：{result.output_path}（{exc.strerror or exc}）"
+            f"批处理结果写入失败：{result.output_path}；{exc.strerror or exc}"
         ) from exc
     return result

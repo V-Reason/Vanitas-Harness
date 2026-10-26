@@ -83,7 +83,7 @@ class CliSmokeTests(unittest.TestCase):
             code, out, _err = run(["status"])
         self.assertEqual(code, 0)
         self.assertIn("qwen7b", out)
-        self.assertIn("未运行", out)
+        self.assertIn("停止", out)
 
     def test_unknown_subcommand_exit_4(self) -> None:
         with clean_env():
@@ -200,7 +200,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertNotIn("统计段数", err)
         self.assertNotIn("累计汉字", err)
 
-    def test_status_state_uses_muted_color(self) -> None:
+    def test_status_state_uses_error_color(self) -> None:
         config = load_config()
         palette = Palette(DEFAULT_THEME, enabled=True)
         fake_client = mock.Mock()
@@ -216,7 +216,7 @@ class CliSmokeTests(unittest.TestCase):
                 config, mock.Mock(verbose=False), palette
             )
         self.assertEqual(code, 0)
-        self.assertIn("\x1b[90m未运行\x1b[0m", out.getvalue())
+        self.assertIn("\x1b[31m✗ 停止\x1b[0m", out.getvalue())
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -76,12 +77,26 @@ class Session:
     # 任务模板
     # ------------------------------------------------------------------ #
 
-    def build_user_message(self, text: str, prompt_dir: Path, model_alias: str) -> str:
+    def build_user_message(
+        self,
+        text: str,
+        prompt_dir: Path,
+        model_alias: str,
+        *,
+        cwd: str | None = None,
+    ) -> str:
         if not self.task:
             # 无任务模板时仍注入秒级运行时信息；有模板时由模板的 {date} 负责。
             return prompts.render("当前时间：{date}\n\n{input}", {"input": text})
         template = prompts.load_task(prompt_dir, self.task)
-        return prompts.render(template, {"input": text, "model": model_alias})
+        return prompts.render(
+            template,
+            {
+                "input": text,
+                "model": model_alias,
+                "cwd": cwd if cwd is not None else os.getcwd(),
+            },
+        )
 
     # ------------------------------------------------------------------ #
     # 存档
@@ -107,7 +122,7 @@ class Session:
                 encoding="utf-8",
             )
         except OSError as exc:
-            raise ConfigError(f"会话保存失败：{target}（{exc.strerror or exc}）") from exc
+            raise ConfigError(f"会话保存失败：{target}；{exc.strerror or exc}") from exc
         return target
 
     @classmethod
@@ -116,12 +131,12 @@ class Session:
         try:
             raw = source.read_text(encoding="utf-8")
         except OSError as exc:
-            raise ConfigError(f"会话读取失败：{source}（{exc.strerror or exc}）") from exc
+            raise ConfigError(f"会话读取失败：{source}；{exc.strerror or exc}") from exc
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ConfigError(
-                f"会话文件不是合法 JSON：{source}（第 {exc.lineno} 行：{exc.msg}）"
+                f"会话文件不是合法 JSON：{source}；第 {exc.lineno} 行：{exc.msg}"
             ) from exc
         if not isinstance(data, dict) or data.get("version") != 1:
             raise ConfigError(f"会话文件版本不支持：{source}")

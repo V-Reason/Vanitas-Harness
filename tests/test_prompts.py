@@ -61,6 +61,13 @@ class PromptTests(unittest.TestCase):
         )
         self.assertEqual(rendered, "前文|当前")
 
+    def test_render_cwd_placeholder(self) -> None:
+        rendered = prompts.render(
+            "目录 {cwd} / {input}",
+            {"cwd": r"<WORKSPACE>\demo", "input": "x"},
+        )
+        self.assertEqual(rendered, "目录 T:\\demo / x")
+
     def test_task_chat_is_minimal(self) -> None:
         text = prompts.load_task(self.prompt_dir, "chat")
         self.assertIn("当前日期：{date}", text)
@@ -70,12 +77,16 @@ class PromptTests(unittest.TestCase):
 
     def test_task_agent_enforces_sandbox_and_tool_priority(self) -> None:
         text = prompts.load_task(self.prompt_dir, "agent")
-        self.assertIn("【安全沙箱约束】", text)
-        self.assertIn("只能修改当前工作目录下的文件", text)
-        self.assertIn("系统目录、父目录", text)
-        self.assertIn("【工具优先级】", text)
+        self.assertIn("当前工作目录：{cwd}", text)
+        self.assertIn("【安全沙箱】", text)
+        self.assertIn("只能读写当前工作目录内的路径", text)
+        self.assertIn("系统目录、其他盘符", text)
+        self.assertIn("【工具选择】", text)
         self.assertIn("write_file", text)
         self.assertIn("read_file", text)
+        self.assertIn("list_dir", text)
+        self.assertIn("[系统反馈]", text)
+        self.assertIn("普通中文文本", text)
 
     def test_unknown_placeholder_in_template_rejected(self) -> None:
         (self.temp_dir / "bad.md").write_text("hi {unknown}\n", encoding="utf-8")

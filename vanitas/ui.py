@@ -175,7 +175,7 @@ class Palette:
         return self._with_symbol("meta", text, "muted")
 
     def hint(self, text: str) -> str:
-        return self.paint(f"提示：{text}", self._theme["muted"])
+        return self._with_symbol("meta", text, "muted")
 
     def accent(self, text: str) -> str:
         return self.paint(text, self._theme["accent"])

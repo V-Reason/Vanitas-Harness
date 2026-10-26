@@ -319,12 +319,12 @@ def _read_json(path: Path, label: str) -> dict:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise ConfigError(f"{label} 读取失败：{path}（{exc.strerror or exc}）") from exc
+        raise ConfigError(f"{label} 读取失败：{path}；{exc.strerror or exc}") from exc
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ConfigError(
-            f"{label} 不是合法 JSON：{path}（第 {exc.lineno} 行第 {exc.colno} 列：{exc.msg}）"
+            f"{label} 不是合法 JSON：{path}；第 {exc.lineno} 行第 {exc.colno} 列：{exc.msg}"
         ) from exc
     if not isinstance(data, dict):
         raise ConfigError(f"{label} 顶层必须是 JSON 对象：{path}")
@@ -405,7 +405,7 @@ def _load_model(entry: object, index: int, base_dir: Path) -> ModelSpec:
         if isinstance(value, (dict, list)):
             _fail(
                 f"{label}.template_kwargs.{key}",
-                "chat_template_kwargs 只接受标量值（字符串/数字/布尔/null）",
+                "chat_template_kwargs 只接受标量值：字符串、数字、布尔、null",
             )
 
     raw_profiles = _as_mapping(entry.get("profiles"), f"{label}.profiles")
@@ -472,7 +472,7 @@ def _load_models(document: dict, base_dir: Path) -> tuple:
             )
         seen_ports[model.port] = model.id
         if model.alias in seen_aliases:
-            raise ConfigError(f"models[].alias 重复：{model.alias}（/v1/models 会分不清模型）")
+            raise ConfigError(f"models[].alias 重复：{model.alias}；/v1/models 会分不清模型")
         seen_aliases.add(model.alias)
     return models
 

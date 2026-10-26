@@ -154,6 +154,37 @@ class ChatRunnerTests(unittest.TestCase):
         result, _out, _err = self.run_turn(runner)
         self.assertEqual(result.finish_reason, "length")
 
+    def test_display_false_does_not_write_model_text(self) -> None:
+        client = FakeClient(
+            [
+                {"type": "delta", "content": '{"action":"shell"}'},
+                {"type": "done", "tokens": 3, "tps": 1.0, "finish_reason": "stop"},
+            ]
+        )
+        runner = self.make_runner(client)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            result = runner.run("hi", display=False)
+        self.assertEqual(result.text, '{"action":"shell"}')
+        self.assertNotIn('{"action"', out.getvalue())
+        self.assertEqual(self.session.messages[-1]["content"], '{"action":"shell"}')
+
+    def test_followup_appends_raw_system_feedback(self) -> None:
+        client = FakeClient(
+            [
+                {"type": "delta", "content": "完成"},
+                {"type": "done", "tokens": 2, "tps": 1.0, "finish_reason": "stop"},
+            ]
+        )
+        runner = self.make_runner(client)
+        feedback = "[系统反馈] 执行成功：已写入 a.txt"
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            runner.run_followup(feedback, display=False)
+        self.assertEqual(self.session.messages[0]["role"], "user")
+        self.assertEqual(self.session.messages[0]["content"], feedback)
+        self.assertEqual(self.session.messages[1]["content"], "完成")
+        self.assertEqual(client.calls[0]["messages"][-1]["content"], feedback)
+
     def test_no_client_raises_engine_error(self) -> None:
         runner = ChatRunner(
             self.config,

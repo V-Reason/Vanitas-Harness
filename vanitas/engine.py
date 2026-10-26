@@ -125,11 +125,11 @@ class EngineClient:
                 )
             except urllib.error.URLError as exc:
                 last_failure = EngineError(
-                    f"无法连接 {request.full_url}：{exc.reason}（服务端未启动？）"
+                    f"无法连接 {request.full_url}：{exc.reason}；服务端未启动？"
                 )
             except (TimeoutError, OSError) as exc:
                 last_failure = EngineError(
-                    f"请求 {request.full_url} 超时或中断（{timeout}s）：{exc}"
+                    f"请求 {request.full_url} 超时或中断，{timeout}s：{exc}"
                 )
             if attempt + 1 >= attempts:
                 break
@@ -154,7 +154,7 @@ class EngineClient:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise EngineError(
-                f"{path} 返回非 JSON（前 200 字节：{raw[:200]!r}）：{exc}"
+                f"{path} 返回非 JSON；前 200 字节：{raw[:200]!r}；{exc}"
             ) from exc
         if not isinstance(payload, dict):
             raise EngineError(f"{path} 返回的顶层不是 JSON 对象")
@@ -222,7 +222,7 @@ class EngineClient:
             result = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise EngineError(
-                f"/v1/chat/completions 返回非 JSON（前 200 字节：{raw[:200]!r}）：{exc}"
+                f"/v1/chat/completions 返回非 JSON；前 200 字节：{raw[:200]!r}；{exc}"
             ) from exc
         if not isinstance(result, dict) or not result.get("choices"):
             raise EngineError("/v1/chat/completions 返回体缺少 choices")
@@ -381,7 +381,7 @@ class EngineClient:
                     yield {"type": "reasoning", "content": reasoning}
         except (OSError, http.client.HTTPException) as exc:
             raise EngineError(
-                f"流式读取中断（超时 {read_timeout}s）：{exc}"
+                f"流式读取中断，超时 {read_timeout}s：{exc}"
             ) from exc
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0

@@ -42,7 +42,7 @@ class PaletteTests(unittest.TestCase):
         self.assertEqual(palette.warn("careful"), "⚠ careful")
         self.assertEqual(palette.spin("loading"), "⋯ loading")
         self.assertEqual(palette.meta("note"), "· note")
-        self.assertEqual(palette.hint("try /help"), "提示：try /help")
+        self.assertEqual(palette.hint("try /help"), "· try /help")
         self.assertEqual(palette.accent("plain"), "plain")
 
     def test_theme_is_used_when_enabled(self) -> None:

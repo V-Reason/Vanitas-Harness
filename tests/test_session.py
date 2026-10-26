@@ -6,6 +6,7 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -38,6 +39,23 @@ class SessionTests(unittest.TestCase):
         self.assertIn("当前日期：", message)
         stamp = message.splitlines()[0].split("：", 1)[1]
         self.assertRegex(stamp, STAMP)
+
+    def test_agent_template_uses_explicit_cwd(self) -> None:
+        session = Session(system="sys", task="agent")
+        message = session.build_user_message(
+            "hello",
+            self.prompt_dir,
+            "alias",
+            cwd=r"<WORKSPACE>\demo\workspace",
+        )
+        self.assertIn("当前工作目录：T:\\demo\\workspace", message)
+        self.assertNotIn("{cwd}", message)
+
+    def test_agent_template_defaults_to_process_cwd(self) -> None:
+        session = Session(system="sys", task="agent")
+        with mock.patch("vanitas.session.os.getcwd", return_value=r"<WORKSPACE>\fallback"):
+            message = session.build_user_message("hello", self.prompt_dir, "alias")
+        self.assertIn("当前工作目录：T:\\fallback", message)
 
     def test_budget_helpers_are_reexported(self) -> None:
         self.assertEqual(context_budget(4096, 8192), 3584)
