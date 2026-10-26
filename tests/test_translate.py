@@ -151,6 +151,13 @@ class TranslateTests(unittest.TestCase):
         self.assertEqual(aligned, {"1": "第一句", "2": "第二句"})
         self.assertEqual(missing, [])
 
+        ok, aligned, _missing = parse_window_response(
+            "[#1] \n[#2] 第二句", ["1", "2"]
+        )
+        self.assertTrue(ok)
+        self.assertEqual(aligned["1"], "")
+        self.assertEqual(aligned["2"], "第二句")
+
         ok, aligned, missing = parse_window_response(
             "[#1] 第一句", ["1", "2"]
         )
@@ -315,7 +322,8 @@ class TranslateTests(unittest.TestCase):
     def test_asr_hallucination_hard_filter(self) -> None:
         text = (
             "1\n00:00:01,000 --> 00:00:02,000\n正常台词\n\n"
-            "2\n00:00:03,000 --> 00:00:04,000\nご視聴ありがとうございました\n"
+            "2\n00:00:03,000 --> 00:00:04,000\nご視聴ありがとうございました\n\n"
+            "3\n00:00:05,000 --> 00:00:06,000\nPlease subscribe\n"
         )
         source = self.write("hallucination.srt", text)
         calls: list[str] = []
@@ -325,15 +333,18 @@ class TranslateTests(unittest.TestCase):
             return f"译{prompt}"
 
         outcome = translate_file(chat, source, SETTINGS)
-        self.assertEqual(outcome.segments, 2)
+        self.assertEqual(outcome.segments, 3)
         self.assertEqual(len(calls), 1)
         self.assertNotIn("ご視聴", calls[0])
+        self.assertNotIn("Please subscribe", calls[0])
         translated = outcome.output.read_text(encoding="utf-8")
         blocks = parse_srt(translated, "\n")
-        self.assertEqual([block.index for block, _ in blocks], ["1", "2"])
+        self.assertEqual([block.index for block, _ in blocks], ["1", "2", "3"])
         self.assertEqual(blocks[0][0].text, "译正常台词")
         self.assertEqual(blocks[1][0].timing, "00:00:03,000 --> 00:00:04,000")
         self.assertEqual(blocks[1][0].text, "")
+        self.assertEqual(blocks[2][0].timing, "00:00:05,000 --> 00:00:06,000")
+        self.assertEqual(blocks[2][0].text, "")
 
     def test_srt_segment_failure_keeps_original_and_reports(self) -> None:
         def failing_chat(text: str) -> str:
