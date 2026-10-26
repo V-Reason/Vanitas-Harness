@@ -630,7 +630,7 @@ class AgentTools:
                 return "git"
             return f"git {tokens[1].lower()}"
         if name == "python":
-            if len(tokens) >= 2 and tokens[1].lower() == "verify.py":
+            if len(tokens) >= 2 and Path(tokens[1]).name.lower() == "verify.py":
                 return "python verify.py"
             if (
                 len(tokens) >= 3
