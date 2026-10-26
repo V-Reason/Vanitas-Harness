@@ -14,9 +14,9 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from . import __version__, batch as batch_mod, guard, launcher, prompts, translate
+from . import __version__, agent as agent_mod, batch as batch_mod, guard, launcher, prompts, translate
+from .client import LlamaClient
 from .config import AppConfig, DEFAULT_THEME, ModelSpec, load_config
-from .engine import EngineClient
 from .errors import (
     ConfigError,
     EngineError,
@@ -25,11 +25,14 @@ from .errors import (
     TranslateError,
     VanitasError,
 )
-from .repl import Repl
 from .progress import Spinner
+from .repl import Repl
 from .ui import Palette, resolve_enabled
 
-USAGE = "用法：vanitas [--config-dir DIR] [-v] <models|status|serve|stop|chat|translate|batch>"
+USAGE = (
+    "用法：vanitas [--config-dir DIR] [-v] "
+    "<models|status|serve|stop|chat|agent|translate|batch>"
+)
 VERBOSE_HELP = "显示 PID、日志、地址等诊断信息"
 
 
@@ -84,6 +87,14 @@ def _build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--task", default=None, help="任务模板名（task_<name>.md）")
     _add_verbose(chat)
 
+    agent = sub.add_parser(
+        "agent", help="进入 Agent 规划模式（仅输出 JSON，不自动执行）"
+    )
+    agent.add_argument("--model", default=None, help="模型 id（见 vanitas models）")
+    agent.add_argument("--profile", default=None, help="档位编号")
+    agent.add_argument("--system", default=None, help="系统提示文件路径")
+    _add_verbose(agent)
+
     serve = sub.add_parser("serve", help="启动 llama-server 并等待 /health")
     serve.add_argument("model_id", help="模型 id")
     serve.add_argument("--profile", default=None, help="档位编号")
@@ -122,14 +133,14 @@ def _resolve_model(config: AppConfig, model_id: str | None, role: str) -> ModelS
 
 def _ensure_engine(
     config: AppConfig, model: ModelSpec, profile, palette: Palette
-) -> tuple[EngineClient, int]:
+) -> tuple[LlamaClient, int]:
     port = config.effective_port(model)
-    client = EngineClient.for_model(config, model, port)
+    client = LlamaClient.for_model(config, model, port)
     if client.health():
         return client, port
     record = launcher.start(config, model, profile, background=True, palette=palette)
     launcher.wait_ready(config, record, palette)
-    return EngineClient.for_model(config, model, record.port), record.port
+    return LlamaClient.for_model(config, model, record.port), record.port
 
 
 def _cmd_models(config: AppConfig, args: argparse.Namespace, palette: Palette) -> int:
@@ -157,7 +168,7 @@ def _cmd_status(config: AppConfig, args: argparse.Namespace, palette: Palette) -
     records = {record.model_id: record for record in launcher.read_records()}
     for model in config.models:
         port = config.effective_port(model)
-        client = EngineClient.for_model(config, model, port)
+        client = LlamaClient.for_model(config, model, port)
         healthy = client.health(timeout=0.6)
         record = records.get(model.id)
         if record is not None and launcher.pid_running(record.pid):
@@ -223,18 +234,22 @@ def _cmd_chat(config: AppConfig, args: argparse.Namespace, palette: Palette) -> 
         palette=palette,
         verbose=verbose,
     )
-    if args.system:
-        path = Path(args.system).expanduser()
-        try:
-            repl.session.system = path.read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            raise ConfigError(
-                f"系统提示文件读取失败：{path}（{exc.strerror or exc}）"
-            ) from exc
-    if args.task:
-        prompts.load_task(repl.prompt_dir, args.task)
-        repl.session.task = args.task
+    repl.configure(system=args.system, task=args.task)
     return repl.run()
+
+
+def _cmd_agent(config: AppConfig, args: argparse.Namespace, palette: Palette) -> int:
+    verbose = bool(getattr(args, "verbose", False))
+    model = _resolve_model(config, args.model, "general")
+    profile = config.resolve_profile(model, args.profile)
+    return agent_mod.run_agent(
+        config,
+        model,
+        profile.key,
+        system=args.system,
+        palette=palette,
+        verbose=verbose,
+    )
 
 
 def _cmd_repl(config: AppConfig, args: argparse.Namespace, palette: Palette) -> int:
@@ -349,6 +364,7 @@ HANDLERS = {
     "stop": _cmd_stop,
     "serve": _cmd_serve,
     "chat": _cmd_chat,
+    "agent": _cmd_agent,
     "translate": _cmd_translate,
     "batch": _cmd_batch,
     None: _cmd_repl,

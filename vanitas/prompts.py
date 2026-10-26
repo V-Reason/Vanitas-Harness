@@ -1,18 +1,19 @@
 """提示词模板加载与变量替换。
 
-模板只认四个占位符：{input} {context} {date} {model}。
+模板只认五个占位符：{input} {context} {context_history} {date} {model}。
 未知占位符直接报 ConfigError——模板写错比模型答错更难排查，必须在启动前拦住。
+{date} 默认是秒级本地时间，供 chat/agent 感知当前现实时间。
 """
 
 from __future__ import annotations
 
 import re
-from datetime import date as _date
+from datetime import datetime
 from pathlib import Path
 
 from .errors import ConfigError
 
-ALLOWED = ("input", "context", "date", "model")
+ALLOWED = ("input", "context", "context_history", "date", "model")
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 VAR_RE = re.compile(r"\{([a-z][a-z0-9_]*)\}")
 DEFAULT_SYSTEM = "system_default"
@@ -54,12 +55,18 @@ def load_template(prompt_dir: Path, name: str) -> str:
     return text.rstrip("\n")
 
 
+def now_stamp() -> str:
+    """本地时间的秒级 ISO 风格快照，供 {date} 与运行时注入复用。"""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def render(template: str, values: dict | None = None) -> str:
     """替换占位符；缺失的键用空串（context 在 REPL 中就是空）。"""
     merged = {
         "input": "",
         "context": "",
-        "date": _date.today().isoformat(),
+        "context_history": "",
+        "date": now_stamp(),
         "model": "",
     }
     for key, value in (values or {}).items():

@@ -15,7 +15,9 @@
   "repl": {
     "history_file": "~/.vanitas_history",
     "max_context_tokens": 8192,
-    "stream": true
+    "stream": true,
+    "context_reserve_tokens": 512,
+    "min_output_tokens": 256
   },
   "tools": {
     "exec_enabled": false,
@@ -25,7 +27,13 @@
   "translate": {
     "source_suffixes": [".txt", ".md", ".srt"],
     "chunk_chars": 1500,
-    "output_suffix": ".zh"
+    "output_suffix": ".zh",
+    "context_window": 5,
+    "context_summary_chars": 200,
+    "min_output_tokens": 512,
+    "output_ratio": 2.5,
+    "prompt_safety_tokens": 64,
+    "monitor_lines": 5
   },
   "ui": {
     "color": "auto",

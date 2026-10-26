@@ -15,12 +15,11 @@ from pathlib import Path
 from typing import Callable
 
 from . import guard, launcher, prompts, tools
+from .chat import ChatRunner
+from .client import LlamaClient
 from .config import AppConfig, ModelSpec, ProfileSpec
-from .engine import EngineClient
 from .errors import ConfigError, EngineError, GuardError, LaunchError, ToolDenied
-from .progress import Spinner
-from .render import StreamRenderer
-from .session import Session, context_budget, default_save_path
+from .session import Session, default_save_path
 from .ui import SYMBOLS, Palette
 
 
@@ -35,7 +34,7 @@ class Command:
 # D1：命令是数据，不是散落的 if 分支；/help 由本表生成。
 COMMANDS: tuple[Command, ...] = (
     Command("help", "列出内置命令"),
-    Command("model", "列出模型 / 切换模型（不会自动启停服务端）", (), "[id]"),
+    Command("model", "列出模型 / 切换模型（必要时自动停旧启新）", (), "[id]"),
     Command("profile", "查看或切换档位（仅对下次 serve 生效）", (), "[N]"),
     Command("system", "设置系统提示（文本或文件路径）", (), "[text|file]"),
     Command("task", "应用任务模板 config\\prompts\\task_<name>.md", (), "[name]"),
@@ -73,9 +72,11 @@ class Repl:
         self.prompt_dir = config.config_dir / "prompts"
         default_model = model or config.models[0]
         self.profile: ProfileSpec = config.resolve_profile(default_model, profile)
+        self.pending_profile: ProfileSpec | None = None
         self.model: ModelSpec = default_model
         self.port: int = config.effective_port(default_model)
-        self.client: EngineClient | None = None
+        self.client: LlamaClient | None = None
+        self.chat_runner: ChatRunner | None = None
         self.session = Session(
             model_id=default_model.id,
             profile=self.profile.key,
@@ -83,6 +84,50 @@ class Repl:
         )
         self._prompt_session = None
         self._prompt_ready = False
+
+    def _activate(
+        self,
+        model: ModelSpec,
+        profile: ProfileSpec,
+        client: LlamaClient | None,
+        port: int,
+    ) -> None:
+        """统一收口“当前模型/档位/客户端/会话”的切换，避免四处复制。"""
+        self.model = model
+        self.profile = profile
+        self.pending_profile = None
+        self.client = client
+        self.port = port
+        self.session.model_id = model.id
+        self.session.profile = profile.key
+        self.chat_runner = (
+            ChatRunner(
+                self.config,
+                client,
+                self.session,
+                model,
+                profile,
+                self.palette,
+                verbose=self.verbose,
+            )
+            if client is not None
+            else None
+        )
+
+    def configure(self, system: str | None = None, task: str | None = None) -> None:
+        """应用 --system 文件与 --task 模板；供 CLI 与 agent 复用。"""
+        if system:
+            path = Path(system).expanduser()
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ConfigError(
+                    f"系统提示文件读取失败：{path}（{exc.strerror or exc}）"
+                ) from exc
+            self.session.system = text.strip()
+        if task:
+            prompts.load_task(self.prompt_dir, task)
+            self.session.task = task
 
     # ------------------------------------------------------------------ #
     # 主循环
@@ -138,7 +183,9 @@ class Repl:
         if self._adopt_any():
             return
         if self.auto_start:
-            self._start_engine(self.model, self.profile)
+            self._start_engine(
+                self.model, self.pending_profile or self.profile
+            )
             return
         if not sys.stdin.isatty():
             print(
@@ -150,7 +197,12 @@ class Repl:
         chosen = self._prompt_model()
         if chosen is None:
             return
-        profile = self.config.resolve_profile(chosen)
+        pending = self.pending_profile
+        profile = (
+            self.config.resolve_profile(chosen, pending.key)
+            if pending is not None and pending.key in chosen.profiles
+            else self.config.resolve_profile(chosen)
+        )
         port = self.config.effective_port(chosen)
         answer = input(
             f"启动 {chosen.display}（档位 {profile.key}：{profile.desc}）"
@@ -185,12 +237,12 @@ class Repl:
         except LaunchError as exc:
             print(self.palette.err(str(exc)), file=sys.stderr)
             return False
-        self.model = model
-        self.profile = profile
-        self.port = record.port
-        self.client = EngineClient.for_model(self.config, model, record.port)
-        self.session.model_id = model.id
-        self.session.profile = profile.key
+        self._activate(
+            model,
+            profile,
+            LlamaClient.for_model(self.config, model, record.port),
+            record.port,
+        )
         return True
 
     def _prompt_model(self) -> ModelSpec | None:
@@ -218,7 +270,7 @@ class Repl:
 
     def _probe(self, model: ModelSpec, port: int | None = None):
         target_port = port if port is not None else self.config.effective_port(model)
-        client = EngineClient.for_model(self.config, model, target_port)
+        client = LlamaClient.for_model(self.config, model, target_port)
         try:
             if not client.health(timeout=2.0):
                 return None
@@ -240,15 +292,11 @@ class Repl:
             if probed is None:
                 continue
             client, port = probed
-            self.model = model
-            self.port = port
-            self.client = client
-            self.profile = self.config.resolve_profile(model, record.profile)
-            self.session.model_id = model.id
-            self.session.profile = self.profile.key
+            profile = self.config.resolve_profile(model, record.profile)
+            self._activate(model, profile, client, port)
             print(
                 self.palette.ok(
-                    f"已连接 {model.display} · 档位 {self.profile.key}"
+                    f"已连接 {model.display} · 档位 {profile.key}"
                 )
             )
             return True
@@ -257,15 +305,11 @@ class Repl:
             if probed is None:
                 continue
             client, port = probed
-            self.model = model
-            self.port = port
-            self.client = client
-            self.profile = self.config.resolve_profile(model)
-            self.session.model_id = model.id
-            self.session.profile = self.profile.key
+            profile = self.config.resolve_profile(model)
+            self._activate(model, profile, client, port)
             print(
                 self.palette.ok(
-                    f"已连接 {model.display} · 档位 {self.profile.key}"
+                    f"已连接 {model.display} · 档位 {profile.key}"
                 )
             )
             return True
@@ -276,70 +320,42 @@ class Repl:
     # ------------------------------------------------------------------ #
 
     def _chat(self, text: str) -> None:
-        if self.client is None:
+        if self.client is None or self.chat_runner is None:
             print(
                 self.palette.hint(
                     "服务端未就绪：先运行 vanitas serve <id>，或用 /model 查看可用模型"
                 )
             )
             return
-        budget = context_budget(
-            self.profile.ctx, self.config.settings.repl.max_context_tokens
-        )
         try:
-            user_message = self.session.build_user_message(
-                text, self.prompt_dir, self.model.alias
+            result = self.chat_runner.run(
+                text,
+                on_dropped=lambda count: print(
+                    self.palette.warn(f"上下文已满，丢弃最早 {count} 轮对话")
+                ),
             )
         except ConfigError as exc:
             print(self.palette.err(str(exc)), file=sys.stderr)
             return
-        self.session.add_user(user_message)
-        dropped = self.session.trim(budget)
-        if dropped:
-            print(self.palette.warn(f"上下文已满，丢弃最早 {dropped} 轮对话"))
-
-        max_tokens = max(128, min(1024, self.profile.ctx // 8))
-        renderer = StreamRenderer()
-        usage: dict | None = None
-        reasoning_chars = 0
-        try:
-            for event in self._stream_events(
-                self.session.api_messages(), max_tokens
-            ):
-                if event["type"] == "delta":
-                    renderer.feed(event["content"])
-                elif event["type"] == "reasoning":
-                    reasoning_chars += len(event["content"])
-                elif event["type"] == "usage":
-                    usage = event["usage"]
         except EngineError as exc:
             print()
             print(self.palette.err(str(exc)), file=sys.stderr)
-            self.session.pop_last_user()
             return
-        except KeyboardInterrupt:
-            print()
-            print(self.palette.meta("本轮已中断，未写入历史"))
-            self.session.pop_last_user()
+        if result.interrupted:
+            print(self.palette.warn("已中止生成"))
             return
 
-        meta = renderer.close()
-        answer = renderer.text
-        if answer.strip():
-            self.session.add_assistant(answer)
-
-        pieces: list[str] = []
-        tokens = int((usage or {}).get("completion_tokens") or 0)
-        pieces.append(f"{tokens} tokens" if tokens else f"{meta['chars']} 字符")
-        seconds = meta["wall_ms"] / 1000.0
-        if seconds > 0:
-            pieces.append(f"{seconds:.1f}s")
-        if meta["first_ms"] is not None:
-            pieces.append(f"首字 {meta['first_ms']:.0f} ms")
-        if tokens and seconds > 0:
-            pieces.append(f"{tokens / seconds:.1f} t/s")
+        pieces = [
+            f"{result.tokens} tokens",
+            f"{result.elapsed_s:.1f}s",
+            f"{result.tps:.1f} t/s",
+        ]
+        if self.verbose and result.ttft_ms is not None:
+            pieces.append(f"首字 {result.ttft_ms:.0f} ms")
         print(self.palette.meta(" · ".join(pieces)))
-        if not answer.strip() and reasoning_chars:
+        if result.finish_reason == "length":
+            print(self.palette.warn("达到长度上限，输出被截断"))
+        if not result.text.strip() and result.reasoning_chars:
             print(
                 self.palette.hint(
                     "仅返回 reasoning_content，content 为空："
@@ -347,22 +363,6 @@ class Repl:
                 ),
                 file=sys.stderr,
             )
-
-    def _stream_events(self, messages: list[dict], max_tokens: int):
-        """首字前显示覆盖式进度，首字到达立刻擦除，避免等待行与 stdout 混屏。"""
-        spin = Spinner("正在生成", self.palette)
-        spin.__enter__()
-        first = True
-        try:
-            for event in self.client.chat_stream(
-                messages, max_tokens=max_tokens, temperature=0.2
-            ):
-                if first and event["type"] == "delta":
-                    first = False
-                    spin.__exit__(None, None, None)
-                yield event
-        finally:
-            spin.__exit__(None, None, None)
 
     # ------------------------------------------------------------------ #
     # 命令分派
@@ -384,6 +384,13 @@ class Repl:
             print(f"  {head:<24}{command.description}")
         return True
 
+    def _print_guard_error(self, exc: GuardError) -> None:
+        _stdout, stderr_lines = guard.format_for_cli(
+            guard.GuardResult(exc.code, [], list(exc.messages)), self.palette
+        )
+        for message in stderr_lines:
+            print(message, file=sys.stderr)
+
     def _cmd_model(self, rest: str) -> bool:
         if not rest:
             records = {record.model_id: record for record in launcher.read_records()}
@@ -398,7 +405,11 @@ class Repl:
                 else:
                     state = "未运行"
                 print(f" {marker} {item.id:<10} {item.display:<26} port {port:<5} {state}")
-            print(self.palette.hint("切换模型只切换连接，不会自动启停服务端"))
+            print(
+                self.palette.hint(
+                    "带 id 切换模型；目标未就绪时会自动停旧启新"
+                )
+            )
             return True
         try:
             model = self.config.model(rest)
@@ -409,24 +420,68 @@ class Repl:
             print(self.palette.meta(f"已经是当前模型 {model.id}"))
             return True
         probed = self._probe(model)
-        if probed is None:
+        if probed is not None:
+            client, port = probed
+            record = next(
+                (item for item in launcher.read_records() if item.model_id == model.id),
+                None,
+            )
+            try:
+                profile = self.config.resolve_profile(
+                    model, record.profile if record else None
+                )
+            except ConfigError as exc:
+                print(self.palette.err(str(exc)), file=sys.stderr)
+                return True
+            self._activate(model, profile, client, port)
             print(
-                self.palette.hint(
-                    f"{model.display} 未就绪；先运行：vanitas serve {model.id} [--profile N]"
+                self.palette.ok(
+                    f"已切换到 {model.display} · 档位 {profile.key}"
                 )
             )
             return True
-        client, port = probed
-        record = next(
-            (item for item in launcher.read_records() if item.model_id == model.id), None
+
+        pending = self.pending_profile
+        try:
+            profile = (
+                self.config.resolve_profile(model, pending.key)
+                if pending is not None and pending.key in model.profiles
+                else self.config.resolve_profile(model)
+            )
+        except ConfigError as exc:
+            print(self.palette.err(str(exc)), file=sys.stderr)
+            return True
+
+        print(self.palette.spin("正在切换模型..."))
+        try:
+            launcher.stop_all(self.config)
+        except LaunchError as exc:
+            print(self.palette.err(str(exc)), file=sys.stderr)
+            return True
+        self.client = None
+        self.chat_runner = None
+        try:
+            record = launcher.start(
+                self.config,
+                model,
+                profile,
+                palette=self.palette,
+                verbose=self.verbose,
+            )
+            launcher.wait_ready(self.config, record, self.palette)
+        except GuardError as exc:
+            self._print_guard_error(exc)
+            return True
+        except LaunchError as exc:
+            print(self.palette.err(str(exc)), file=sys.stderr)
+            return True
+        self._activate(
+            model,
+            profile,
+            LlamaClient.for_model(self.config, model, record.port),
+            record.port,
         )
-        self.model = model
-        self.port = port
-        self.client = client
-        self.profile = self.config.resolve_profile(model, record.profile if record else None)
-        self.session.model_id = model.id
-        self.session.profile = self.profile.key
-        print(self.palette.ok(f"已切换到 {model.display} · 档位 {self.profile.key}"))
+        print(self.palette.ok("已切换"))
         return True
 
     def _cmd_profile(self, rest: str) -> bool:
@@ -436,22 +491,29 @@ class Repl:
                     f"当前档位 {self.profile.key}：{self.profile.desc}"
                 )
             )
+            if self.pending_profile is not None:
+                print(
+                    self.palette.meta(
+                        f"待生效档位 {self.pending_profile.key}："
+                        f"{self.pending_profile.desc}"
+                    )
+                )
             for key in self.model.profile_keys:
                 profile = self.model.profiles[key]
                 print(
                     f"  [{key}] ctx {profile.ctx:<6}"
                     f" KV {profile.kv_k}/{profile.kv_v}  {profile.desc}"
                 )
-            print(self.palette.hint("修改档位只影响下次 serve"))
+            print(self.palette.hint("修改档位只影响下次 serve/切换"))
             return True
         try:
             profile = self.config.resolve_profile(self.model, rest)
         except ConfigError as exc:
             print(self.palette.err(str(exc)), file=sys.stderr)
             return True
-        self.profile = profile
-        self.session.profile = profile.key
-        print(self.palette.ok(f"档位已设为 {profile.key} · 下次启动生效"))
+        # 只改“待生效”档位：当前服务端的 ctx 不能凭命令幻觉改变。
+        self.pending_profile = profile
+        print(self.palette.ok(f"档位已设为 {profile.key} · 下次启动/切换生效"))
         return True
 
     def _cmd_system(self, rest: str) -> bool:
@@ -535,26 +597,30 @@ class Repl:
         self.session = loaded
         if loaded.system == "":
             self.session.system = prompts.system_prompt(self.prompt_dir)
+
+        model = self.model
         if loaded.model_id:
             try:
                 model = self.config.model(loaded.model_id)
             except ConfigError as exc:
                 print(self.palette.warn(str(exc)), file=sys.stderr)
-            else:
-                self.model = model
-                probed = self._probe(model)
-                if probed is not None:
-                    self.client, self.port = probed
-                else:
-                    self.client = None
+
+        profile = self.profile
         if loaded.profile:
             try:
-                self.profile = self.config.resolve_profile(self.model, loaded.profile)
+                profile = self.config.resolve_profile(model, loaded.profile)
             except ConfigError as exc:
                 print(self.palette.warn(str(exc)), file=sys.stderr)
+
+        probed = self._probe(model)
+        if probed is not None:
+            client, port = probed
+        else:
+            client, port = None, self.config.effective_port(model)
+        self._activate(model, profile, client, port)
         print(
             self.palette.ok(
-                f"已载入 {len(self.session.messages)} 条消息 · 模型 {self.model.id}"
+                f"已载入 {len(self.session.messages)} 条消息 · 模型 {model.id}"
             )
         )
         return True
@@ -586,6 +652,7 @@ class Repl:
             print(self.palette.err(str(exc)), file=sys.stderr)
             return True
         self.client = None
+        self.chat_runner = None
         if pids:
             print(self.palette.ok(f"已停止 {len(pids)} 个服务"))
             if self.verbose:
@@ -604,6 +671,12 @@ class Repl:
                 f" · ctx {self.profile.ctx} · KV {self.profile.kv_k}/{self.profile.kv_v}"
             )
         )
+        if self.pending_profile is not None:
+            print(
+                self.palette.meta(
+                    f"待生效档位 {self.pending_profile.key} · {self.pending_profile.desc}"
+                )
+            )
         ready = bool(self.client and self.client.health(timeout=2.0))
         state = self.palette.ok("就绪") if ready else self.palette.err("未就绪")
         head = self.palette.meta(f"端口 {self.port}")
@@ -646,6 +719,44 @@ class Repl:
     # prompt_toolkit（可选）
     # ------------------------------------------------------------------ #
 
+    def _completion_candidates(self, text: str) -> list[tuple[str, int, str]]:
+        """返回 (补全文本, start_position, 说明)；不依赖 prompt_toolkit。"""
+        if not text.startswith("/"):
+            return []
+        if " " not in text:
+            prefix = text.lower()
+            candidates: list[tuple[str, int, str]] = []
+            for command in COMMANDS:
+                name = f"/{command.name}"
+                if name.startswith(prefix):
+                    candidates.append((name, -len(text), command.description))
+                for alias in command.aliases:
+                    alias_name = f"/{alias}"
+                    if alias_name.startswith(prefix):
+                        candidates.append(
+                            (alias_name, -len(text), f"别名 → /{command.name}")
+                        )
+            return candidates
+
+        body = text[1:]
+        head, _, rest = body.partition(" ")
+        if " " in rest:
+            return []
+        start = -len(rest) if rest else 0
+        if head.lower() == "model":
+            return [
+                (model.id, start, model.display)
+                for model in self.config.models
+                if model.id.startswith(rest)
+            ]
+        if head.lower() == "profile":
+            return [
+                (key, start, self.model.profiles[key].desc)
+                for key in self.model.profile_keys
+                if key.startswith(rest)
+            ]
+        return []
+
     def _get_prompt_session(self):
         # D2：输入历史与业务会话分离；文件权限尽量收到 0600，失败只告警不阻断。
         if self._prompt_ready:
@@ -653,6 +764,7 @@ class Repl:
         self._prompt_ready = True
         try:
             from prompt_toolkit import PromptSession
+            from prompt_toolkit.completion import Completer, Completion
             from prompt_toolkit.history import FileHistory
         except ImportError:
             print(
@@ -672,8 +784,21 @@ class Repl:
                 os.chmod(path, 0o600)
         except OSError as exc:
             print(self.palette.warn(f"输入历史不可用：{exc}"), file=sys.stderr)
+
+        class ReplCompleter(Completer):
+            def __init__(self, repl: "Repl") -> None:
+                self._repl = repl
+
+            def get_completions(self, document, complete_event):
+                for text, start, meta in self._repl._completion_candidates(
+                    document.text_before_cursor
+                ):
+                    yield Completion(text, start_position=start, display_meta=meta)
+
         try:
-            self._prompt_session = PromptSession(history=history)
+            self._prompt_session = PromptSession(
+                history=history, completer=ReplCompleter(self)
+            )
         except (OSError, ValueError) as exc:
             print(
                 self.palette.warn(f"prompt_toolkit 初始化失败，降级为 input()：{exc}"),

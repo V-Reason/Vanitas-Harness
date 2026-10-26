@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import io
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -76,6 +78,15 @@ class PaletteTests(unittest.TestCase):
         second = ui.enable_vt()
         self.assertEqual(first, second)
         self.assertIsInstance(first, bool)
+
+    def test_enable_vt_accepts_modern_terminal_env(self) -> None:
+        original = ui._vt_state
+        try:
+            ui._vt_state = None
+            with mock.patch.dict(os.environ, {"WT_SESSION": "1"}, clear=True):
+                self.assertTrue(ui.enable_vt())
+        finally:
+            ui._vt_state = original
 
     def test_symbols_table_complete(self) -> None:
         self.assertEqual(set(ui.SYMBOLS), {"ok", "err", "warn", "spin", "meta", "prompt"})

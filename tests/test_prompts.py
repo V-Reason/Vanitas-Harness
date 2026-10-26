@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import tempfile
 import unittest
@@ -48,6 +49,17 @@ class PromptTests(unittest.TestCase):
     def test_render_defaults_context_to_empty(self) -> None:
         rendered = prompts.render("【{context}】{input}", {"input": "x"})
         self.assertEqual(rendered, "【】x")
+
+    def test_render_default_date_has_second_precision(self) -> None:
+        rendered = prompts.render("{date}")
+        self.assertRegex(rendered, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+    def test_render_context_history_placeholder(self) -> None:
+        rendered = prompts.render(
+            "{context_history}|{input}",
+            {"context_history": "前文", "input": "当前"},
+        )
+        self.assertEqual(rendered, "前文|当前")
 
     def test_unknown_placeholder_in_template_rejected(self) -> None:
         (self.temp_dir / "bad.md").write_text("hi {unknown}\n", encoding="utf-8")

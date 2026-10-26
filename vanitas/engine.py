@@ -12,16 +12,31 @@ import random
 import time
 import urllib.error
 import urllib.request
-from typing import Iterator
+from typing import Callable, Iterator
 
 from .config import AppConfig, ModelSpec, RequestSettings
 from .errors import EngineError
 
 DONE_TYPES = frozenset({"done"})
+PROGRESS_INTERVAL_SEC = 0.2
 
 
 def _build_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _as_int(value: object) -> int:
+    try:
+        return int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _as_float(value: object) -> float:
+    try:
+        return float(value) if value is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _error_body(exc: urllib.error.HTTPError) -> str:
@@ -44,11 +59,13 @@ class EngineClient:
         host: str,
         port: int,
         template_kwargs: dict | None = None,
+        repeat_penalty: float = 1.0,
     ) -> None:
         self._settings = settings
         self._host = host
         self._port = port
         self._template_kwargs = dict(template_kwargs or {})
+        self._repeat_penalty = float(repeat_penalty)
         self._opener = _build_opener()
 
     @classmethod
@@ -60,6 +77,7 @@ class EngineClient:
             host=config.settings.host,
             port=port if port is not None else config.effective_port(model),
             template_kwargs=model.template_kwargs,
+            repeat_penalty=getattr(model, "repeat_penalty", 1.0),
         )
 
     @property
@@ -217,8 +235,13 @@ class EngineClient:
         max_tokens: int,
         temperature: float = 0.2,
         timeout: float | None = None,
+        on_progress: Callable[[dict], None] | None = None,
     ) -> Iterator[dict]:
-        """产出 delta/reasoning/usage/done 事件；首字前失败可重试，首字后失败直接报错。"""
+        """产出 delta/reasoning/usage/done 事件；首字前失败可重试，首字后失败直接报错。
+
+        `on_progress` 以约 200ms 节流回报即时估算速率；token 数在服务端
+        返回 usage/timings 前只能用字符数估算，事件里会显式标注。
+        """
         payload = self._build_payload(messages, max_tokens, temperature, None)
         payload["stream"] = True
         payload["stream_options"] = {"include_usage": True}
@@ -237,7 +260,9 @@ class EngineClient:
             try:
                 response = self._open(request, read_timeout, retries=0)
                 try:
-                    for event in self._iter_sse(response, read_timeout):
+                    for event in self._iter_sse(
+                        response, read_timeout, on_progress=on_progress
+                    ):
                         if event["type"] == "delta":
                             emitted = True
                         yield event
@@ -278,10 +303,25 @@ class EngineClient:
             payload["response_format"] = response_format
         if self._template_kwargs:
             payload["chat_template_kwargs"] = self._template_kwargs
+        # llama-server 的 OpenAI 兼容端点接受 repeat_penalty；1.0 表示不干预。
+        if self._repeat_penalty > 1.0:
+            payload["repeat_penalty"] = float(self._repeat_penalty)
         return payload
 
-    def _iter_sse(self, response: object, read_timeout: float) -> Iterator[dict]:
+    def _iter_sse(
+        self,
+        response: object,
+        read_timeout: float,
+        *,
+        on_progress: Callable[[dict], None] | None = None,
+    ) -> Iterator[dict]:
         usage: dict | None = None
+        timings: dict = {}
+        finish_reason: str | None = None
+        chars = 0
+        started = time.perf_counter()
+        first_at: float | None = None
+        last_progress = started
         try:
             for raw_line in response:  # type: ignore[union-attr]
                 line = raw_line.decode("utf-8", "replace").strip()
@@ -296,20 +336,78 @@ class EngineClient:
                     continue
                 if not isinstance(chunk, dict):
                     continue
-                if chunk.get("usage"):
-                    usage = chunk["usage"]
+                raw_usage = chunk.get("usage")
+                if isinstance(raw_usage, dict) and raw_usage:
+                    usage = raw_usage
+                    yield {"type": "usage", "usage": usage}
+                raw_timings = chunk.get("timings")
+                if isinstance(raw_timings, dict) and raw_timings:
+                    timings = raw_timings
                 choices = chunk.get("choices") or []
                 if not choices:
                     continue
-                delta = choices[0].get("delta") or {}
+                choice = choices[0] if isinstance(choices[0], dict) else {}
+                reason = choice.get("finish_reason")
+                if reason:
+                    finish_reason = str(reason)
+                delta = choice.get("delta") or {}
                 content = delta.get("content") or ""
                 reasoning = delta.get("reasoning_content") or ""
                 if content:
+                    chars += len(content)
+                    now = time.perf_counter()
+                    if first_at is None:
+                        first_at = now
+                    if (
+                        on_progress is not None
+                        and now - last_progress >= PROGRESS_INTERVAL_SEC
+                    ):
+                        last_progress = now
+                        elapsed = max(1e-9, now - started)
+                        tokens_est = max(0, chars // 3)
+                        on_progress(
+                            {
+                                "type": "progress",
+                                "elapsed_ms": round(elapsed * 1000.0, 1),
+                                "chars": chars,
+                                "tokens_est": tokens_est,
+                                "tps_est": round(tokens_est / elapsed, 2),
+                            }
+                        )
                     yield {"type": "delta", "content": content}
                 elif reasoning:
+                    if first_at is None:
+                        first_at = time.perf_counter()
                     yield {"type": "reasoning", "content": reasoning}
         except (OSError, http.client.HTTPException) as exc:
             raise EngineError(
                 f"流式读取中断（超时 {read_timeout}s）：{exc}"
             ) from exc
-        yield {"type": "done", "usage": usage}
+
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        usage_tokens = _as_int((usage or {}).get("completion_tokens"))
+        tokens = usage_tokens or _as_int(timings.get("predicted_n")) or (chars // 3)
+        server_tps = _as_float(timings.get("predicted_per_second"))
+        if server_tps > 0:
+            tps = server_tps
+            tps_source = "server.timings"
+        elif tokens > 0 and elapsed_ms > 0:
+            tps = tokens / (elapsed_ms / 1000.0)
+            tps_source = "client.usage" if usage_tokens else "estimate"
+        else:
+            tps = 0.0
+            tps_source = "estimate"
+        ttft_ms = None
+        if first_at is not None:
+            ttft_ms = round((first_at - started) * 1000.0, 1)
+        yield {
+            "type": "done",
+            "usage": usage,
+            "timings": timings,
+            "finish_reason": finish_reason,
+            "ttft_ms": ttft_ms,
+            "elapsed_ms": round(elapsed_ms, 1),
+            "tokens": int(tokens),
+            "tps": round(tps, 2),
+            "tps_source": tps_source,
+        }

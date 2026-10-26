@@ -32,6 +32,7 @@ MODEL_FIELDS = frozenset(
         "template_kwargs",
         "profiles",
         "default_profile",
+        "repeat_penalty",
     }
 )
 PROFILE_FIELDS = frozenset({"ctx", "kv_k", "kv_v", "desc"})
@@ -44,9 +45,29 @@ REQUEST_FIELDS = frozenset(
 LAUNCHER_FIELDS = frozenset(
     {"health_timeout_sec", "health_poll_interval_ms", "kill_wait_sec"}
 )
-REPL_FIELDS = frozenset({"history_file", "max_context_tokens", "stream"})
+REPL_FIELDS = frozenset(
+    {
+        "history_file",
+        "max_context_tokens",
+        "stream",
+        "context_reserve_tokens",
+        "min_output_tokens",
+    }
+)
 TOOLS_FIELDS = frozenset({"exec_enabled", "exec_whitelist", "exec_require_confirm"})
-TRANSLATE_FIELDS = frozenset({"source_suffixes", "chunk_chars", "output_suffix"})
+TRANSLATE_FIELDS = frozenset(
+    {
+        "source_suffixes",
+        "chunk_chars",
+        "output_suffix",
+        "context_window",
+        "context_summary_chars",
+        "min_output_tokens",
+        "output_ratio",
+        "prompt_safety_tokens",
+        "monitor_lines",
+    }
+)
 UI_FIELDS = frozenset({"color", "theme"})
 THEME_KEYS = frozenset({"prompt", "success", "error", "warn", "info", "muted", "accent"})
 COLOR_MODES = frozenset({"auto", "always", "never"})
@@ -105,6 +126,7 @@ class ModelSpec:
     template_kwargs: dict
     profiles: dict
     default_profile: str
+    repeat_penalty: float = 1.0
 
     @property
     def profile_keys(self) -> list[str]:
@@ -131,6 +153,8 @@ class ReplSettings:
     history_file: Path
     max_context_tokens: int
     stream: bool
+    context_reserve_tokens: int = 512
+    min_output_tokens: int = 256
 
 
 @dataclass(frozen=True)
@@ -145,6 +169,12 @@ class TranslateSettings:
     source_suffixes: tuple[str, ...]
     chunk_chars: int
     output_suffix: str
+    context_window: int = 5
+    context_summary_chars: int = 200
+    min_output_tokens: int = 512
+    output_ratio: float = 2.5
+    prompt_safety_tokens: int = 64
+    monitor_lines: int = 5
 
 
 @dataclass(frozen=True)
@@ -397,6 +427,12 @@ def _load_model(entry: object, index: int, base_dir: Path) -> ModelSpec:
             f"默认档位 {default_profile!r} 不在 profiles 中；可用：{sorted(profiles)}",
         )
 
+    repeat_penalty = 1.0
+    if "repeat_penalty" in entry:
+        repeat_penalty = _as_number(
+            entry, "repeat_penalty", label, minimum=1.0
+        )
+
     return ModelSpec(
         id=model_id,
         display=display,
@@ -408,6 +444,7 @@ def _load_model(entry: object, index: int, base_dir: Path) -> ModelSpec:
         template_kwargs=dict(kwargs),
         profiles=profiles,
         default_profile=default_profile,
+        repeat_penalty=repeat_penalty,
     )
 
 
@@ -501,12 +538,24 @@ def _load_settings(document: dict) -> Settings:
     repl = _as_mapping(document.get("repl"), "settings.repl")
     _reject_unknown(repl, REPL_FIELDS, "settings.repl")
     history_raw = _as_str(repl, "history_file", "settings.repl")
+    context_reserve = (
+        _as_int(repl, "context_reserve_tokens", "settings.repl", minimum=64)
+        if "context_reserve_tokens" in repl
+        else 512
+    )
+    min_output = (
+        _as_int(repl, "min_output_tokens", "settings.repl", minimum=16)
+        if "min_output_tokens" in repl
+        else 256
+    )
     repl_settings = ReplSettings(
         history_file=Path(os.path.expanduser(history_raw)),
         max_context_tokens=_as_int(
             repl, "max_context_tokens", "settings.repl", minimum=256
         ),
         stream=_as_bool(repl, "stream", "settings.repl"),
+        context_reserve_tokens=context_reserve,
+        min_output_tokens=min_output,
     )
 
     tools = _as_mapping(document.get("tools"), "settings.tools")
@@ -541,10 +590,52 @@ def _load_settings(document: dict) -> Settings:
     output_suffix = _as_str(translate, "output_suffix", "settings.translate")
     if not output_suffix.startswith("."):
         _fail("settings.translate.output_suffix", "必须以 . 开头，例如 .zh")
+    context_window = (
+        _as_int(translate, "context_window", "settings.translate", minimum=0, maximum=10)
+        if "context_window" in translate
+        else 5
+    )
+    context_summary_chars = (
+        _as_int(
+            translate,
+            "context_summary_chars",
+            "settings.translate",
+            minimum=40,
+            maximum=2000,
+        )
+        if "context_summary_chars" in translate
+        else 200
+    )
+    translate_min_output = (
+        _as_int(translate, "min_output_tokens", "settings.translate", minimum=64)
+        if "min_output_tokens" in translate
+        else 512
+    )
+    output_ratio = (
+        _as_number(translate, "output_ratio", "settings.translate", minimum=1.0)
+        if "output_ratio" in translate
+        else 2.5
+    )
+    prompt_safety = (
+        _as_int(translate, "prompt_safety_tokens", "settings.translate", minimum=0)
+        if "prompt_safety_tokens" in translate
+        else 64
+    )
+    monitor_lines = (
+        _as_int(translate, "monitor_lines", "settings.translate", minimum=1, maximum=10)
+        if "monitor_lines" in translate
+        else 5
+    )
     translate_settings = TranslateSettings(
         source_suffixes=tuple(cleaned_suffixes),
         chunk_chars=_as_int(translate, "chunk_chars", "settings.translate", minimum=50),
         output_suffix=output_suffix,
+        context_window=context_window,
+        context_summary_chars=context_summary_chars,
+        min_output_tokens=translate_min_output,
+        output_ratio=output_ratio,
+        prompt_safety_tokens=prompt_safety,
+        monitor_lines=monitor_lines,
     )
 
     ui_settings = _load_ui(document["ui"]) if "ui" in document else _default_ui()

@@ -57,6 +57,7 @@
       "shards": 1,
       "role": "baseline",
       "template_kwargs": {"enable_thinking": false},
+      "repeat_penalty": 1.1,
       "profiles": {
         "1": {"ctx": 8192, "kv_k": "q4_0", "kv_v": "q4_0", "desc": "8K + Q4_0 KV（默认）"},
         "2": {"ctx": 4096, "kv_k": "f16", "kv_v": "f16", "desc": "4K + F16"}

@@ -13,33 +13,11 @@ from pathlib import Path
 
 from . import prompts
 from .errors import ConfigError
+from .metrics import MESSAGE_OVERHEAD, context_budget, estimate_tokens
 
-CJK_RANGES = (
-    (0x3400, 0x4DBF),
-    (0x4E00, 0x9FFF),
-    (0xF900, 0xFAFF),
-    (0x3040, 0x30FF),
-    (0xAC00, 0xD7AF),
-)
-CJK_PUNCT = set("，。！？；：、（）《》“”‘’【】")
-MESSAGE_OVERHEAD = 4
-
-
-def estimate_tokens(text: str) -> int:
-    """粗略估算：CJK 约 1 字 1 token，其它约 4 字符 1 token。"""
-    if not text:
-        return 0
-    cjk = 0
-    for char in text:
-        code = ord(char)
-        if char in CJK_PUNCT or any(start <= code <= end for start, end in CJK_RANGES):
-            cjk += 1
-    other = len(text) - cjk
-    return max(1, cjk + (other + 3) // 4)
-
-
-def context_budget(ctx: int, max_context_tokens: int, reserve: int = 512) -> int:
-    return max(256, min(ctx, max_context_tokens) - reserve)
+# 预算与估算集中在 metrics；此处保留同名导入，兼容旧的
+# `from vanitas.session import estimate_tokens` 用法。
+__all__ = ["Session", "context_budget", "default_save_path", "estimate_tokens"]
 
 
 @dataclass
@@ -100,7 +78,8 @@ class Session:
 
     def build_user_message(self, text: str, prompt_dir: Path, model_alias: str) -> str:
         if not self.task:
-            return text
+            # 无任务模板时仍注入秒级运行时信息；有模板时由模板的 {date} 负责。
+            return prompts.render("当前时间：{date}\n\n{input}", {"input": text})
         template = prompts.load_task(prompt_dir, self.task)
         return prompts.render(template, {"input": text, "model": model_alias})
 

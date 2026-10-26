@@ -73,27 +73,44 @@ def _try_enable_vt() -> bool:
         import ctypes
 
         kernel32 = ctypes.windll.kernel32
-    except (ImportError, AttributeError):
+        kernel32.GetStdHandle.argtypes = [ctypes.c_uint32]
+        kernel32.GetStdHandle.restype = ctypes.c_void_p
+        kernel32.GetConsoleMode.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        kernel32.GetConsoleMode.restype = ctypes.c_int
+        kernel32.SetConsoleMode.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel32.SetConsoleMode.restype = ctypes.c_int
+    except (ImportError, AttributeError, OSError):
         return False
+
     enabled = False
     for handle_id in (_STD_OUTPUT_HANDLE, _STD_ERROR_HANDLE):
-        handle = kernel32.GetStdHandle(handle_id)
+        handle = kernel32.GetStdHandle(ctypes.c_uint32(handle_id & 0xFFFFFFFF))
+        if not handle:
+            continue
         mode = ctypes.c_uint32()
         if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
             continue  # 该流被重定向，没有控制台模式可设
-        if kernel32.SetConsoleMode(handle, mode.value | _ENABLE_VIRTUAL_TERMINAL_PROCESSING):
+        if kernel32.SetConsoleMode(
+            handle, mode.value | _ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        ):
             enabled = True
     return enabled
 
 
 def enable_vt() -> bool:
-    """打开当前进程的 VT 解析；非 Windows 或失败返回 False。幂等。"""
+    """打开当前进程的 VT 解析；现代终端环境变量存在时直接放行。幂等。"""
     global _vt_state
     if _vt_state is None:
-        try:
-            _vt_state = _try_enable_vt()
-        except OSError:  # 极少数被策略拦截的宿主：降级而不是崩溃
-            _vt_state = False
+        if os.environ.get("WT_SESSION") or os.environ.get("TERM_PROGRAM"):
+            _vt_state = True
+        else:
+            try:
+                _vt_state = _try_enable_vt()
+            except OSError:  # 极少数被策略拦截的宿主：降级而不是崩溃
+                _vt_state = False
     return _vt_state
 
 
@@ -109,7 +126,9 @@ def resolve_enabled(mode: str, stream: object) -> bool:
         is_tty = bool(stream.isatty())
     except (AttributeError, ValueError, OSError):
         return False
-    return is_tty and enable_vt()
+    if not is_tty:
+        return False
+    return enable_vt()
 
 
 class Palette:

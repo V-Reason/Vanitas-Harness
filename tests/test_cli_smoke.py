@@ -157,6 +157,13 @@ class CliSmokeTests(unittest.TestCase):
         self.assertNotIn("\x1b[", out)
         self.assertNotIn("\x1b[", err)
 
+    def test_agent_subcommand_dispatches(self) -> None:
+        with clean_env():
+            with mock.patch.object(cli.agent_mod, "run_agent", return_value=0) as called:
+                code, _out, _err = run(["agent"])
+        self.assertEqual(code, 0)
+        called.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

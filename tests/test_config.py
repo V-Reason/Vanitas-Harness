@@ -80,14 +80,51 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.resolve_profile(qwen).key, "1")
         self.assertEqual(config.model_by_role("translate").id, "hymt")
         self.assertTrue(config.models[0].template_kwargs["enable_thinking"] is False)
+        self.assertEqual(qwen.repeat_penalty, 1.0)
+        self.assertEqual(config.model("qwen3b").repeat_penalty, 1.1)
 
     def test_defaults_come_from_settings(self) -> None:
         with clean_env():
             config = load_config()
         self.assertEqual(config.settings.repl.max_context_tokens, 8192)
+        self.assertEqual(config.settings.repl.context_reserve_tokens, 512)
+        self.assertEqual(config.settings.repl.min_output_tokens, 256)
         self.assertEqual(config.settings.translate.chunk_chars, 1500)
+        self.assertEqual(config.settings.translate.context_window, 5)
+        self.assertEqual(config.settings.translate.min_output_tokens, 512)
+        self.assertEqual(config.settings.translate.output_ratio, 2.5)
+        self.assertEqual(config.settings.translate.prompt_safety_tokens, 64)
+        self.assertEqual(config.settings.translate.monitor_lines, 5)
         self.assertFalse(config.settings.tools.exec_enabled)
         self.assertTrue(config.settings.tools.exec_require_confirm)
+
+    def test_new_budget_fields_are_optional(self) -> None:
+        del self.settings["repl"]["context_reserve_tokens"]
+        del self.settings["repl"]["min_output_tokens"]
+        del self.settings["translate"]["context_window"]
+        del self.settings["translate"]["context_summary_chars"]
+        del self.settings["translate"]["min_output_tokens"]
+        del self.settings["translate"]["output_ratio"]
+        del self.settings["translate"]["prompt_safety_tokens"]
+        del self.settings["translate"]["monitor_lines"]
+        self.write_settings()
+        with clean_env():
+            config = self.load()
+        self.assertEqual(config.settings.repl.context_reserve_tokens, 512)
+        self.assertEqual(config.settings.repl.min_output_tokens, 256)
+        self.assertEqual(config.settings.translate.context_window, 5)
+        self.assertEqual(config.settings.translate.context_summary_chars, 200)
+        self.assertEqual(config.settings.translate.min_output_tokens, 512)
+        self.assertEqual(config.settings.translate.output_ratio, 2.5)
+        self.assertEqual(config.settings.translate.prompt_safety_tokens, 64)
+        self.assertEqual(config.settings.translate.monitor_lines, 5)
+
+    def test_repeat_penalty_below_one_rejected(self) -> None:
+        self.models["models"][3]["repeat_penalty"] = 0.9
+        self.write_models()
+        with clean_env():
+            with self.assertRaises(ConfigError):
+                self.load()
 
     def test_duplicate_port_rejected(self) -> None:
         self.models["models"][1]["port"] = self.models["models"][0]["port"]
