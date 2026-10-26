@@ -80,7 +80,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.resolve_profile(qwen).key, "1")
         self.assertEqual(config.model_by_role("translate").id, "hymt")
         self.assertTrue(config.models[0].template_kwargs["enable_thinking"] is False)
-        self.assertEqual(qwen.repeat_penalty, 1.0)
+        self.assertEqual(qwen.repeat_penalty, 1.1)
 
     def test_defaults_come_from_settings(self) -> None:
         with clean_env():

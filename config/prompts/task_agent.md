@@ -38,6 +38,8 @@
 1. JSON 路径转义：Windows 路径必须使用正斜杠（如 `sub/dir/a.txt`）或合法的双反斜杠（如 `sub\\dir\\a.txt`），避免单反斜杠触发 Invalid \escape 解析错误。
 2. 工具执行反馈：系统会将工具的执行结果封装为 `<tool_result>` 消息回填给你。
 3. 最终答复呈现：在确认任务全部完成且无需进一步工具调用时，请直接输出普通中文文本向用户汇报结果，严禁在此时包裹 `<tool_call>` 标签。
+4. 【严禁前置闲聊】当你需要调用工具时，必须且只能立即输出工具调用（<tool_call>），严禁在调用前输出“我接下来将……”或任何自然语言解释，直接用动作表达意图。
+5. 【修改文件必须且只能调用 write_file】严禁在文本中徒手输出大段代码，严禁尝试使用 git apply 或 shell 写文件；修改文件必须立即调用 write_file(path, content)。
 </protocol_contract>
 
 <operational_directives>

@@ -10,6 +10,7 @@
       "shards": 2,
       "role": "general",
       "template_kwargs": {"enable_thinking": false},
+      "repeat_penalty": 1.1,
       "profiles": {
         "1": {"ctx": 4096, "kv_k": "q8_0", "kv_v": "q8_0", "desc": "4K + Q8_0 KV（近无损，默认）"},
         "2": {"ctx": 8192, "kv_k": "q4_0", "kv_v": "q4_0", "desc": "8K + Q4_0 KV（长文档）"},
