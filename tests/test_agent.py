@@ -207,6 +207,23 @@ class AgentTests(unittest.TestCase):
         self.assertFalse(outside.exists())
         self.assertIn("执行失败", runner.calls[1][1])
 
+    def test_prose_then_action_is_executed(self) -> None:
+        payload = (
+            "好的，我将重新执行写入操作。\n\n"
+            + action_payload("write_file", path="README.md", content="五首诗")
+        )
+        plans: list[str] = []
+        repl, runner = self.make_repl(
+            [payload, "写入完成"],
+            confirm=lambda plan: plans.append(plan) or True,
+        )
+        _value, out, _err = quiet_run(lambda: repl._chat("写 README"))
+        self.assertTrue((self.root / "README.md").exists())
+        self.assertIn("写入完成", out)
+        self.assertEqual(len(plans), 1)
+        self.assertIn("将写入文件 README.md", plans[0])
+        self.assertNotIn('{"action"', out)
+
     def test_batch_move_uses_one_summary_and_one_confirmation(self) -> None:
         (self.root / "a.md").write_text("a", encoding="utf-8")
         (self.root / "b.md").write_text("b", encoding="utf-8")
@@ -351,6 +368,22 @@ class ActionParserTests(unittest.TestCase):
         self.assertIsNotNone(actions)
         self.assertEqual(actions[0].parameters["path"], r"<WORKSPACE>")
 
+    def test_extracts_action_block_after_prose(self) -> None:
+        raw = (
+            "好的，我将重新执行写入操作。\n\n"
+            '{"action":"write_file","parameters":'
+            '{"path":"README.md","content":"五首诗"}}'
+        )
+        actions = agent._parse_actions(raw)
+        self.assertIsNotNone(actions)
+        self.assertEqual(actions[0].name, "write_file")
+        self.assertEqual(actions[0].parameters["content"], "五首诗")
+
+    def test_prose_without_action_json_returns_none(self) -> None:
+        self.assertIsNone(
+            agent._parse_actions('以下是示例：\n{"result":"ok"}')
+        )
+
     def test_parses_single_alias_and_batch(self) -> None:
         single = agent._parse_actions(action_payload("shell", command="echo hi"))
         self.assertEqual(single[0].name, "run_shell_ro")
@@ -393,6 +426,18 @@ class ActionParserTests(unittest.TestCase):
             text_stream.flush()
             self.assertTrue(text_stream.emitted)
             self.assertEqual(out.getvalue(), "你好")
+
+    def test_stream_suppresses_trailing_action_after_prose(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            stream = agent._AgentAnswerStream()
+            stream.write("好的，我将写入。\n")
+            stream.write('{"action":"write_file",')
+            stream.write('"parameters":{"path":"a.txt","content":"x"}}')
+            self.assertEqual(out.getvalue(), "好的，我将写入。\n")
+            self.assertTrue(stream.suppressed)
+            stream.flush_suppressed()
+            self.assertIn('"action"', out.getvalue())
 
     def test_rejects_empty_or_oversized_batch(self) -> None:
         with self.assertRaises(ValueError):

@@ -34,6 +34,7 @@ _JSON_PATH_VALUE_RE = re.compile(
     r'((?:[^"\\]|\\.)*)(")',
     re.DOTALL,
 )
+_JSON_LINE_START_RE = re.compile(r"(?m)^[ \t]*([\[{])")
 _HEX = frozenset("0123456789abcdefABCDEF")
 _VALID_JSON_ESCAPES = frozenset('"\\/bfnrt')
 
@@ -176,29 +177,75 @@ def _repair_invalid_json_escapes(text: str) -> str:
     return "".join(pieces)
 
 
+def _json_loads(text: str):
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # 模型有时把 content 中的换行直接写进 JSON 字符串；允许控制字符，
+        # 仍由后续强类型校验约束字段。
+        return json.loads(text, strict=False)
+
+
 def _load_action_json(text: str):
     """先按标准 JSON 解析，失败后只修复路径字段，最后再做全局转义兜底。"""
     try:
-        return json.loads(text)
+        return _json_loads(text)
     except json.JSONDecodeError as first_error:
         repaired = _repair_path_escapes(text)
         try:
-            return json.loads(repaired)
+            return _json_loads(repaired)
         except json.JSONDecodeError:
             second = _repair_invalid_json_escapes(repaired)
             try:
-                return json.loads(second)
+                return _json_loads(second)
             except json.JSONDecodeError:
                 raise first_error
 
 
+def _has_action_payload(payload: object) -> bool:
+    if isinstance(payload, dict):
+        return "action" in payload
+    if isinstance(payload, list):
+        return bool(payload) and all(
+            isinstance(item, dict) and "action" in item for item in payload
+        )
+    return False
+
+
+def _embedded_action_text(text: str) -> str | None:
+    """提取“解释文字 + 尾部 JSON 动作块”中的动作块。
+
+    只接受从某一行行首开始的 JSON 对象/数组，避免把正文里的普通 JSON
+    示例当成动作；动作数组仍会由上层走一次清单确认。
+    """
+    for match in reversed(list(_JSON_LINE_START_RE.finditer(text))):
+        if match.start() == 0:
+            continue
+        candidate = text[match.start():].strip()
+        if candidate.endswith("```"):
+            candidate = candidate[:-3].rstrip()
+        try:
+            payload = _load_action_json(candidate)
+        except json.JSONDecodeError:
+            continue
+        if _has_action_payload(payload):
+            return candidate
+    return None
+
+
 def _parse_actions(text: str) -> list[AgentAction] | None:
-    """解析单动作或动作数组；普通文本返回 None，非法 JSON 抛 ValueError。"""
+    """解析单动作/动作数组；支持前置解释文字后的尾部 JSON 动作块。"""
     stripped = text.strip()
-    if not stripped or stripped[0] not in "[{":
+    if not stripped:
         return None
     try:
-        payload = _load_action_json(stripped)
+        if stripped[0] in "[{":
+            payload = _load_action_json(stripped)
+        else:
+            embedded = _embedded_action_text(stripped)
+            if embedded is None:
+                return None
+            payload = _load_action_json(embedded)
     except json.JSONDecodeError as exc:
         if '"action"' in stripped or stripped.startswith("["):
             raise ValueError(
@@ -281,48 +328,77 @@ def _clip_feedback(text: str) -> str:
 class _AgentAnswerStream:
     """把 Agent 的流式输出分成“动作 JSON”和“最终自然语言”。
 
-    `StreamRenderer` 把每个增量写进来；先缓存到首个非空白字符：
-    - `{` / `[` 视为动作 JSON，全部丢弃，避免终端看到原始 JSON；
-    - 其它字符视为最终答复，缓存内容立即补齐并持续透传。
+    初始阶段先看首个非空白字符：`{` / `[` 直接进入动作模式，整段丢弃。
+    进入自然语言后，行首若再次出现 `{` / `[`（典型是“解释文字 + 动作块”），
+    暂停输出并缓存尾部；上层确认是动作后丢弃，不是动作则 `flush_suppressed()`。
     """
 
     def __init__(self) -> None:
         self._target = sys.stdout
         self._buffer = ""
-        self._decided = False
-        self._emit = False
+        self._mode = "initial"  # initial | text | suppressed
+        self._line_start = False
         self._wrote = False
 
     @property
     def emitted(self) -> bool:
-        return self._emit and self._wrote
+        return self._wrote
+
+    @property
+    def suppressed(self) -> bool:
+        return self._mode == "suppressed"
 
     def write(self, text: str) -> int:
-        if not text:
-            return 0
-        if not self._decided:
-            self._buffer += text
-            stripped = self._buffer.lstrip()
-            if not stripped:
-                return len(text)
-            if stripped[0] in "[{":
-                # 动作 JSON 不落屏；结果仍由 TurnResult.text 交给解析器。
-                self._decided = True
-                self._emit = False
+        for char in text:
+            if self._mode == "suppressed":
+                self._buffer += char
+                continue
+            if self._mode == "initial":
+                self._buffer += char
+                stripped = self._buffer.lstrip()
+                if not stripped:
+                    continue
+                if stripped[0] in "[{":
+                    self._mode = "suppressed"
+                    self._buffer = ""
+                    continue
+                self._mode = "text"
+                pending = self._buffer
                 self._buffer = ""
-                return len(text)
-            self._decided = True
-            self._emit = True
-            pending = self._buffer
-            self._buffer = ""
-            self._send(pending)
-            return len(text)
-        if self._emit:
-            self._send(text)
+                self._line_start = pending.endswith(("\n", "\r"))
+                self._send(pending)
+                continue
+            if char in "\r\n":
+                self._send(char)
+                self._buffer = ""
+                self._line_start = True
+                continue
+            if self._line_start:
+                self._buffer += char
+                if char in " \t":
+                    continue
+                if char in "[{":
+                    self._mode = "suppressed"
+                    self._buffer = ""
+                    continue
+                pending = self._buffer
+                self._buffer = ""
+                self._line_start = False
+                self._send(pending)
+                continue
+            self._send(char)
         return len(text)
 
     def flush(self) -> None:
         self._target.flush()
+
+    def flush_suppressed(self) -> None:
+        if self._mode != "suppressed":
+            return
+        pending = self._buffer
+        self._buffer = ""
+        self._mode = "text"
+        self._send(pending)
 
     def _send(self, text: str) -> None:
         if not text:
@@ -384,7 +460,9 @@ class AgentRepl(Repl):
                 print(self.palette.err(str(exc)), file=sys.stderr)
                 return
             if actions is None:
-                if not stream.emitted:
+                if stream.suppressed:
+                    stream.flush_suppressed()
+                elif not stream.emitted:
                     self._print_final(result.text)
                 return
             if steps >= self.max_steps:

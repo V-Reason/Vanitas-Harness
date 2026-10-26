@@ -107,7 +107,7 @@
 # 1) 语法
 Get-ChildItem vanitas\*.py, tests\test_*.py | ForEach-Object { python -m py_compile $_.FullName }
 
-# 2) 单测（当前 232 例）
+# 2) 单测（当前 236 例）
 python -m unittest discover -s tests
 
 # 3) 静态红线
@@ -143,7 +143,7 @@ python -m vanitas stop
 
 - 并发（`-np 1`）、长上下文质量、持续压测、TTY 交互、`--foreground`、`.md/.txt` 真机翻译、5xx 重试路径尚未验证。
 - v0.4.1 的 16 色配色与三处覆盖式进度未做真人 TTY 验收（仅伪 TTY 单测 + 强制 `always` 抓字节）。
-- `vanitas agent` 的默认入口、`{cwd}` 注入、只读列目录不确认、批量 `move_file` 清单与一次 `[y/N]`、三连输入不触发上下文裁剪、最终答复流式（实测 111 次写入）、`run_shell_ro` 拒绝写命令、工作区外读取拦截均已用 qwen7b 真机冒烟；但真实终端 `[y/N]` 观感、真实删除、模型在 shell 被拒后自动改用 `move_file`，以及 5 轮耗尽提示仍未验收。
+- `vanitas agent` 的默认入口、`{cwd}` 注入、只读列目录不确认、批量 `move_file` 清单与一次 `[y/N]`、三连输入不触发上下文裁剪、最终答复流式（实测 111 次写入）、解释文字后的尾部动作 JSON、`run_shell_ro` 拒绝写命令、工作区外读取拦截均已用 qwen7b 真机冒烟；但真实终端 `[y/N]` 观感、真实删除、模型在 shell 被拒后自动改用 `move_file`，以及 5 轮耗尽提示仍未验收。
 - `exec_whitelist` 已退役；`config/settings.json` 的 `tools` 只保留 `exec_enabled` 与 `exec_require_confirm`。Agent 只读权限以 `tools.py` 的硬编码前缀为唯一事实源，不再允许配置文件扩展。
 - Agent 路径约束是参数级沙盒，不是 OS 级隔离；程序内部自行写文件仍需人工判断。
 - 混合换行的 `.srt` 会静默产出 `0 段`（已定位未修，见现状第 5 节）。
