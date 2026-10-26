@@ -35,7 +35,9 @@ class SessionTests(unittest.TestCase):
         message = session.build_user_message("hello", self.prompt_dir, "alias")
         self.assertIn("hello", message)
         self.assertNotIn("{date}", message)
-        self.assertIn("当前时间：", message)
+        self.assertIn("当前日期：", message)
+        stamp = message.splitlines()[0].split("：", 1)[1]
+        self.assertRegex(stamp, STAMP)
 
     def test_budget_helpers_are_reexported(self) -> None:
         self.assertEqual(context_budget(4096, 8192), 3584)

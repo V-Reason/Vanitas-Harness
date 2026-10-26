@@ -61,6 +61,13 @@ class PromptTests(unittest.TestCase):
         )
         self.assertEqual(rendered, "前文|当前")
 
+    def test_task_chat_is_minimal(self) -> None:
+        text = prompts.load_task(self.prompt_dir, "chat")
+        self.assertIn("当前日期：{date}", text)
+        self.assertIn("当前模型：{model}", text)
+        self.assertIn("请直接回答", text)
+        self.assertNotIn("复述", text)
+
     def test_unknown_placeholder_in_template_rejected(self) -> None:
         (self.temp_dir / "bad.md").write_text("hi {unknown}\n", encoding="utf-8")
         with self.assertRaises(ConfigError) as ctx:
