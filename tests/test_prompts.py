@@ -89,6 +89,9 @@ class PromptTests(unittest.TestCase):
         self.assertIn("delete_file", text)
         self.assertIn("run_shell_ro", text)
         self.assertIn("绝对不能尝试使用 shell 命令", text)
+        self.assertIn("JSON 路径转义", text)
+        self.assertIn("Invalid \\escape", text)
+        self.assertIn("不要编造", text)
         self.assertIn("[系统反馈]", text)
         self.assertIn("普通中文文本", text)
 

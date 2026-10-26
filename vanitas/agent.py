@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import dataclass
 from typing import Callable
@@ -28,6 +29,13 @@ AUTO_ACTIONS = frozenset({"read_file", "list_dir", "run_shell_ro"})
 CONFIRM_ACTIONS = frozenset({"write_file", "delete_file", "move_file"})
 ACTION_NAMES = AUTO_ACTIONS | CONFIRM_ACTIONS
 _ACTION_ALIASES = {"shell": "run_shell_ro"}
+_JSON_PATH_VALUE_RE = re.compile(
+    r'("(?:path|src|dst|source|dest|destination|file|files|command)"\s*:\s*")'
+    r'((?:[^"\\]|\\.)*)(")',
+    re.DOTALL,
+)
+_HEX = frozenset("0123456789abcdefABCDEF")
+_VALID_JSON_ESCAPES = frozenset('"\\/bfnrt')
 
 
 @dataclass(frozen=True)
@@ -92,13 +100,105 @@ def _action_from_payload(payload: object) -> AgentAction:
     return _build_action(name.strip(), raw_params)
 
 
+def _escape_path_backslashes(value: str) -> str:
+    """把路径字段里的 Windows 单反斜杠补成合法 JSON 转义。
+
+    模型经常输出 `T:\\TMP\\test`（源码里只有一个反斜杠），而 JSON 会把
+    `\\T` 判为非法；`\\t` 又会被误解析成制表符。路径字段按“字面反斜杠”
+    处理：奇数个反斜杠补一个，偶数个保持不变（已经转义过的路径不重复加倍）。
+    """
+    pieces: list[str] = []
+    index = 0
+    while index < len(value):
+        if value[index] != "\\":
+            pieces.append(value[index])
+            index += 1
+            continue
+        start = index
+        while index < len(value) and value[index] == "\\":
+            index += 1
+        run = index - start
+        following = value[index] if index < len(value) else ""
+        if following == '"':
+            # 保留 \"，避免把路径/命令里的合法引号转义拆坏。
+            pieces.append("\\" * run)
+        else:
+            pieces.append("\\" * (run if run % 2 == 0 else run + 1))
+    return "".join(pieces)
+
+
+def _repair_path_escapes(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        return (
+            match.group(1)
+            + _escape_path_backslashes(match.group(2))
+            + match.group(3)
+        )
+
+    return _JSON_PATH_VALUE_RE.sub(replace, text)
+
+
+def _repair_invalid_json_escapes(text: str) -> str:
+    """兜底：把字符串中仍非法的单反斜杠补齐；不改变对象结构。"""
+    pieces: list[str] = []
+    index = 0
+    in_string = False
+    while index < len(text):
+        char = text[index]
+        if char == '"':
+            pieces.append(char)
+            in_string = not in_string
+            index += 1
+            continue
+        if not in_string or char != "\\":
+            pieces.append(char)
+            index += 1
+            continue
+
+        start = index
+        while index < len(text) and text[index] == "\\":
+            index += 1
+        run = index - start
+        following = text[index] if index < len(text) else ""
+        valid_unicode = (
+            following == "u"
+            and index + 4 < len(text)
+            and all(item in _HEX for item in text[index + 1:index + 5])
+        )
+        if following == '"' and run % 2 == 1:
+            # 最后一个反斜杠转义引号，跳过引号，避免把字符串提前闭合。
+            pieces.append("\\" * run + '"')
+            index += 1
+        elif following in _VALID_JSON_ESCAPES or valid_unicode:
+            pieces.append("\\" * run)
+        else:
+            pieces.append("\\" * (run if run % 2 == 0 else run + 1))
+    return "".join(pieces)
+
+
+def _load_action_json(text: str):
+    """先按标准 JSON 解析，失败后只修复路径字段，最后再做全局转义兜底。"""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as first_error:
+        repaired = _repair_path_escapes(text)
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            second = _repair_invalid_json_escapes(repaired)
+            try:
+                return json.loads(second)
+            except json.JSONDecodeError:
+                raise first_error
+
+
 def _parse_actions(text: str) -> list[AgentAction] | None:
     """解析单动作或动作数组；普通文本返回 None，非法 JSON 抛 ValueError。"""
     stripped = text.strip()
     if not stripped or stripped[0] not in "[{":
         return None
     try:
-        payload = json.loads(stripped)
+        payload = _load_action_json(stripped)
     except json.JSONDecodeError as exc:
         if '"action"' in stripped or stripped.startswith("["):
             raise ValueError(

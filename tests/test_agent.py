@@ -322,6 +322,28 @@ class AgentTests(unittest.TestCase):
 
 
 class ActionParserTests(unittest.TestCase):
+    def test_repairs_untranslated_windows_backslashes(self) -> None:
+        raw = r'{"action":"list_dir","parameters":{"path":"<WORKSPACE>"}}'
+        actions = agent._parse_actions(raw)
+        self.assertIsNotNone(actions)
+        self.assertEqual(actions[0].parameters["path"], r"<WORKSPACE>")
+
+    def test_repairs_backslashes_in_batch_paths(self) -> None:
+        raw = (
+            r'[{"action":"move_file","parameters":'
+            r'{"src":"<WORKSPACE>\a.md","dst":"<WORKSPACE>\a.srt"}}]'
+        )
+        actions = agent._parse_actions(raw)
+        self.assertIsNotNone(actions)
+        self.assertEqual(actions[0].parameters["src"], r"<WORKSPACE>\a.md")
+        self.assertEqual(actions[0].parameters["dst"], r"<WORKSPACE>\a.srt")
+
+    def test_valid_double_backslashes_remain_single_literal(self) -> None:
+        raw = '{"action":"list_dir","parameters":{"path":"T:\\\\TMP\\\\test"}}'
+        actions = agent._parse_actions(raw)
+        self.assertIsNotNone(actions)
+        self.assertEqual(actions[0].parameters["path"], r"<WORKSPACE>")
+
     def test_parses_single_alias_and_batch(self) -> None:
         single = agent._parse_actions(action_payload("shell", command="echo hi"))
         self.assertEqual(single[0].name, "run_shell_ro")
