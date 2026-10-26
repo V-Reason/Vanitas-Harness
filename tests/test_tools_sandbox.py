@@ -270,6 +270,33 @@ class ReadonlyShellTests(unittest.TestCase):
         with self.assertRaises(ToolDenied):
             self.toolbox.run_shell_ro("git branch -D main")
 
+    def test_python_verify_prefix_is_allowed(self) -> None:
+        fake = mock.Mock(
+            return_value=subprocess.CompletedProcess([], 0, stdout=b"ok\n", stderr=b"")
+        )
+        with mock.patch("vanitas.tools.subprocess.run", fake):
+            result = self.toolbox.run_shell_ro("python verify.py")
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(fake.call_args.kwargs["shell"])
+        self.assertEqual(fake.call_args.kwargs["cwd"], str(self.root.resolve()))
+
+    def test_python_unittest_prefix_is_allowed(self) -> None:
+        fake = mock.Mock(
+            return_value=subprocess.CompletedProcess([], 0, stdout=b"ok\n", stderr=b"")
+        )
+        with mock.patch("vanitas.tools.subprocess.run", fake):
+            result = self.toolbox.run_shell_ro("python -m unittest test_calc.py")
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(fake.call_args.kwargs["shell"])
+        with self.assertRaises(ToolDenied) as ctx:
+            self.toolbox.run_shell_ro("python -m unittest ..\\evil.py")
+        self.assertIn("越界", str(ctx.exception))
+
+    def test_python_other_scripts_are_rejected(self) -> None:
+        with self.assertRaises(ToolDenied) as ctx:
+            self.toolbox.run_shell_ro("python evil.py")
+        self.assertIn("只允许只读命令", str(ctx.exception))
+
     def test_readonly_prefixes_come_from_settings(self) -> None:
         tool_settings = replace(
             self.config.settings.tools,

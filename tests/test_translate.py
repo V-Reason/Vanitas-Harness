@@ -274,8 +274,7 @@ class TranslateTests(unittest.TestCase):
                 return (
                     "[#1] 那、那个……是离耳朵太近了吗？\n"
                     "[#2] 啾……呵呵，连耳垂都红透了呢。\n"
-                    "[#3] （在耳边低语）哈啊……已经忍不住了吗？\n"
-                    "[#4] "
+                    "[#3] （在耳边低语）哈啊……已经忍不住了吗？"
                 )
             return f"译{prompt}"
 
@@ -312,6 +311,29 @@ class TranslateTests(unittest.TestCase):
         self.assertIn("哈啊……", blocks[2][0].text)
         self.assertEqual(blocks[3][0].text.strip(), "")
         self.assertNotIn("ご視聴", translated)
+
+    def test_asr_hallucination_hard_filter(self) -> None:
+        text = (
+            "1\n00:00:01,000 --> 00:00:02,000\n正常台词\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\nご視聴ありがとうございました\n"
+        )
+        source = self.write("hallucination.srt", text)
+        calls: list[str] = []
+
+        def chat(prompt: str) -> str:
+            calls.append(prompt)
+            return f"译{prompt}"
+
+        outcome = translate_file(chat, source, SETTINGS)
+        self.assertEqual(outcome.segments, 2)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("ご視聴", calls[0])
+        translated = outcome.output.read_text(encoding="utf-8")
+        blocks = parse_srt(translated, "\n")
+        self.assertEqual([block.index for block, _ in blocks], ["1", "2"])
+        self.assertEqual(blocks[0][0].text, "译正常台词")
+        self.assertEqual(blocks[1][0].timing, "00:00:03,000 --> 00:00:04,000")
+        self.assertEqual(blocks[1][0].text, "")
 
     def test_srt_segment_failure_keeps_original_and_reports(self) -> None:
         def failing_chat(text: str) -> str:

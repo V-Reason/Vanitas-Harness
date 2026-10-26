@@ -29,6 +29,10 @@ SENTENCE_ENDERS = "。！？!?；;"
 BLOCK_SEP = re.compile(r"(\r?\n[ \t]*\r?\n)")
 SRT_TIME = re.compile(r"^\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}")
 WINDOW_ID_RE = re.compile(r"^\[#(\d+)\]\s*(.*)$")
+ASR_HALLUCINATION_PATTERNS = re.compile(
+    r"(?:ご視聴ありがとうございました|チャンネル登録|高評価|Thank you for watching|Watching|Sous-titres)",
+    re.IGNORECASE,
+)
 BOM = b"\xef\xbb\xbf"
 FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)\n```$", re.DOTALL)
 QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’", "「": "」", "『": "』"}
@@ -486,10 +490,25 @@ def translate_srt(
         if block.index and block.text.strip()
     ]
     total = len(valid_items)
+    translatable: list[tuple[int, Subtitle]] = []
+    filtered = 0
+    for item in valid_items:
+        subtitle = item[1]
+        if ASR_HALLUCINATION_PATTERNS.search(subtitle.text):
+            subtitle.text = ""
+            filtered += 1
+        else:
+            translatable.append(item)
     done = 0
 
     if window_size <= 1:
         for _block_index, subtitle in valid_items:
+            if not subtitle.text.strip():
+                # ASR 幻觉已置空：不调用模型，但仍计入已完成段，保持进度与 segments 一致
+                done += 1
+                if on_segment is not None:
+                    on_segment(done, total)
+                continue
             result = _translate_chunks(
                 chat,
                 subtitle.text,
@@ -509,7 +528,7 @@ def translate_srt(
     windows: list[list[tuple[int, Subtitle]]] = []
     current: list[tuple[int, Subtitle]] = []
     current_chars = 0
-    for item in valid_items:
+    for item in translatable:
         text_len = len(item[1].text)
         if current and (
             len(current) >= window_size
@@ -562,6 +581,12 @@ def translate_srt(
                     subtitle.text = result
 
         done += len(window)
+        if on_segment is not None:
+            on_segment(done, total)
+
+    if filtered:
+        # 被 ASR 硬清洗的空块不发请求，但要在末尾补齐进度，保证 done==total
+        done += filtered
         if on_segment is not None:
             on_segment(done, total)
 

@@ -112,6 +112,9 @@ class PromptTests(unittest.TestCase):
         self.assertIn("严禁", text)
         self.assertIn("【截断防御】", text)
         self.assertIn("如果写入内容过长", text)
+        self.assertIn("【严禁前置闲聊】", text)
+        self.assertIn("【修改文件必须且只能调用 write_file】", text)
+        self.assertIn("git apply", text)
 
     def test_agent_continue_template_loads(self) -> None:
         text = prompts.load_template(self.prompt_dir, "agent_continue")

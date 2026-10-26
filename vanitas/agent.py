@@ -36,6 +36,18 @@ _TOOL_CALL_RE = re.compile(
 )
 TOOL_CALL_OPEN = "<tool_call>"
 TOOL_CALL_CLOSE = "</tool_call>"
+FUNCTION_OPEN = "<function"
+FUNCTION_CLOSE = "</function>"
+FUNCTION_RESULTS_OPEN = "<function_results"
+FUNCTION_RESULTS_CLOSE = "</function_results>"
+_FUNCTION_XML_RE = re.compile(
+    r'<function\s+name="(?P<name>[^"]+)"\s*>(?P<body>.*?)</function>',
+    re.DOTALL | re.IGNORECASE,
+)
+_PARAM_TAG_RE = re.compile(
+    r'<param\s+name="(?P<pname>[^"]+)"\s*>(?:<!\[CDATA\[(?P<cdata>.*?)\]\]>|(?P<plain>.*?))</param>',
+    re.DOTALL | re.IGNORECASE,
+)
 _JSON_DECODER = json.JSONDecoder(strict=False)
 _HEX = frozenset("0123456789abcdefABCDEF")
 _VALID_JSON_ESCAPES = frozenset('"\\/bfnrt')
@@ -337,6 +349,28 @@ def _payloads_from_text(text: str) -> list[dict] | None:
     return calls if recognized else None
 
 
+def _payloads_from_function_xml(text: str) -> list[dict] | None:
+    """解析 MiniCPM 原生 <function name="..."> + <param> / CDATA 工具方言。"""
+    calls: list[dict] = []
+    for match in _FUNCTION_XML_RE.finditer(text):
+        name = match.group("name").strip()
+        if not name:
+            continue
+        params: dict[str, str] = {}
+        for pmatch in _PARAM_TAG_RE.finditer(match.group("body")):
+            pname = pmatch.group("pname").strip()
+            if not pname:
+                continue
+            raw = (
+                pmatch.group("cdata")
+                if pmatch.group("cdata") is not None
+                else pmatch.group("plain")
+            )
+            params[pname] = (raw or "").strip()
+        calls.append({"action": name, "parameters": params})
+    return calls or None
+
+
 def extract_tool_calls(text: str) -> list[dict] | None:
     """提取 `<tool_call>` 或裸 JSON 中的动作对象。
 
@@ -355,12 +389,17 @@ def extract_tool_calls(text: str) -> list[dict] | None:
                 continue
             recognized = True
             calls.extend(payloads)
-        return calls if recognized else None
+        if recognized:
+            return calls
+    xml_calls = _payloads_from_function_xml(text)
+    if xml_calls:
+        return xml_calls
     return _payloads_from_text(text)
 
 
 def _looks_like_action_attempt(text: str) -> bool:
-    if "<tool_call" in text.lower():
+    lowered = text.lower()
+    if "<tool_call" in lowered or "<function" in lowered:
         return True
     return '"action"' in text
 
@@ -500,6 +539,7 @@ class _AgentAnswerStream:
         self._target = sys.stdout
         self._buffer = ""
         self._suppressed = ""
+        self._suppress_close = TOOL_CALL_CLOSE
         self._restore: list[str] = []
         self._mode = "initial"  # initial | text | probe_tag | suppress_tag | suppress_json
         self._line_start = False
@@ -522,10 +562,49 @@ class _AgentAnswerStream:
             self._feed(char)
         return len(text)
 
+    def _begin_suppression(self, close_tag: str) -> None:
+        self._suppress_close = close_tag
+        self._suppressed = self._buffer
+        self._buffer = ""
+        self._line_start = False
+        self._mode = "suppress_tag"
+
+    def _try_start_suppression(self, stripped: str) -> bool:
+        """识别 <tool_call>、<function …>、<function_results…> 三种开标签。
+
+        返回 True 表示已进入抑制或仍需等待后续字符；False 表示普通文本。
+        """
+        lowered = stripped.lower()
+        if lowered.startswith(FUNCTION_RESULTS_OPEN):
+            if (
+                len(lowered) == len(FUNCTION_RESULTS_OPEN)
+                or lowered[len(FUNCTION_RESULTS_OPEN)] in " \t\r\n>"
+            ):
+                self._begin_suppression(FUNCTION_RESULTS_CLOSE)
+                return True
+            return False
+        if FUNCTION_RESULTS_OPEN.startswith(lowered):
+            return True
+        if lowered.startswith(FUNCTION_OPEN):
+            if (
+                len(lowered) == len(FUNCTION_OPEN)
+                or lowered[len(FUNCTION_OPEN)] in " \t\r\n>"
+            ):
+                self._begin_suppression(FUNCTION_CLOSE)
+                return True
+            return False
+        if FUNCTION_OPEN.startswith(lowered):
+            return True
+        if TOOL_CALL_OPEN.startswith(lowered):
+            if lowered == TOOL_CALL_OPEN:
+                self._begin_suppression(TOOL_CALL_CLOSE)
+            return True
+        return False
+
     def _feed(self, char: str) -> None:
         if self._mode == "suppress_tag":
             self._suppressed += char
-            if self._suppressed.lower().endswith(TOOL_CALL_CLOSE):
+            if self._suppressed.lower().endswith(self._suppress_close):
                 self._restore.append(self._suppressed)
                 self._suppressed = ""
                 self._mode = "text"
@@ -551,7 +630,7 @@ class _AgentAnswerStream:
             if stripped == "<":
                 self._mode = "probe_tag"
                 return
-            if TOOL_CALL_OPEN.startswith(stripped.lower()):
+            if self._try_start_suppression(stripped):
                 return
             pending = self._buffer
             self._buffer = ""
@@ -577,11 +656,7 @@ class _AgentAnswerStream:
         if stripped.startswith(("{", "[")):
             self._enter_json()
             return
-        if TOOL_CALL_OPEN.startswith(stripped.lower()):
-            if stripped.lower() == TOOL_CALL_OPEN:
-                self._suppressed = self._buffer
-                self._buffer = ""
-                self._mode = "suppress_tag"
+        if self._try_start_suppression(stripped):
             return
         pending = self._buffer
         self._buffer = ""

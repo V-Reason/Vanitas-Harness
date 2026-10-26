@@ -629,6 +629,16 @@ class AgentTools:
             if len(tokens) < 2:
                 return "git"
             return f"git {tokens[1].lower()}"
+        if name == "python":
+            if len(tokens) >= 2 and tokens[1].lower() == "verify.py":
+                return "python verify.py"
+            if (
+                len(tokens) >= 3
+                and tokens[1].lower() == "-m"
+                and tokens[2].lower() == "unittest"
+            ):
+                return "python -m unittest"
+            return "python"
         return name
 
     @staticmethod
@@ -655,6 +665,11 @@ class AgentTools:
             )
             return
         if prefix == "echo":
+            return
+        if prefix.startswith("python"):
+            for candidate in tokens[1:]:
+                if not _looks_like_switch(candidate):
+                    is_inside_workspace(candidate, self.root)
             return
         name = prefix
         args = tokens[1:]
