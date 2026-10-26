@@ -13,9 +13,11 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections import deque
 from dataclasses import dataclass
 from typing import Callable
 
+from .chat import TurnResult
 from .config import AGENT_ACTION_NAMES, AppConfig, ModelSpec
 from .errors import ToolDenied
 from .render import format_text
@@ -447,11 +449,43 @@ def _needs_confirmation(
     return any(action.name in confirm_actions for action in actions)
 
 
-def _clip_feedback(text: str, limit: int) -> str:
+def _clip_feedback(
+    text: str, limit: int, head_lines: int = 20, tail_lines: int = 40
+) -> str:
+    """双端安全折叠（Head+Tail Folding）。
+
+    当反馈文本超过 limit 时，保留前部的调用概况与尾部的关键报错堆栈，
+    并在中间插入结构化折叠标记，杜绝 Context Window 击穿。
+    """
     if len(text) <= limit:
         return text
-    omitted = len(text) - limit
-    return text[:limit] + f"\n…已截断 {omitted} 字符"
+
+    lines = text.splitlines(keepends=True)
+    if len(lines) <= (head_lines + tail_lines):
+        # 行数少但单行超长时按字符首尾切分
+        head_len = max(10, int(limit * 0.3))
+        tail_len = max(10, limit - head_len)
+        omitted = max(0, len(text) - (head_len + tail_len))
+        marker = f"\n[... 输出过长已截断：省略中间 {omitted} 字符 ...]\n"
+        return text[:head_len] + marker + text[-tail_len:]
+
+    # 多行输出按行切分首尾
+    head = "".join(lines[:head_lines])
+    tail = "".join(lines[-tail_lines:])
+    if len(head) + len(tail) > limit:
+        head_len = max(10, int(limit * 0.3))
+        tail_len = max(10, limit - head_len)
+        omitted_chars = max(0, len(text) - (head_len + tail_len))
+        marker = f"\n[... 输出过长已截断：省略中间 {omitted_chars} 字符 ...]\n"
+        return head[:head_len] + marker + tail[-tail_len:]
+
+    omitted_lines = len(lines) - head_lines - tail_lines
+    omitted_chars = len(text) - len(head) - len(tail)
+    marker = (
+        f"\n[... 输出过长已截断：省略中间 {omitted_lines} 行 "
+        f"({omitted_chars} 字符) ...]\n"
+    )
+    return head + marker + tail
 
 
 class _AgentAnswerStream:
@@ -598,6 +632,236 @@ def _shell_detail(result: ExecResult) -> str:
     return "\n".join(pieces)
 
 
+def _parse_error_feedback(exc: ValueError) -> str:
+    """把解析错误转成可回灌给模型的结构化纠偏 Observation。"""
+    return (
+        "<tool_result>\n"
+        f"执行失败：动作解析错误（{exc}）。\n"
+        "【纠偏要求】请严格按照协议仅输出 "
+        '<tool_call>[{"action": "工具名", "parameters": {...}}]</tool_call>'
+        " 格式，确保 JSON 语法合法且 Windows 路径使用正斜杠（/）"
+        "或双反斜杠（\\\\）。\n"
+        "</tool_result>"
+    )
+
+
+def _run_action(tools: AgentTools, action: AgentAction) -> tuple[bool, str]:
+    params = action.parameters
+    if action.name == "run_shell_ro":
+        result = tools.run_shell_ro(params["command"])
+        return result.exit_code == 0, _shell_detail(result)
+    if action.name == "read_file":
+        path = params["path"]
+        content = tools.read_file(path)
+        return True, f"读取 {path} · {len(content)} 字符\n{content}"
+    if action.name == "write_file":
+        path = params["path"]
+        written = tools.write_file(path, params["content"])
+        return True, f"写入 {path} · {written} 字节"
+    if action.name == "move_file":
+        detail = tools.move_file(params["src"], params["dst"])
+        return True, detail
+    if action.name == "delete_file":
+        detail = tools.delete_file(params["path"])
+        return True, detail
+    path = params["path"]
+    names = tools.list_dir(path)
+    detail = f"列出 {path} · {len(names)} 项"
+    if names:
+        detail += "\n" + "\n".join(names)
+    else:
+        detail += "\n目录为空"
+    return True, detail
+
+
+def _run_actions(
+    actions: list[AgentAction],
+    execute_one: Callable[[AgentAction], tuple[bool, str]],
+    *,
+    max_feedback_chars: int,
+    palette: Palette,
+) -> str:
+    results: list[tuple[AgentAction, bool, str]] = []
+    for action in actions:
+        try:
+            ok, detail = execute_one(action)
+        except ToolDenied as exc:
+            ok, detail = False, str(exc)
+            print(palette.warn(f"工具拒绝：{detail}"), file=sys.stderr)
+        except OSError as exc:
+            ok, detail = False, f"工具执行失败：{exc}"
+            print(palette.err(detail), file=sys.stderr)
+        except (TypeError, ValueError) as exc:
+            ok, detail = False, f"工具参数无效：{exc}"
+            print(palette.err(detail), file=sys.stderr)
+        results.append((action, ok, detail))
+
+    if len(results) == 1:
+        _action, ok, detail = results[0]
+        status = "执行成功" if ok else "执行失败"
+        body = f"{status}：{detail}"
+    else:
+        succeeded = sum(1 for _action, ok, _detail in results if ok)
+        failed = len(results) - succeeded
+        lines = [
+            f"批量执行完成：{len(results)} 项，成功 {succeeded}，失败 {failed}"
+        ]
+        for index, (action, ok, detail) in enumerate(results, start=1):
+            status = "成功" if ok else "失败"
+            lines.append(f"{index}. {status}：{_summary(action)}")
+            lines.append(f"   {detail.rstrip()}")
+        body = "\n".join(lines)
+    clipped = _clip_feedback(body, max_feedback_chars)
+    return f"<tool_result>\n{clipped}\n</tool_result>"
+
+
+class AgentLoop:
+    """Agent 调度状态机：解析自愈、停滞熔断、步数与执行编排。
+
+    与 REPL UI 解耦：确认、播报、最终输出与执行都经由 `run()` 注入的钩子；
+    自身只负责确定性状态迁移，并用构造时传入的 `AgentTools` 提供兜底执行。
+    """
+
+    def __init__(
+        self,
+        config: AppConfig,
+        tools: AgentTools,
+        *,
+        max_steps: int | None = None,
+        max_parse_retries: int = 2,
+        stagnation_limit: int = 3,
+        palette: Palette | None = None,
+    ) -> None:
+        self.config = config
+        self.tools = tools
+        configured_steps = (
+            config.settings.agent.max_steps if max_steps is None else max_steps
+        )
+        self.max_steps = max(1, int(configured_steps))
+        self.max_parse_retries = max(0, int(max_parse_retries))
+        # 连续 1 次相同动作没有判别意义；下限固定为 2。
+        self.stagnation_limit = max(2, int(stagnation_limit))
+        self.palette = palette or Palette({}, enabled=False)
+        self._recent: deque[tuple[str, str]] = deque(
+            maxlen=self.stagnation_limit
+        )
+
+    # ------------------------------------------------------------------ #
+    # 执行（AgentRepl 复用与可注入钩子）
+    # ------------------------------------------------------------------ #
+
+    def execute_action(self, action: AgentAction) -> tuple[bool, str]:
+        return _run_action(self.tools, action)
+
+    def execute_actions(self, actions: list[AgentAction]) -> str:
+        return _run_actions(
+            actions,
+            self.execute_action,
+            max_feedback_chars=self.config.settings.agent.max_feedback_chars,
+            palette=self.palette,
+        )
+
+    # ------------------------------------------------------------------ #
+    # 调度循环
+    # ------------------------------------------------------------------ #
+
+    def run(
+        self,
+        text: str,
+        *,
+        converse: Callable[
+            [str, str | None, _AgentAnswerStream], TurnResult | None
+        ],
+        confirm: Callable[[list[AgentAction]], bool],
+        announce: Callable[[list[AgentAction]], None],
+        finalize: Callable[[str], None],
+        execute: Callable[[list[AgentAction]], str] | None = None,
+    ) -> None:
+        execute_actions = execute or self.execute_actions
+        self._recent.clear()
+        steps = 0
+        parse_retries = 0
+        stream = _AgentAnswerStream()
+        result = converse(text, None, stream)
+        if result is None or result.interrupted:
+            return
+        while True:
+            try:
+                actions = _parse_actions(
+                    result.text,
+                    max_batch_actions=(
+                        self.config.settings.agent.max_batch_actions
+                    ),
+                    action_aliases=self.config.settings.agent.action_aliases,
+                )
+            except ValueError as exc:
+                if parse_retries >= self.max_parse_retries:
+                    print(self.palette.err(str(exc)), file=sys.stderr)
+                    return
+                parse_retries += 1
+                print(
+                    self.palette.warn(
+                        "格式解析错误，触发自愈回灌"
+                        f"（{parse_retries}/{self.max_parse_retries}）"
+                    )
+                )
+                stream = _AgentAnswerStream()
+                result = converse("", _parse_error_feedback(exc), stream)
+                if result is None or result.interrupted:
+                    return
+                continue
+
+            parse_retries = 0
+            if actions is None:
+                if stream.suppressed:
+                    stream.flush_suppressed()
+                elif not stream.emitted:
+                    finalize(result.text)
+                return
+
+            if steps >= self.max_steps:
+                print(self.palette.warn(f"已达最大步数 {self.max_steps}"))
+                return
+            if self._stagnates(actions):
+                print(
+                    self.palette.warn(
+                        f"检测到动作连续 {self.stagnation_limit} 次停滞，"
+                        "已触发硬熔断保护"
+                    )
+                )
+                return
+
+            if _needs_confirmation(
+                actions, self.config.settings.agent.confirm_actions
+            ):
+                if not confirm(actions):
+                    print(self.palette.meta("已取消"))
+                    return
+            else:
+                announce(actions)
+
+            feedback = execute_actions(actions)
+            steps += 1
+            stream = _AgentAnswerStream()
+            result = converse("", feedback, stream)
+            if result is None or result.interrupted:
+                return
+
+    def _stagnates(self, actions: list[AgentAction]) -> bool:
+        for action in actions:
+            signature = (
+                action.name,
+                json.dumps(action.parameters, sort_keys=True),
+            )
+            self._recent.append(signature)
+            if (
+                len(self._recent) >= self.stagnation_limit
+                and len(set(self._recent)) == 1
+            ):
+                return True
+        return False
+
+
 class AgentRepl(Repl):
     """在 REPL 之上增加“模型提议 → 分级确认 → 执行 → 反馈”的闭环。"""
 
@@ -613,6 +877,8 @@ class AgentRepl(Repl):
         tools: AgentTools | None = None,
         max_steps: int | None = None,
         confirm: Callable[[str], bool] | None = None,
+        max_parse_retries: int = 2,
+        stagnation_limit: int = 3,
     ) -> None:
         super().__init__(
             config,
@@ -628,50 +894,34 @@ class AgentRepl(Repl):
         )
         self.max_steps = max(1, int(configured_steps))
         self._confirm = confirm
+        self.loop = AgentLoop(
+            config,
+            self.agent_tools,
+            max_steps=self.max_steps,
+            max_parse_retries=max_parse_retries,
+            stagnation_limit=stagnation_limit,
+            palette=self.palette,
+        )
 
     def _chat(self, text: str) -> None:
-        stream = _AgentAnswerStream()
-        result = self._run_chat(text, display=False, stream=stream)
-        if result is None or result.interrupted:
-            return
-        steps = 0
-        while True:
-            try:
-                actions = _parse_actions(
-                    result.text,
-                    max_batch_actions=self.config.settings.agent.max_batch_actions,
-                    action_aliases=self.config.settings.agent.action_aliases,
-                )
-            except ValueError as exc:
-                print(self.palette.err(str(exc)), file=sys.stderr)
-                return
-            if actions is None:
-                if stream.suppressed:
-                    stream.flush_suppressed()
-                elif not stream.emitted:
-                    self._print_final(result.text)
-                return
-            if steps >= self.max_steps:
-                print(self.palette.warn(f"已达最大步数 {self.max_steps}"))
-                return
+        self.loop.run(
+            text,
+            converse=self._converse,
+            confirm=self._confirm_actions,
+            announce=self._announce_auto,
+            execute=self._execute_actions,
+            finalize=self._print_final,
+        )
 
-            if _needs_confirmation(
-                actions, self.config.settings.agent.confirm_actions
-            ):
-                if not self._confirm_actions(actions):
-                    print(self.palette.meta("已取消"))
-                    return
-            else:
-                self._announce_auto(actions)
-
-            feedback = self._execute_actions(actions)
-            steps += 1
-            stream = _AgentAnswerStream()
-            result = self._run_chat(
-                "", display=False, feedback=feedback, stream=stream
-            )
-            if result is None or result.interrupted:
-                return
+    def _converse(
+        self,
+        text: str,
+        feedback: str | None,
+        stream: _AgentAnswerStream,
+    ) -> TurnResult | None:
+        return self._run_chat(
+            text, display=False, feedback=feedback, stream=stream
+        )
 
     def _confirm_actions(self, actions: list[AgentAction]) -> bool:
         if len(actions) == 1:
@@ -697,68 +947,15 @@ class AgentRepl(Repl):
             print(self.palette.meta(f"{index}. {_summary(action)}"))
 
     def _execute_actions(self, actions: list[AgentAction]) -> str:
-        results: list[tuple[AgentAction, bool, str]] = []
-        for action in actions:
-            try:
-                ok, detail = self._execute(action)
-            except ToolDenied as exc:
-                ok, detail = False, str(exc)
-                print(self.palette.warn(f"工具拒绝：{detail}"), file=sys.stderr)
-            except OSError as exc:
-                ok, detail = False, f"工具执行失败：{exc}"
-                print(self.palette.err(detail), file=sys.stderr)
-            except (TypeError, ValueError) as exc:
-                ok, detail = False, f"工具参数无效：{exc}"
-                print(self.palette.err(detail), file=sys.stderr)
-            results.append((action, ok, detail))
-
-        if len(results) == 1:
-            _action, ok, detail = results[0]
-            status = "执行成功" if ok else "执行失败"
-            body = f"{status}：{detail}"
-        else:
-            succeeded = sum(1 for _action, ok, _detail in results if ok)
-            failed = len(results) - succeeded
-            lines = [
-                f"批量执行完成：{len(results)} 项，成功 {succeeded}，失败 {failed}"
-            ]
-            for index, (action, ok, detail) in enumerate(results, start=1):
-                status = "成功" if ok else "失败"
-                lines.append(f"{index}. {status}：{_summary(action)}")
-                lines.append(f"   {detail.rstrip()}")
-            body = "\n".join(lines)
-        clipped = _clip_feedback(
-            body, self.config.settings.agent.max_feedback_chars
+        return _run_actions(
+            actions,
+            self._execute,
+            max_feedback_chars=self.config.settings.agent.max_feedback_chars,
+            palette=self.palette,
         )
-        return f"<tool_result>\n{clipped}\n</tool_result>"
 
     def _execute(self, action: AgentAction) -> tuple[bool, str]:
-        params = action.parameters
-        if action.name == "run_shell_ro":
-            result = self.agent_tools.run_shell_ro(params["command"])
-            return result.exit_code == 0, _shell_detail(result)
-        if action.name == "read_file":
-            path = params["path"]
-            content = self.agent_tools.read_file(path)
-            return True, f"读取 {path} · {len(content)} 字符\n{content}"
-        if action.name == "write_file":
-            path = params["path"]
-            written = self.agent_tools.write_file(path, params["content"])
-            return True, f"写入 {path} · {written} 字节"
-        if action.name == "move_file":
-            detail = self.agent_tools.move_file(params["src"], params["dst"])
-            return True, detail
-        if action.name == "delete_file":
-            detail = self.agent_tools.delete_file(params["path"])
-            return True, detail
-        path = params["path"]
-        names = self.agent_tools.list_dir(path)
-        detail = f"列出 {path} · {len(names)} 项"
-        if names:
-            detail += "\n" + "\n".join(names)
-        else:
-            detail += "\n目录为空"
-        return True, detail
+        return _run_action(self.agent_tools, action)
 
     def _print_final(self, text: str) -> None:
         rendered = format_text(text)
