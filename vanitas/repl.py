@@ -348,6 +348,7 @@ class Repl:
         *,
         display: bool = True,
         feedback: str | None = None,
+        stream: object | None = None,
     ) -> TurnResult | None:
         """运行一轮对话；Agent 复用本方法但不把原始 JSON 写屏。"""
         if self.client is None or self.chat_runner is None:
@@ -358,22 +359,18 @@ class Repl:
             )
             return None
         try:
+            kwargs = {
+                "display": display,
+                "on_dropped": lambda count: print(
+                    self.palette.warn(f"上下文已满，丢弃最早 {count} 轮对话")
+                ),
+            }
+            if stream is not None:
+                kwargs["stream"] = stream
             if feedback is None:
-                result = self.chat_runner.run(
-                    text,
-                    display=display,
-                    on_dropped=lambda count: print(
-                        self.palette.warn(f"上下文已满，丢弃最早 {count} 轮对话")
-                    ),
-                )
+                result = self.chat_runner.run(text, **kwargs)
             else:
-                result = self.chat_runner.run_followup(
-                    feedback,
-                    display=display,
-                    on_dropped=lambda count: print(
-                        self.palette.warn(f"上下文已满，丢弃最早 {count} 轮对话")
-                    ),
-                )
+                result = self.chat_runner.run_followup(feedback, **kwargs)
         except ConfigError as exc:
             print(self.palette.err(str(exc)), file=sys.stderr)
             return None

@@ -45,11 +45,18 @@ class ScriptedRunner:
             finish_reason="stop",
         )
 
-    def run(self, text: str, *, display: bool = True, on_dropped=None) -> TurnResult:
+    def run(
+        self, text: str, *, display: bool = True, on_dropped=None, stream=None
+    ) -> TurnResult:
         return self._next("run", text, display)
 
     def run_followup(
-        self, feedback: str, *, display: bool = True, on_dropped=None
+        self,
+        feedback: str,
+        *,
+        display: bool = True,
+        on_dropped=None,
+        stream=None,
     ) -> TurnResult:
         return self._next("followup", feedback, display)
 
@@ -226,7 +233,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(len(runner.calls), 2)
         self.assertIn("批量执行完成：2 项，成功 2，失败 0", runner.calls[1][1])
 
-    def test_batch_read_only_actions_use_one_confirmation(self) -> None:
+    def test_batch_read_only_actions_do_not_ask_for_confirmation(self) -> None:
         (self.root / "a.txt").write_text("a", encoding="utf-8")
         (self.root / "b.txt").write_text("b", encoding="utf-8")
         batch = json.dumps(
@@ -241,8 +248,8 @@ class AgentTests(unittest.TestCase):
             confirm=lambda plan: plans.append(plan) or True,
         )
         _value, out, _err = quiet_run(lambda: repl._chat("读两个文件"))
-        self.assertEqual(len(plans), 1)
-        self.assertIn("批量操作（2 项）", plans[0])
+        self.assertEqual(plans, [])
+        self.assertIn("自动执行（2 项）", out)
         self.assertIn("读完了", out)
         self.assertEqual(len(runner.calls), 2)
         feedback = runner.calls[1][1]
@@ -360,12 +367,32 @@ class ActionParserTests(unittest.TestCase):
         )
         self.assertEqual(actions[0].parameters, {"src": "a.md", "dst": "a.srt"})
 
-    def test_any_array_requires_confirmation(self) -> None:
-        actions = agent._parse_actions(
+    def test_only_mutating_actions_require_confirmation(self) -> None:
+        read = agent._parse_actions(
             '[{"action":"read_file","parameters":{"path":"a.txt"}}]'
         )
-        self.assertTrue(agent._needs_confirmation(actions, is_batch=True))
-        self.assertFalse(agent._needs_confirmation(actions))
+        write = agent._parse_actions(
+            '[{"action":"write_file","parameters":{"path":"a.txt","content":"x"}}]'
+        )
+        self.assertFalse(agent._needs_confirmation(read, is_batch=True))
+        self.assertTrue(agent._needs_confirmation(write, is_batch=True))
+
+    def test_stream_suppresses_action_json_and_streams_text(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            stream = agent._AgentAnswerStream()
+            stream.write('{"action":')
+            stream.write('"list_dir"}')
+            stream.flush()
+            self.assertFalse(stream.emitted)
+            self.assertEqual(out.getvalue(), "")
+
+            text_stream = agent._AgentAnswerStream()
+            text_stream.write("你")
+            text_stream.write("好")
+            text_stream.flush()
+            self.assertTrue(text_stream.emitted)
+            self.assertEqual(out.getvalue(), "你好")
 
     def test_rejects_empty_or_oversized_batch(self) -> None:
         with self.assertRaises(ValueError):

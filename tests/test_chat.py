@@ -169,6 +169,20 @@ class ChatRunnerTests(unittest.TestCase):
         self.assertNotIn('{"action"', out.getvalue())
         self.assertEqual(self.session.messages[-1]["content"], '{"action":"shell"}')
 
+    def test_display_false_can_stream_to_explicit_sink(self) -> None:
+        client = FakeClient(
+            [
+                {"type": "delta", "content": "流式"},
+                {"type": "done", "tokens": 2, "tps": 1.0, "finish_reason": "stop"},
+            ]
+        )
+        runner = self.make_runner(client)
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = runner.run("hi", display=False, stream=sink)
+        self.assertEqual(result.text, "流式")
+        self.assertIn("流式", sink.getvalue())
+
     def test_followup_appends_raw_system_feedback(self) -> None:
         client = FakeClient(
             [

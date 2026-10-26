@@ -266,10 +266,9 @@ def _describe(action: AgentAction) -> str:
 def _needs_confirmation(
     actions: list[AgentAction], *, is_batch: bool = False
 ) -> bool:
-    # 数组（即使只有一项）也走一次清单确认；单动作才按副作用分流。
-    return is_batch or any(
-        action.name in CONFIRM_ACTIONS for action in actions
-    )
+    # 只读动作（含只读数组）直接执行；只有写/删/移动才确认。
+    # 批量清单仍由 _confirm_actions 汇总，只要数组里有一个修改动作就只问一次。
+    return any(action.name in CONFIRM_ACTIONS for action in actions)
 
 
 def _clip_feedback(text: str) -> str:
@@ -277,6 +276,60 @@ def _clip_feedback(text: str) -> str:
         return text
     omitted = len(text) - MAX_FEEDBACK_CHARS
     return text[:MAX_FEEDBACK_CHARS] + f"\n…已截断 {omitted} 字符"
+
+
+class _AgentAnswerStream:
+    """把 Agent 的流式输出分成“动作 JSON”和“最终自然语言”。
+
+    `StreamRenderer` 把每个增量写进来；先缓存到首个非空白字符：
+    - `{` / `[` 视为动作 JSON，全部丢弃，避免终端看到原始 JSON；
+    - 其它字符视为最终答复，缓存内容立即补齐并持续透传。
+    """
+
+    def __init__(self) -> None:
+        self._target = sys.stdout
+        self._buffer = ""
+        self._decided = False
+        self._emit = False
+        self._wrote = False
+
+    @property
+    def emitted(self) -> bool:
+        return self._emit and self._wrote
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        if not self._decided:
+            self._buffer += text
+            stripped = self._buffer.lstrip()
+            if not stripped:
+                return len(text)
+            if stripped[0] in "[{":
+                # 动作 JSON 不落屏；结果仍由 TurnResult.text 交给解析器。
+                self._decided = True
+                self._emit = False
+                self._buffer = ""
+                return len(text)
+            self._decided = True
+            self._emit = True
+            pending = self._buffer
+            self._buffer = ""
+            self._send(pending)
+            return len(text)
+        if self._emit:
+            self._send(text)
+        return len(text)
+
+    def flush(self) -> None:
+        self._target.flush()
+
+    def _send(self, text: str) -> None:
+        if not text:
+            return
+        self._wrote = True
+        self._target.write(text)
+        self._target.flush()
 
 
 def _shell_detail(result: ExecResult) -> str:
@@ -319,7 +372,8 @@ class AgentRepl(Repl):
         self._confirm = confirm
 
     def _chat(self, text: str) -> None:
-        result = self._run_chat(text, display=False)
+        stream = _AgentAnswerStream()
+        result = self._run_chat(text, display=False, stream=stream)
         if result is None or result.interrupted:
             return
         steps = 0
@@ -330,7 +384,8 @@ class AgentRepl(Repl):
                 print(self.palette.err(str(exc)), file=sys.stderr)
                 return
             if actions is None:
-                self._print_final(result.text)
+                if not stream.emitted:
+                    self._print_final(result.text)
                 return
             if steps >= self.max_steps:
                 print(self.palette.warn(f"已达最大步数 {self.max_steps}"))
@@ -346,7 +401,10 @@ class AgentRepl(Repl):
 
             feedback = self._execute_actions(actions)
             steps += 1
-            result = self._run_chat("", display=False, feedback=feedback)
+            stream = _AgentAnswerStream()
+            result = self._run_chat(
+                "", display=False, feedback=feedback, stream=stream
+            )
             if result is None or result.interrupted:
                 return
 
@@ -368,8 +426,12 @@ class AgentRepl(Repl):
         return self.confirm_plan(plan)
 
     def _announce_auto(self, actions: list[AgentAction]) -> None:
-        # 数组已统一进入确认分支，这里只会收到单个只读动作。
-        print(self.palette.meta(f"自动执行：{_summary(actions[0])}"))
+        if len(actions) == 1:
+            print(self.palette.meta(f"自动执行：{_summary(actions[0])}"))
+            return
+        print(self.palette.meta(f"自动执行（{len(actions)} 项）："))
+        for index, action in enumerate(actions, start=1):
+            print(self.palette.meta(f"{index}. {_summary(action)}"))
 
     def _execute_actions(self, actions: list[AgentAction]) -> str:
         results: list[tuple[AgentAction, bool, str]] = []

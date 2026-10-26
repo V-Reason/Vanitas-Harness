@@ -58,6 +58,18 @@ class SessionTests(unittest.TestCase):
         self.assertIn("当前工作目录：T:\\demo\\workspace", message)
         self.assertNotIn("{cwd}", message)
 
+    def test_agent_later_user_message_uses_compact_template(self) -> None:
+        session = Session(system="sys", task="agent")
+        session.add_user("first request")
+        session.add_assistant("first answer")
+        message = session.build_user_message(
+            "second request", self.prompt_dir, "alias"
+        )
+        self.assertNotIn("【输出契约】", message)
+        self.assertNotIn("【唯一允许的动作】", message)
+        self.assertIn("【Agent 继续】", message)
+        self.assertIn("second request", message)
+
     def test_agent_template_prefers_original_cwd_env(self) -> None:
         session = Session(system="sys", task="agent")
         with mock.patch.dict(os.environ, {"VANITAS_ORIG_CWD": r"<WORKSPACE>"}):

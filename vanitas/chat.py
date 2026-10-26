@@ -72,6 +72,7 @@ class ChatRunner:
         *,
         on_dropped: Callable[[int], None] | None = None,
         display: bool = True,
+        stream: object | None = None,
     ) -> TurnResult:
         if self.client is None:
             raise EngineError("服务端没有运行：先运行 vanitas serve <id>")
@@ -90,6 +91,7 @@ class ChatRunner:
             budget,
             on_dropped=on_dropped,
             display=display,
+            stream=stream,
         )
 
     def run_followup(
@@ -98,6 +100,7 @@ class ChatRunner:
         *,
         on_dropped: Callable[[int], None] | None = None,
         display: bool = True,
+        stream: object | None = None,
     ) -> TurnResult:
         """把系统反馈直接作为 user 消息追加，不重复套任务模板。"""
         if self.client is None:
@@ -112,6 +115,7 @@ class ChatRunner:
             budget,
             on_dropped=on_dropped,
             display=display,
+            stream=stream,
         )
 
     def _run_turn(
@@ -120,6 +124,7 @@ class ChatRunner:
         *,
         on_dropped: Callable[[int], None] | None,
         display: bool,
+        stream: object | None = None,
     ) -> TurnResult:
         if self.client is None:
             raise EngineError("服务端没有运行：先运行 vanitas serve <id>")
@@ -133,7 +138,11 @@ class ChatRunner:
             self.config.settings.repl.context_reserve_tokens,
             self.config.settings.repl.min_output_tokens,
         )
-        renderer = StreamRenderer(stream=None if display else _DiscardStream())
+        renderer = StreamRenderer(
+            stream=None
+            if display
+            else (stream if stream is not None else _DiscardStream())
+        )
         usage: dict | None = None
         done: dict | None = None
         reasoning_chars = 0

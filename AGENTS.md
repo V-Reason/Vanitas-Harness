@@ -80,7 +80,7 @@
 | 第三方依赖 | 除 `prompt_toolkit` 外禁止 `psutil/requests/httpx/rich/click` 等 |
 | `.bat` | 只允许根目录 `vanitas.bat` 薄壳（≤5 条核心指令，不含 `@echo off`/`setlocal` 样板）；不得承载启动逻辑 |
 | 行尾 | `*.bat` 必须 UTF-8 无 BOM + CRLF；其余文本 LF |
-| 自动工具循环 | 仅允许 `vanitas agent` 的受控闭环：单动作只读 `read_file/list_dir/run_shell_ro` 自动执行，写/删/移动 `write_file/delete_file/move_file` 必须确认；动作数组统一打印清单并只弹一次 `[y/N]`；沙盒根为原 CWD，最多 5 轮。`/exec` 仍手动逐次确认。禁止后台队列、无人值守循环与绕过确认的钩子 |
+| 自动工具循环 | 仅允许 `vanitas agent` 的受控闭环：单动作与只读数组自动执行，写/删/移动 `write_file/delete_file/move_file` 必须确认；含修改的数组统一打印清单并只弹一次 `[y/N]`；沙盒根为原 CWD，最多 5 轮。`/exec` 仍手动逐次确认。禁止后台队列、无人值守循环与绕过确认的钩子 |
 | 单实例 | 一次只允许一个 `llama-server`；启动新模型前由守卫回收旧实例 |
 | 评测脚本 | `tests\multi_model_benchmark.py` 的既有参数与退出码契约不得破坏 |
 
@@ -107,7 +107,7 @@
 # 1) 语法
 Get-ChildItem vanitas\*.py, tests\test_*.py | ForEach-Object { python -m py_compile $_.FullName }
 
-# 2) 单测（当前 229 例）
+# 2) 单测（当前 232 例）
 python -m unittest discover -s tests
 
 # 3) 静态红线
@@ -143,7 +143,7 @@ python -m vanitas stop
 
 - 并发（`-np 1`）、长上下文质量、持续压测、TTY 交互、`--foreground`、`.md/.txt` 真机翻译、5xx 重试路径尚未验证。
 - v0.4.1 的 16 色配色与三处覆盖式进度未做真人 TTY 验收（仅伪 TTY 单测 + 强制 `always` 抓字节）。
-- `vanitas agent` 的默认入口、`{cwd}` 注入、批量 `move_file` 清单与一次 `[y/N]`、`run_shell_ro` 拒绝写命令、工作区外读取拦截已用 qwen7b 真机冒烟；但真实终端 `[y/N]` 观感、真实删除、模型在 shell 被拒后自动改用 `move_file`，以及 5 轮耗尽提示仍未验收。
+- `vanitas agent` 的默认入口、`{cwd}` 注入、只读列目录不确认、批量 `move_file` 清单与一次 `[y/N]`、三连输入不触发上下文裁剪、最终答复流式（实测 111 次写入）、`run_shell_ro` 拒绝写命令、工作区外读取拦截均已用 qwen7b 真机冒烟；但真实终端 `[y/N]` 观感、真实删除、模型在 shell 被拒后自动改用 `move_file`，以及 5 轮耗尽提示仍未验收。
 - `exec_whitelist` 已退役；`config/settings.json` 的 `tools` 只保留 `exec_enabled` 与 `exec_require_confirm`。Agent 只读权限以 `tools.py` 的硬编码前缀为唯一事实源，不再允许配置文件扩展。
 - Agent 路径约束是参数级沙盒，不是 OS 级隔离；程序内部自行写文件仍需人工判断。
 - 混合换行的 `.srt` 会静默产出 `0 段`（已定位未修，见现状第 5 节）。
