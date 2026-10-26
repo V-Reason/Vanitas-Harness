@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vanitas import tools  # noqa: E402
+from vanitas import agent, tools  # noqa: E402
 from vanitas.config import load_config  # noqa: E402
 from vanitas.errors import ToolDenied  # noqa: E402
 
@@ -290,6 +290,63 @@ class ReadonlyShellTests(unittest.TestCase):
         toolbox = tools.AgentTools(disabled, self.root)
         result = toolbox.run_shell_ro("echo hi")
         self.assertEqual((result.exit_code, result.stdout), (0, "hi\n"))
+
+    def test_subprocess_stdout_byte_truncation_on_large_output(self) -> None:
+        huge = b"A" * (1024 * 1024)
+        completed = subprocess.CompletedProcess(
+            [], 0, stdout=huge, stderr=b""
+        )
+        with mock.patch(
+            "vanitas.tools.subprocess.run", return_value=completed
+        ) as runner:
+            result = tools._execute(
+                self.config, "probe", ["probe"], self.root
+            )
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("[stdout truncated]", result.stdout)
+        self.assertIn("硬截断", result.stdout)
+        self.assertIn("标准输出", result.stdout)
+        self.assertIn("丢弃", result.stdout)
+        self.assertLessEqual(
+            len(result.stdout), tools.MAX_CAPTURE_BYTES + 4096
+        )
+        self.assertFalse(runner.call_args.kwargs["shell"])
+        self.assertTrue(runner.call_args.kwargs["capture_output"])
+
+    def test_subprocess_stderr_byte_truncation_on_large_output(self) -> None:
+        huge = b"B" * (1024 * 1024)
+        completed = subprocess.CompletedProcess(
+            [], 1, stdout=b"", stderr=huge
+        )
+        with mock.patch(
+            "vanitas.tools.subprocess.run", return_value=completed
+        ):
+            result = tools._execute(
+                self.config, "probe", ["probe"], self.root
+            )
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("标准错误", result.stderr)
+        self.assertIn("硬截断", result.stderr)
+        self.assertIn("丢弃", result.stderr)
+        self.assertLessEqual(
+            len(result.stderr), tools.MAX_CAPTURE_BYTES + 4096
+        )
+
+
+class FeedbackFoldingTests(unittest.TestCase):
+    def test_clip_feedback_preserves_head_and_tail(self) -> None:
+        text = (
+            "HEADER\n"
+            + "".join(f"{index:02d}\n" for index in range(98))
+            + "CRITICAL_ERROR_STACK\n"
+        )
+        clipped = agent._clip_feedback(text, limit=300)
+        self.assertLess(len(clipped), len(text))
+        self.assertTrue(clipped.startswith("HEADER"))
+        self.assertTrue(clipped.endswith("CRITICAL_ERROR_STACK\n"))
+        self.assertIn("已截断", clipped)
+        self.assertIn("省略中间 40 行", clipped)
 
 
 if __name__ == "__main__":
