@@ -16,7 +16,8 @@ if str(ROOT) not in sys.path:
 
 from vanitas import repl as repl_mod  # noqa: E402
 from vanitas.chat import TurnResult  # noqa: E402
-from vanitas.config import load_config  # noqa: E402
+from vanitas.config import DEFAULT_THEME, load_config  # noqa: E402
+from vanitas.errors import ToolDenied  # noqa: E402
 from vanitas.launcher import RunRecord  # noqa: E402
 from vanitas.repl import Repl  # noqa: E402
 from vanitas.ui import Palette  # noqa: E402
@@ -79,6 +80,73 @@ class ReplCompletionTests(unittest.TestCase):
             [item.text for item in completions],
             ["qwen7b", "minicpm", "hymt", "qwen3b"],
         )
+
+
+class ReplPromptTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = load_config()
+        self.repl = Repl(self.config, palette=Palette({}, enabled=False))
+
+    def test_prompt_text_is_magenta_when_palette_enabled(self) -> None:
+        from prompt_toolkit.formatted_text import ANSI
+
+        repl = Repl(self.config, palette=Palette(DEFAULT_THEME, enabled=True))
+        prompt = repl._prompt_text()
+        self.assertIn("\x1b[35m", prompt)
+        fragments = ANSI(prompt).__pt_formatted_text__()
+        self.assertTrue(any(style == "ansimagenta" for style, _text in fragments))
+
+    def test_prompt_session_receives_ansi_object(self) -> None:
+        from prompt_toolkit.formatted_text import ANSI
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.value = None
+
+            def prompt(self, value):
+                self.value = value
+                return "hello"
+
+        fake = FakeSession()
+        self.repl._prompt_ready = True
+        self.repl._prompt_session = fake
+        self.repl._ansi_formatter = ANSI
+        with mock.patch("sys.stdin.isatty", return_value=True):
+            line = self.repl._read_line("\x1b[35mqwen7b@1 › \x1b[0m")
+        self.assertEqual(line, "hello")
+        self.assertIsInstance(fake.value, ANSI)
+        fragments = fake.value.__pt_formatted_text__()
+        self.assertTrue(any(style == "ansimagenta" for style, _text in fragments))
+
+    def test_fallback_input_has_no_raw_ansi(self) -> None:
+        self.repl._prompt_ready = True
+        self.repl._prompt_session = None
+        err = io.StringIO()
+        with (
+            mock.patch("sys.stdin.isatty", return_value=True),
+            mock.patch("builtins.input", return_value="hello") as reader,
+            contextlib.redirect_stderr(err),
+        ):
+            self.assertEqual(
+                self.repl._read_line("\x1b[35mqwen7b@1 › \x1b[0m"), "hello"
+            )
+        reader.assert_called_once_with()
+        self.assertNotIn("\x1b[", err.getvalue())
+        self.assertIn("qwen7b@1", err.getvalue())
+
+    def test_non_tty_prompt_is_plain_stderr(self) -> None:
+        self.repl._prompt_ready = True
+        self.repl._prompt_session = None
+        err = io.StringIO()
+        with (
+            mock.patch("sys.stdin.isatty", return_value=False),
+            mock.patch("builtins.input", return_value="hello"),
+            contextlib.redirect_stderr(err),
+        ):
+            self.assertEqual(
+                self.repl._read_line("\x1b[35mqwen7b@1 › \x1b[0m"), "hello"
+            )
+        self.assertNotIn("\x1b[", err.getvalue())
 
 
 class ReplSwitchTests(unittest.TestCase):
@@ -189,6 +257,38 @@ class ReplMetaTests(unittest.TestCase):
         self.install_result(finish_reason="length")
         _value, out, _err = quiet_run(lambda: self.repl._chat("hi"))
         self.assertIn("达到长度上限，输出被截断", out)
+
+    def test_model_table_colors_state_and_port(self) -> None:
+        palette = Palette(DEFAULT_THEME, enabled=True)
+        repl = Repl(self.config, palette=palette)
+        with mock.patch.object(repl_mod.launcher, "read_records", return_value=[]):
+            _value, out, _err = quiet_run(lambda: repl._cmd_model(""))
+        self.assertIn("\x1b[90m未运行\x1b[0m", out)
+        self.assertIn("\x1b[1m\x1b[35m", out)
+        self.assertIn("\x1b[36mport", out)
+        self.assertNotIn("✓ 未运行", out)
+
+    def test_status_uses_semantic_color_without_checkmark(self) -> None:
+        palette = Palette(DEFAULT_THEME, enabled=True)
+        repl = Repl(self.config, palette=palette)
+        with (
+            mock.patch.object(repl_mod.launcher, "read_records", return_value=[]),
+            mock.patch.object(repl_mod.guard, "gpu_status", return_value=None),
+        ):
+            _value, out, _err = quiet_run(lambda: repl._cmd_status(""))
+        self.assertIn("\x1b[31m未就绪\x1b[0m", out)
+        self.assertNotIn("✓ 就绪", out)
+
+    def test_exec_denial_is_printed_without_exit_code(self) -> None:
+        with mock.patch.object(
+            repl_mod.tools,
+            "run_exec",
+            side_effect=ToolDenied("安全限制：禁止修改或删除工作目录之外的文件/目录"),
+        ):
+            _value, out, err = quiet_run(lambda: self.repl._cmd_exec("del C:\\x"))
+        self.assertIn("安全限制", err)
+        self.assertNotIn("退出码", out)
+        self.assertNotIn("退出码", err)
 
 
 if __name__ == "__main__":

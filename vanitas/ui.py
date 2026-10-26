@@ -11,6 +11,7 @@ ENABLE_VIRTUAL_TERMINAL_PROCESSING；enable_vt() 幂等，失败即整体降级�
 from __future__ import annotations
 
 import os
+import re
 
 # 与 config.py::COLOR_NAMES 必须完全一致（config 是基础层，不反向依赖本模块）。
 _ANSI = {
@@ -63,7 +64,13 @@ FALLBACK_THEME: dict[str, str] = {
     "accent": "magenta",
 }
 
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _vt_state: bool | None = None
+
+
+def strip_ansi(text: str) -> str:
+    """剥离 Palette 生成的 ANSI SGR 序列，供降级输入与非 TTY 输出复用。"""
+    return _ANSI_CSI_RE.sub("", text)
 
 
 def _try_enable_vt() -> bool:
@@ -172,3 +179,30 @@ class Palette:
 
     def accent(self, text: str) -> str:
         return self.paint(text, self._theme["accent"])
+
+    # ------------------------------------------------------------------ #
+    # 语义着色：只上色、不附加符号，供表格状态列与紧凑摘要使用。
+    # ------------------------------------------------------------------ #
+
+    def _theme_paint(self, text: str, key: str) -> str:
+        return self.paint(text, self._theme[key])
+
+    def success(self, text: str) -> str:
+        return self._theme_paint(text, "success")
+
+    def error(self, text: str) -> str:
+        return self._theme_paint(text, "error")
+
+    def warning(self, text: str) -> str:
+        return self._theme_paint(text, "warn")
+
+    def muted(self, text: str) -> str:
+        return self._theme_paint(text, "muted")
+
+    def info(self, text: str) -> str:
+        return self._theme_paint(text, "info")
+
+    def bold(self, text: str) -> str:
+        if not self.enabled:
+            return text
+        return f"\x1b[1m{text}{RESET}"

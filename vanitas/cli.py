@@ -147,8 +147,10 @@ def _cmd_models(config: AppConfig, args: argparse.Namespace, palette: Palette) -
     header = f"{'id':<10}{'display':<28}{'port':>6}{'shards':>8}  role"
     print(palette.accent(header))
     for model in config.models:
+        model_cell = palette.bold(palette.accent(f"{model.id:<10}"))
+        port_cell = palette.info(f"{config.effective_port(model):>6}")
         print(
-            f"{model.id:<10}{model.display:<28}{config.effective_port(model):>6}"
+            f"{model_cell}{model.display:<28}{port_cell}"
             f"{model.shards:>8}  {model.role}"
         )
         for key in model.profile_keys:
@@ -172,13 +174,13 @@ def _cmd_status(config: AppConfig, args: argparse.Namespace, palette: Palette) -
         healthy = client.health(timeout=0.6)
         record = records.get(model.id)
         if record is not None and launcher.pid_running(record.pid):
-            state = palette.ok(f"运行中 · 档位 {record.profile}")
+            state = palette.success(f"运行中 · 档位 {record.profile}")
         elif record is not None:
-            state = palette.warn("残留记录（进程已退出）")
+            state = palette.warning("残留记录")
         elif healthy:
-            state = palette.ok("运行中")
+            state = palette.success("运行中")
         else:
-            state = palette.meta("未运行")
+            state = palette.muted("未运行")
         print(f"{palette.meta(f'{model.id:<10} port {port:<5}')}  {state}")
         if verbose and record is not None:
             print(
@@ -283,6 +285,8 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
     failures = 0
     for raw in args.inputs:
         source = Path(raw).expanduser()
+        # 每个文件独立计时/计量；reset 也负责清掉上一文件的看板。
+        monitor.reset()
         try:
             outcome = translate.translate_file(
                 chat,
@@ -293,7 +297,12 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
         except TranslateError as exc:
             print(palette.err(f"{raw}：{exc}"), file=sys.stderr)
             failures += 1
+            if monitor.segments:
+                monitor.finish()
             continue
+        finally:
+            # 成功、失败与意外异常都先擦掉看板，避免残行。
+            monitor.clear()
         target = outcome.output.name if outcome.output else "—"
         monitor.print_line(
             palette.ok(f"{outcome.source.name} → {target} · {outcome.segments} 段")
@@ -306,7 +315,7 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                 file=sys.stderr,
             )
         failures += len(outcome.failures)
-    monitor.finish()
+        monitor.finish()
     if failures:
         print(
             palette.warn(f"完成，但 {failures} 处失败（失败段保留原文）"),

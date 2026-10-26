@@ -20,7 +20,7 @@ from .client import LlamaClient
 from .config import AppConfig, ModelSpec, ProfileSpec
 from .errors import ConfigError, EngineError, GuardError, LaunchError, ToolDenied
 from .session import Session, default_save_path
-from .ui import SYMBOLS, Palette
+from .ui import SYMBOLS, Palette, strip_ansi
 
 
 @dataclass(frozen=True)
@@ -53,7 +53,6 @@ for _command in COMMANDS:
     for _alias in _command.aliases:
         COMMAND_MAP[_alias] = _command
 
-
 class Repl:
     def __init__(
         self,
@@ -84,6 +83,7 @@ class Repl:
         )
         self._prompt_session = None
         self._prompt_ready = False
+        self._ansi_formatter = None
 
     def _activate(
         self,
@@ -135,7 +135,7 @@ class Repl:
 
     def run(self) -> int:
         self._bootstrap()
-        print(self.palette.hint("/help 查看全部命令，/quit 退出"))
+        print(self.palette.muted("[Enter] 输入，[/] 命令"))
         while True:
             try:
                 line = self._read_line(self._prompt_text())
@@ -165,14 +165,27 @@ class Repl:
         return f"{head} {SYMBOLS['prompt']} "
 
     def _read_line(self, prompt: str) -> str:
-        interactive = sys.stdin.isatty()
+        try:
+            interactive = bool(sys.stdin.isatty())
+        except (AttributeError, OSError, ValueError):
+            interactive = False
         session = self._get_prompt_session() if interactive else None
         if session is not None:
-            return session.prompt(prompt)
-        if not interactive:
-            # 非 TTY：提示符走 stderr，stdout 留给回答，便于管道与测试抓取
-            sys.stderr.write(prompt)
+            # prompt_toolkit 必须收到 ANSI 格式化对象，不能把转义字符串
+            # 直接交给它；否则 TTY 上会原样显示 \x1b[35m。
+            formatter = self._ansi_formatter
+            formatted = (
+                formatter(prompt) if formatter is not None else strip_ansi(prompt)
+            )
+            return session.prompt(formatted)
+        # 降级路径：提示符固定走 stderr，stdout 留给回答；必须剥离 ANSI，
+        # 否则没有 prompt_toolkit 时 input()/终端会显示裸转义码。
+        plain = strip_ansi(prompt)
+        try:
+            sys.stderr.write(plain)
             sys.stderr.flush()
+        except (AttributeError, OSError, ValueError):
+            pass
         return input()
 
     # ------------------------------------------------------------------ #
@@ -396,15 +409,22 @@ class Repl:
             records = {record.model_id: record for record in launcher.read_records()}
             for item in self.config.models:
                 port = self.config.effective_port(item)
-                marker = "*" if item.id == self.model.id else " "
+                marker = self.palette.accent("*") if item.id == self.model.id else " "
                 record = records.get(item.id)
                 if record is not None and launcher.pid_running(record.pid):
-                    state = "运行中"
+                    state = self.palette.success("运行中")
                 elif record is not None:
-                    state = "残留记录（进程已退出）"
+                    state = self.palette.warning("残留记录")
                 else:
-                    state = "未运行"
-                print(f" {marker} {item.id:<10} {item.display:<26} port {port:<5} {state}")
+                    state = self.palette.muted("未运行")
+                model_cell = self.palette.bold(
+                    self.palette.accent(f"{item.id:<10}")
+                )
+                port_cell = self.palette.info(f"port {port:<5}")
+                print(
+                    f" {marker} {model_cell} {item.display:<26} "
+                    f"{port_cell} {state}"
+                )
             print(
                 self.palette.hint(
                     "带 id 切换模型；目标未就绪时会自动停旧启新"
@@ -678,7 +698,7 @@ class Repl:
                 )
             )
         ready = bool(self.client and self.client.health(timeout=2.0))
-        state = self.palette.ok("就绪") if ready else self.palette.err("未就绪")
+        state = self.palette.success("就绪") if ready else self.palette.error("未就绪")
         head = self.palette.meta(f"端口 {self.port}")
         print(f"{head}  {state}")
         records = launcher.read_records()
@@ -690,12 +710,14 @@ class Repl:
                         f"{record.model_id} PID {record.pid} 端口 {record.port}"
                         f" 档位 {record.profile} {'存活' if alive else '已退出'}"
                     )
+                    print(self.palette.meta(detail))
                 else:
-                    detail = (
-                        f"{record.model_id} "
-                        f"{'运行中' if alive else '残留记录（进程已退出）'}"
+                    state_text = (
+                        self.palette.success("运行中")
+                        if alive
+                        else self.palette.warning("残留记录")
                     )
-                print(self.palette.meta(detail))
+                    print(self.palette.meta(f"{record.model_id} {state_text}"))
         else:
             print(self.palette.meta("无运行记录（serve 会在 ~/.vanitas_run/ 下写入）"))
         gpu = guard.gpu_status()
@@ -765,6 +787,7 @@ class Repl:
         try:
             from prompt_toolkit import PromptSession
             from prompt_toolkit.completion import Completer, Completion
+            from prompt_toolkit.formatted_text import ANSI
             from prompt_toolkit.history import FileHistory
         except ImportError:
             print(
@@ -799,6 +822,7 @@ class Repl:
             self._prompt_session = PromptSession(
                 history=history, completer=ReplCompleter(self)
             )
+            self._ansi_formatter = ANSI
         except (OSError, ValueError) as exc:
             print(
                 self.palette.warn(f"prompt_toolkit 初始化失败，降级为 input()：{exc}"),

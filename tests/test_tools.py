@@ -95,6 +95,111 @@ class ToolsTests(unittest.TestCase):
             tools.run_exec(config, "definitely-not-here", confirm=lambda _: "y")
         self.assertIn("不存在", str(ctx.exception))
 
+    def test_destructive_command_extracts_paths(self) -> None:
+        paths = tools._is_destructive_command(
+            ["del", "/f", "/s", r"C:\Windows\System32\xxx"]
+        )
+        self.assertEqual(paths, [r"C:\Windows\System32\xxx"])
+
+    def test_destructive_command_skips_switches_and_keeps_relative_path(self) -> None:
+        self.assertEqual(
+            tools._is_destructive_command(["del", "/q", r".\test.txt"]),
+            [r".\test.txt"],
+        )
+
+    def test_non_destructive_command_has_no_targets(self) -> None:
+        self.assertEqual(tools._is_destructive_command(["echo", "del", "x"]), [])
+
+    def test_cmd_wrapper_detects_quoted_del(self) -> None:
+        argv = tools.split_command(r'cmd /c "del C:\Windows\System32\xxx"')
+        self.assertEqual(
+            tools._is_destructive_command(argv),
+            [r"C:\Windows\System32\xxx"],
+        )
+
+    def test_cmd_wrapper_detects_raw_quoted_argv(self) -> None:
+        argv = ["cmd", "/c", r'"del C:\Windows\System32\xxx"']
+        self.assertEqual(
+            tools._is_destructive_command(argv),
+            [r"C:\Windows\System32\xxx"],
+        )
+
+    def test_within_cwd_accepts_relative_and_rejects_traversal(self) -> None:
+        base = Path(load_config().base_dir)
+        self.assertTrue(tools._is_within_cwd(r".\test.txt", base))
+        self.assertTrue(tools._is_within_cwd(str(base / "nested" / "a.txt"), base))
+        self.assertFalse(tools._is_within_cwd(r"..\outside.txt", base))
+        self.assertFalse(tools._is_within_cwd(r"C:\Windows\System32\xxx", base))
+
+    def test_outside_del_rejected_before_subprocess(self) -> None:
+        config = make_config(whitelist=("del",), confirm=True)
+        with mock.patch("vanitas.tools.subprocess.run") as runner:
+            with self.assertRaises(ToolDenied) as ctx:
+                tools.run_exec(
+                    config,
+                    r"del C:\Windows\System32\xxx",
+                    confirm=lambda _: "y",
+                )
+        self.assertIn(
+            "安全限制：禁止修改或删除工作目录之外的文件/目录",
+            str(ctx.exception),
+        )
+        runner.assert_not_called()
+
+    def test_outside_del_is_rejected_even_when_exec_is_disabled(self) -> None:
+        config = make_config(enabled=False, whitelist=("del",), confirm=False)
+        with mock.patch("vanitas.tools.subprocess.run") as runner:
+            with self.assertRaises(ToolDenied) as ctx:
+                tools.run_exec(config, r"del C:\Windows\System32\xxx")
+        self.assertIn("安全限制", str(ctx.exception))
+        runner.assert_not_called()
+
+    def test_inside_del_reaches_subprocess(self) -> None:
+        config = make_config(whitelist=("del",), confirm=False)
+        fake = mock.Mock(
+            return_value=subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
+        )
+        with mock.patch("vanitas.tools.subprocess.run", fake):
+            result = tools.run_exec(config, r"del .\test.txt")
+        self.assertEqual(result.exit_code, 0)
+        argv = fake.call_args.args[0]
+        self.assertEqual(argv, ["cmd", "/d", "/s", "/c", r"del .\test.txt"])
+        self.assertEqual(fake.call_args.kwargs["cwd"], str(config.base_dir))
+
+    def test_destructive_command_without_target_rejected(self) -> None:
+        config = make_config(whitelist=("del",), confirm=False)
+        with mock.patch("vanitas.tools.subprocess.run") as runner:
+            with self.assertRaises(ToolDenied) as ctx:
+                tools.run_exec(config, "del /q")
+        self.assertIn("必须显式指定目标路径", str(ctx.exception))
+        runner.assert_not_called()
+
+    def test_copy_outside_target_rejected(self) -> None:
+        config = make_config(whitelist=("copy",), confirm=False)
+        with mock.patch("vanitas.tools.subprocess.run") as runner:
+            with self.assertRaises(ToolDenied) as ctx:
+                tools.run_exec(config, r"copy .\a.txt C:\Windows\b.txt")
+        self.assertIn("安全限制", str(ctx.exception))
+        runner.assert_not_called()
+
+    def test_cmd_wrapper_outside_del_rejected(self) -> None:
+        config = make_config(whitelist=("cmd",), confirm=False)
+        with mock.patch("vanitas.tools.subprocess.run") as runner:
+            with self.assertRaises(ToolDenied) as ctx:
+                tools.run_exec(config, r'cmd /c "del C:\Windows\System32\xxx"')
+        self.assertIn("安全限制", str(ctx.exception))
+        runner.assert_not_called()
+
+    def test_destructive_help_switch_is_not_treated_as_target(self) -> None:
+        config = make_config(whitelist=("del",), confirm=False)
+        fake = mock.Mock(
+            return_value=subprocess.CompletedProcess([], 0, stdout=b"help", stderr=b"")
+        )
+        with mock.patch("vanitas.tools.subprocess.run", fake):
+            result = tools.run_exec(config, "del /?")
+        self.assertEqual(result.exit_code, 0)
+        fake.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

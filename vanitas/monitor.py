@@ -7,16 +7,18 @@
 
 from __future__ import annotations
 
+import shutil
 import sys
 import threading
 import time
+import unicodedata
 from collections import deque
 from typing import TextIO
 
 from .metrics import SegmentStat, compute_rate, count_cjk, format_duration
-from .ui import Palette
+from .ui import Palette, strip_ansi
 
-PANEL_WIDTH = 52
+FALLBACK_SIZE = (80, 24)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -24,6 +26,35 @@ def _clip(text: str, limit: int) -> str:
     if len(compact) <= limit:
         return compact
     return compact[: max(0, limit - 1)] + "…"
+
+
+def _char_width(char: str) -> int:
+    """终端显示宽度：CJK 全角按 2 列，组合字符不占列。"""
+    if unicodedata.combining(char):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+
+
+def _display_width(text: str) -> int:
+    return sum(_char_width(char) for char in text)
+
+
+def _clip_display(text: str, limit: int) -> str:
+    """按终端显示宽度裁剪，保证单行不因 CJK 双宽而折行。"""
+    if limit <= 0:
+        return ""
+    if _display_width(text) <= limit:
+        return text
+    target = max(0, limit - 1)
+    width = 0
+    pieces: list[str] = []
+    for char in text:
+        step = _char_width(char)
+        if width + step > target:
+            break
+        pieces.append(char)
+        width += step
+    return "".join(pieces) + "…"
 
 
 class TranslationMonitor:
@@ -54,6 +85,7 @@ class TranslationMonitor:
         self._tokens = 0
         self._zh_chars = 0
         self._drawn = 0
+        self._size: tuple[int, int] | None = None
 
     # ------------------------------------------------------------------ #
     # 事件
@@ -70,7 +102,30 @@ class TranslationMonitor:
     def print_line(self, text: str) -> None:
         with self._lock:
             self._clear_locked()
+            if not self._enabled:
+                text = strip_ansi(text)
             self._write(text + "\n")
+
+    def reset(self) -> None:
+        """开始一个新文件的统计：清面板、清环形缓冲并重置计时。"""
+        with self._lock:
+            self._clear_locked()
+            self._records.clear()
+            self._started = time.perf_counter()
+            self._segments = 0
+            self._tokens = 0
+            self._zh_chars = 0
+            self._size = None
+
+    def clear(self) -> None:
+        """只擦除看板、不输出统计；用于异常退出路径。"""
+        with self._lock:
+            self._clear_locked()
+
+    @property
+    def segments(self) -> int:
+        with self._lock:
+            return self._segments
 
     def finish(self) -> str:
         with self._lock:
@@ -88,23 +143,15 @@ class TranslationMonitor:
 
     def _summary_lines(self) -> list[str]:
         elapsed = self._elapsed()
-        separator = "─" * PANEL_WIDTH
-        return [
-            separator,
-            self._palette.ok("翻译任务已完成"),
-            self._palette.meta(f"统计段数：{self._segments} 段"),
-            self._palette.meta(
-                f"累计汉字：{self._zh_chars} 字（不含时间戳与排版符号）"
-            ),
-            self._palette.meta(f"总计耗时：{format_duration(elapsed)}"),
-            self._palette.meta(
-                f"平均速率：{compute_rate(self._tokens, elapsed):.2f} tok/s"
-            ),
-            self._palette.meta(
-                f"吞吐性能：{compute_rate(self._zh_chars, elapsed):.2f} 汉字/秒"
-            ),
-            separator,
-        ]
+        summary = (
+            f"{self._segments} 段 · {self._zh_chars} 字 · "
+            f"{format_duration(elapsed)} · "
+            f"{compute_rate(self._tokens, elapsed):.2f} tok/s · "
+            f"{compute_rate(self._zh_chars, elapsed):.2f} 字/秒"
+        )
+        # enabled 是「终端可安全输出控制序列」的唯一开关；即使调用方传了
+        # enabled=True 的 Palette，非 TTY 下也不能把 ANSI 写进管道。
+        return [self._palette.muted(summary) if self._enabled else summary]
 
     def _rows(self) -> list[str]:
         return [
@@ -114,17 +161,37 @@ class TranslationMonitor:
             for index, stat in self._records
         ]
 
+    def _terminal_size(self) -> tuple[int, int]:
+        try:
+            size = shutil.get_terminal_size(fallback=FALLBACK_SIZE)
+            return max(20, int(size.columns)), max(3, int(size.lines))
+        except (OSError, TypeError, ValueError):
+            return FALLBACK_SIZE
+
+    def _max_rows(self, lines: int) -> int:
+        capacity = self._records.maxlen or 1
+        # 给完成行/摘要/提示留出空间，避免面板把终端顶出可视区。
+        return max(1, min(int(capacity), int(lines) - 2))
+
     def _draw_locked(self) -> None:
         if not self._enabled:
             return
-        rows = self._rows()
-        height = max(self._drawn, len(rows))
+        columns, lines = self._terminal_size()
+        if self._size is not None and self._size != (columns, lines):
+            # 尺寸变化后旧行的实际折行数已不可靠，先清掉再按新宽度重画。
+            self._clear_locked()
+        self._size = (columns, lines)
+        rows = self._rows()[-self._max_rows(lines):]
+        if not rows:
+            return
         if self._drawn:
             self._stream.write(f"\x1b[{self._drawn}A")
+        height = max(self._drawn, len(rows))
+        limit = max(1, columns - 1)
         for index in range(height):
             self._stream.write("\r\x1b[2K")
             if index < len(rows):
-                self._stream.write(rows[index])
+                self._stream.write(_clip_display(rows[index], limit))
             self._stream.write("\n")
         self._drawn = height
         self._flush()

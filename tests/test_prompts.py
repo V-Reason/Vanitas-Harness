@@ -68,6 +68,15 @@ class PromptTests(unittest.TestCase):
         self.assertIn("请直接回答", text)
         self.assertNotIn("复述", text)
 
+    def test_task_agent_enforces_sandbox_and_tool_priority(self) -> None:
+        text = prompts.load_task(self.prompt_dir, "agent")
+        self.assertIn("【安全沙箱约束】", text)
+        self.assertIn("只能修改当前工作目录下的文件", text)
+        self.assertIn("系统目录、父目录", text)
+        self.assertIn("【工具优先级】", text)
+        self.assertIn("write_file", text)
+        self.assertIn("read_file", text)
+
     def test_unknown_placeholder_in_template_rejected(self) -> None:
         (self.temp_dir / "bad.md").write_text("hi {unknown}\n", encoding="utf-8")
         with self.assertRaises(ConfigError) as ctx:

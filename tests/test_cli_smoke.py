@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -17,7 +18,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from vanitas import cli  # noqa: E402
+from vanitas.config import DEFAULT_THEME, load_config  # noqa: E402
 from vanitas.errors import GuardError  # noqa: E402
+from vanitas.ui import Palette  # noqa: E402
 
 ENV_KEYS = ("VANITAS_PORT", "VANITAS_PROFILE", "VANITAS_CONFIG_DIR")
 
@@ -163,6 +166,57 @@ class CliSmokeTests(unittest.TestCase):
                 code, _out, _err = run(["agent"])
         self.assertEqual(code, 0)
         called.assert_called_once()
+
+    def test_translate_two_files_get_independent_compact_stats(self) -> None:
+        first = self.dir / "a.srt"
+        first.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nHello\n",
+            encoding="utf-8",
+        )
+        second = self.dir / "b.srt"
+        second.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\nBye\n",
+            encoding="utf-8",
+        )
+        out_dir = self.dir / "out"
+        with clean_env():
+            with mock.patch.object(
+                cli, "_ensure_engine", return_value=(FakeClient(), 4060)
+            ):
+                code, _out, err = run(
+                    ["translate", str(first), str(second), "--out-dir", str(out_dir)]
+                )
+        self.assertEqual(code, 0, err)
+        summaries = [
+            line
+            for line in err.splitlines()
+            if re.match(r"^\d+ 段 · \d+ 字 · ", line)
+        ]
+        self.assertEqual(len(summaries), 2, err)
+        self.assertTrue(summaries[0].startswith("1 段"))
+        self.assertTrue(summaries[1].startswith("2 段"))
+        self.assertNotIn("翻译任务已完成", err)
+        self.assertNotIn("统计段数", err)
+        self.assertNotIn("累计汉字", err)
+
+    def test_status_state_uses_muted_color(self) -> None:
+        config = load_config()
+        palette = Palette(DEFAULT_THEME, enabled=True)
+        fake_client = mock.Mock()
+        fake_client.health.return_value = False
+        out = io.StringIO()
+        with (
+            mock.patch.object(cli.LlamaClient, "for_model", return_value=fake_client),
+            mock.patch.object(cli.launcher, "read_records", return_value=[]),
+            mock.patch.object(cli.guard, "gpu_status", return_value=None),
+            contextlib.redirect_stdout(out),
+        ):
+            code = cli._cmd_status(
+                config, mock.Mock(verbose=False), palette
+            )
+        self.assertEqual(code, 0)
+        self.assertIn("\x1b[90m未运行\x1b[0m", out.getvalue())
 
 
 if __name__ == "__main__":

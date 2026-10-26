@@ -65,10 +65,10 @@
 1. **纯文本增量渲染，不做全屏重绘**：流式 token 直接写 stdout 并 flush；代码围栏内缩进 4 空格表示等宽块；着色只在 `vanitas/ui.py` 做（16 色 ANSI，`color: auto|always|never`），重定向即自动降级为纯文本，保证 `| tee`、CI 抓取可读（D3）。
 2. **12 个 `/` 命令，一张表**：`/help /model /profile /system /task /clear /save /load /exec /stop /status /quit`（`/exit` 为 `/quit` 别名），全部在 `repl.py` 的 `COMMANDS` 中声明 `name/description/aliases/arg_hint`，`/help` 自动生成（D1）。提示符固定为 `<id>@<档位> › `，与 `/model`、`/status` 显示的模型/档位始终同一来源。TTY 下 Tab 补全命令/别名、`/model ` 的模型 id 与 `/profile ` 的档位。
 3. **单引擎、单模型、单档位**：一次只服务一个 llama-server；`/model` 切换前用 pidfile + `/health` 验就绪，已就绪直连，未就绪则在单实例守卫下停旧启新（D6）。8 GB 显存仍禁不起双实例；失败时保留可读错误，不假装切换成功。
-4. **`/exec` 手动、默认关闭、逐次确认**：只做「白名单内、可见、可拒绝」的最小安全面，不实现自动循环，也不预留空钩子（D4）。`vanitas agent` 只做规划输出，不执行 action。
+4. **`/exec` 手动、默认关闭、逐次确认**：只做「白名单内、可见、可拒绝」的最小安全面，不实现自动循环，也不预留空钩子（D4）；破坏性/写命令另加工作目录路径约束。`vanitas agent` 只做规划输出，不执行 action。
 5. **会话与历史分离**：`/save` 存业务消息（可跨进程恢复），输入历史交给 `prompt_toolkit`；`/clear` 保留系统提示（D2、D5）。
 6. **上下文预算按档位算，不猜**：历史预算 `min(profile.ctx, repl.max_context_tokens) - context_reserve_tokens`；单轮输出预算 `max(min_output_tokens, profile.ctx - 历史 tokens - reserve)`。超预算丢最早轮次并提示裁剪数量；不实现自动摘要（那属于 auto-compact，明确不做）。
-7. **翻译保留“可见的上下文”**：`TranslationEngine` 携带最近 N 段原文/译文摘要；`monitor.py` 用 ANSI 局部重绘最近 5 段，让用户能肉眼核对跨段人称与术语；业务层只发 `SegmentStat`，不直接画终端。`finish_reason=length` 时按句末/中点拆分重译，避免半句静默输出。
+7. **翻译保留“可见的上下文”**：`TranslationEngine` 携带最近 N 段原文/译文摘要；`monitor.py` 用 ANSI 局部重绘最近 5 段（按终端宽高裁剪），让用户能肉眼核对跨段人称与术语；每个文件 reset/finish 独立结算。业务层只发 `SegmentStat`，不直接画终端。`finish_reason=length` 时按句末/中点拆分重译，避免半句静默输出。
 
 ### 代码回溯索引（DoD：≥3 个设计点可回溯）
 
