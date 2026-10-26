@@ -44,7 +44,7 @@
     "move_illegal_chars": "#<>\"|?*",
     "manual_exec_prefixes": ["echo", "dir", "type", "python --version", "git status", "git log", "git diff", "del", "erase", "ren", "rename", "copy", "move"],
     "destructive_commands": ["del", "erase", "rd", "rmdir", "rm", "mv", "move", "ren", "rename", "copy", "xcopy", "robocopy", "mkdir", "md", "format"],
-    "readonly_shell_prefixes": ["dir", "ls", "type", "cat", "echo", "findstr", "find", "pwd", "where", "head", "tail", "wc", "grep", "git status", "git log", "git diff", "git show", "git rev-parse"],
+    "readonly_shell_prefixes": ["dir", "ls", "type", "cat", "echo", "findstr", "find", "pwd", "where", "head", "tail", "wc", "grep", "git status", "git log", "git diff", "git show", "git rev-parse", "python verify.py", "python -m unittest"],
     "readonly_blocked_flags": ["-o", "-delete", "-fls", "-ok", "-okdir"],
     "readonly_blocked_prefixes": ["-exec", "--output", "-fprint", "-fprintf"],
     "git_blocked_options": ["-c", "-C", "--git-dir", "--work-tree", "--exec-path", "--namespace", "--no-index", "--output"],

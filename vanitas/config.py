@@ -225,6 +225,8 @@ DEFAULT_READONLY_SHELL_PREFIXES = frozenset(
         "git diff",
         "git show",
         "git rev-parse",
+        "python verify.py",
+        "python -m unittest",
     }
 )
 CORE_READONLY_BLOCKED_FLAGS = frozenset(
