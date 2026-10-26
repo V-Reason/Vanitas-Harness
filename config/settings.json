@@ -21,7 +21,6 @@
   },
   "tools": {
     "exec_enabled": true,
-    "exec_whitelist": ["echo", "dir", "type", "python --version", "git status", "del", "ren"],
     "exec_require_confirm": true
   },
   "translate": {

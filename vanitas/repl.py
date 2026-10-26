@@ -41,7 +41,7 @@ COMMANDS: tuple[Command, ...] = (
     Command("clear", "清空对话历史"),
     Command("save", "保存当前会话 JSON", (), "[path]"),
     Command("load", "加载会话 JSON", (), "<path>"),
-    Command("exec", "执行本地命令，逐次确认", (), "<cmd>"),
+    Command("exec", "在固定兼容前缀内执行本地命令，逐次确认", (), "<cmd>"),
     Command("stop", "停止所有 llama-server", ("kill",)),
     Command("status", "显示服务端 / 显存 / 当前模型"),
     Command("quit", "退出 REPL", ("exit",)),
@@ -163,6 +163,16 @@ class Repl:
     def _prompt_text(self) -> str:
         head = self.palette.accent(f"{self.model.id}@{self.profile.key}")
         return f"{head} {SYMBOLS['prompt']} "
+
+    def confirm_plan(self, plan: str) -> bool:
+        """展示动作清单并做一次 [y/N] 确认；无 TTY 的测试可注入 confirm。"""
+        print(self.palette.accent(plan))
+        try:
+            answer = input("[y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+        return answer.strip().lower() in {"y", "yes", "是"}
 
     def _read_line(self, prompt: str) -> str:
         try:

@@ -96,7 +96,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.settings.translate.monitor_lines, 5)
         self.assertTrue(config.settings.tools.exec_enabled)
         self.assertTrue(config.settings.tools.exec_require_confirm)
-        self.assertIn("ren", config.settings.tools.exec_whitelist)
+        self.assertFalse(hasattr(config.settings.tools, "exec_whitelist"))
 
     def test_new_budget_fields_are_optional(self) -> None:
         del self.settings["repl"]["context_reserve_tokens"]
@@ -163,6 +163,14 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ConfigError) as ctx:
                 self.load()
         self.assertIn("KV 类型", str(ctx.exception))
+
+    def test_exec_whitelist_is_retired(self) -> None:
+        self.settings["tools"]["exec_whitelist"] = ["echo"]
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError) as ctx:
+                self.load()
+        self.assertIn("exec_whitelist", str(ctx.exception))
 
     def test_bad_settings_number(self) -> None:
         self.settings["request"]["timeout_sec"] = 0

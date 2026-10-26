@@ -54,7 +54,7 @@ REPL_FIELDS = frozenset(
         "min_output_tokens",
     }
 )
-TOOLS_FIELDS = frozenset({"exec_enabled", "exec_whitelist", "exec_require_confirm"})
+TOOLS_FIELDS = frozenset({"exec_enabled", "exec_require_confirm"})
 TRANSLATE_FIELDS = frozenset(
     {
         "source_suffixes",
@@ -159,8 +159,9 @@ class ReplSettings:
 
 @dataclass(frozen=True)
 class ToolsSettings:
+    # `exec_whitelist` 已退役：Agent 的只读权限全部在 tools.py 硬编码，
+    # `/exec` 只保留兼容前缀 + 手动确认。
     exec_enabled: bool
-    exec_whitelist: tuple[str, ...]
     exec_require_confirm: bool
 
 
@@ -560,17 +561,8 @@ def _load_settings(document: dict) -> Settings:
 
     tools = _as_mapping(document.get("tools"), "settings.tools")
     _reject_unknown(tools, TOOLS_FIELDS, "settings.tools")
-    whitelist = tools.get("exec_whitelist")
-    if not isinstance(whitelist, list) or not whitelist:
-        _fail("settings.tools.exec_whitelist", "必须是非空字符串数组")
-    normalized: list[str] = []
-    for item in whitelist:
-        if not isinstance(item, str) or not item.strip():
-            _fail("settings.tools.exec_whitelist", f"元素必须是非空字符串，实际为 {item!r}")
-        normalized.append(" ".join(item.split()).lower())
     tools_settings = ToolsSettings(
         exec_enabled=_as_bool(tools, "exec_enabled", "settings.tools"),
-        exec_whitelist=tuple(normalized),
         exec_require_confirm=_as_bool(tools, "exec_require_confirm", "settings.tools"),
     )
 

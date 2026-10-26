@@ -1,12 +1,11 @@
-"""受控工具执行：手动 /exec + Agent 内置工具 + CWD 沙盒。
+"""受控工具执行：手动 /exec + Agent 内置工具 + 工作区沙盒。
 
 两条路径刻意分开：
-- `run_exec` 保留旧 `/exec` 契约：配置白名单、逐次确认、以仓库根为工作目录；
-- `AgentTools` 供 Agent 闭环使用：只读命令白名单、当前目录内的破坏性操作、
-  所有文件参数经过 `_is_safe_path`。Agent 的每一步确认由 agent.py 负责。
+- `run_exec` 保留 `/exec` 契约：手动确认、以仓库根为工作目录、硬编码的兼容前缀；
+- `AgentTools` 供 Agent 闭环使用：强类型文件工具、只读 Shell、工作区内路径校验。
 
-普通程序 `shell=False`：`& | >` 只能作为字面参数，无法串联第二条命令；
-cmd 内置命令（echo/dir/type/ren…）没有 .exe，改走受控 `cmd /c`，并先拒绝元字符。
+安全边界是参数级而不是 OS 级：所有文件路径在进入 `Path` 操作前都必须经过
+`is_inside_workspace`；Shell 使用 `shell=False`，不启动命令解释器。
 """
 
 from __future__ import annotations
@@ -14,10 +13,11 @@ from __future__ import annotations
 import locale
 import os
 import shlex
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 from .config import AppConfig
 from .errors import ToolDenied
@@ -44,7 +44,8 @@ WINDOWS_BUILTINS = frozenset(
         "vol",
     }
 )
-SHELL_METACHARS = frozenset("&|<>^%")
+# 仅用于 /exec 的 cmd 内置命令；Agent 不经过这里。
+_CMD_CONTROL_CHARS = frozenset("&|<>^%")
 DESTRUCTIVE_COMMANDS = frozenset(
     {
         "del",
@@ -64,28 +65,70 @@ DESTRUCTIVE_COMMANDS = frozenset(
         "format",
     }
 )
-# Agent 的 shell 不接受解释器/脚本宿主：路径无法证明安全，直接拒绝。
-AGENT_BLOCKED_COMMANDS = frozenset(
+
+# `/exec` 是历史手动入口，保留一组固定的兼容前缀；Agent 的权限不再来自
+# settings.tools，而来自本文件下面的 READONLY_SHELL_PREFIXES。
+MANUAL_EXEC_PREFIXES = (
+    "echo",
+    "dir",
+    "type",
+    "python --version",
+    "git status",
+    "git log",
+    "git diff",
+    "del",
+    "erase",
+    "ren",
+    "rename",
+    "copy",
+    "move",
+)
+
+READONLY_SHELL_PREFIXES = frozenset(
     {
-        "python",
-        "python3",
-        "pythonw",
-        "py",
-        "powershell",
-        "pwsh",
-        "cmd",
-        "wscript",
-        "cscript",
-        "mshta",
-        "rundll32",
-        "regsvr32",
-        "format",
-        "diskpart",
+        "dir",
+        "ls",
+        "type",
+        "cat",
+        "echo",
+        "findstr",
+        "find",
+        "pwd",
+        "where",
+        "head",
+        "tail",
+        "wc",
+        "grep",
+        "git status",
+        "git log",
+        "git diff",
+        "git show",
+        "git rev-parse",
     }
 )
-AGENT_READONLY_COMMANDS = frozenset({"echo", "dir", "type"})
-AGENT_GIT_SUBCOMMANDS = frozenset({"status"})
+_READONLY_BUILTINS = frozenset({"echo", "dir", "ls", "type", "cat", "pwd"})
+_READONLY_BLOCKED_EXACT = frozenset({"-o", "-delete", "-fls", "-ok", "-okdir"})
+_READONLY_BLOCKED_PREFIXES = (
+    "-exec",
+    "--output",
+    "-fprint",
+    "-fprintf",
+)
+_GIT_BLOCKED_OPTIONS = frozenset(
+    {
+        "-c",
+        "-C",
+        "--git-dir",
+        "--work-tree",
+        "--exec-path",
+        "--namespace",
+        "--no-index",
+        "--output",
+    }
+)
+_GIT_BLOCKED_PREFIXES = ("-c", "-C", "--git-dir=", "--work-tree=", "--exec-path=")
 CANCEL_MESSAGE = "已取消"
+_CANCEL_MESSAGE = CANCEL_MESSAGE
 MAX_READ_BYTES = 256 * 1024
 MAX_LIST_ENTRIES = 200
 _COMMAND_SUFFIXES = (".exe", ".com", ".bat", ".cmd")
@@ -101,7 +144,7 @@ class ExecResult:
 
 
 def _decode(raw: bytes) -> str:
-    for encoding in ("utf-8", locale.getpreferredencoding(False), "mbcs"):
+    for encoding in ("utf-8-sig", locale.getpreferredencoding(False), "mbcs"):
         try:
             return raw.decode(encoding)
         except (UnicodeDecodeError, LookupError):
@@ -113,7 +156,7 @@ def normalize(command: str) -> str:
     return " ".join(command.split()).lower()
 
 
-def is_whitelisted(command: str, whitelist: tuple[str, ...] | list[str]) -> bool:
+def is_whitelisted(command: str, whitelist: Iterable[str]) -> bool:
     normalized = normalize(command)
     for entry in whitelist:
         candidate = normalize(entry)
@@ -139,10 +182,10 @@ def split_command(command: str) -> list[str]:
 
 
 def resolve_argv(command: str) -> list[str]:
-    """决定实际启动参数：普通程序 shell=False；cmd 内置命令走受控的 `cmd /c`。"""
+    """为 `/exec` 决定启动参数：普通程序 shell=False；cmd 内置命令走受控 cmd /c。"""
     argv = split_command(command)
     if os.name == "nt" and argv[0].lower() in WINDOWS_BUILTINS:
-        if any(char in command for char in SHELL_METACHARS):
+        if any(char in command for char in _CMD_CONTROL_CHARS):
             raise ToolDenied(
                 "内置命令不允许包含 & | < > ^ %，避免串联第二条命令；"
                 "需要组合命令请拆成多次执行"
@@ -181,8 +224,6 @@ def _unwrap_cmd(argv: list[str]) -> list[str]:
         if len(rest) == 1 and any(char.isspace() for char in rest[0]):
             try:
                 inner = split_command(rest[0])
-                # 直接传入的 argv 可能保留一整段带引号的内层命令；
-                # 再拆一层，确保 `cmd /c "del C:\\..."` 也能识别动词。
                 if len(inner) == 1 and any(char.isspace() for char in inner[0]):
                     inner = split_command(inner[0])
             except ToolDenied:
@@ -253,8 +294,31 @@ def _is_destructive_command(argv: list[str]) -> list[str]:
     return paths
 
 
-def _resolve_candidate(path_str: str, root: Path | None = None) -> Path:
-    base = Path(root).expanduser().resolve() if root is not None else Path.cwd().resolve()
+def _workspace_root(root: Path | str | None) -> Path:
+    if root is not None:
+        return Path(root).expanduser().resolve()
+    # bat 会先 cd 到仓库根；Agent 的“当前工作区”必须回到用户原 CWD。
+    original = os.environ.get("VANITAS_ORIG_CWD")
+    if original:
+        return Path(original).expanduser().resolve()
+    return Path.cwd().resolve()
+
+
+def _path_text(path: str | os.PathLike[str]) -> str:
+    try:
+        raw = os.fspath(path)
+    except TypeError as exc:
+        raise ToolDenied("路径必须是字符串") from exc
+    if not isinstance(raw, str):
+        raise ToolDenied("路径必须是字符串")
+    raw = raw.strip()
+    if not raw or "\x00" in raw:
+        raise ToolDenied("安全限制：路径不能为空")
+    return raw
+
+
+def _resolve_candidate(path_str: str, root: Path | str | None = None) -> Path:
+    base = _workspace_root(root)
     expanded = os.path.expandvars(os.path.expanduser(str(path_str)))
     candidate = Path(expanded)
     if not candidate.is_absolute():
@@ -262,28 +326,61 @@ def _resolve_candidate(path_str: str, root: Path | None = None) -> Path:
     return candidate.resolve()
 
 
-def _is_safe_path(path_str: str, root: Path | None = None) -> bool:
-    """路径解析后是否落在沙盒根内；空值、NUL 与解析失败按不安全处理。"""
-    if not isinstance(path_str, str):
-        return False
-    raw = path_str.strip()
-    if not raw or "\x00" in raw:
-        return False
+def is_inside_workspace(
+    path: str | os.PathLike[str],
+    root: Path | str | None = None,
+    *,
+    raise_on_error: bool = True,
+) -> bool:
+    """规范化路径并判断是否位于工作区内。
+
+    默认在越界、空路径或路径无法解析时抛出 `ToolDenied`；需要布尔查询时传
+    `raise_on_error=False`。Windows 通过 `normcase` + `commonpath` 做大小写
+    不敏感比较，跨盘符同样判为越界。
+    """
     try:
-        base = Path(root).expanduser().resolve() if root is not None else Path.cwd().resolve()
+        raw = _path_text(path)
+        # 独立调用严格以进程 CWD 为根；AgentTools 会显式传入原 CWD。
+        base = (
+            Path.cwd().resolve()
+            if root is None
+            else Path(root).expanduser().resolve()
+        )
         resolved = _resolve_candidate(raw, base)
         base_key = os.path.normcase(str(base))
         target_key = os.path.normcase(str(resolved))
-        return os.path.commonpath([base_key, target_key]) == base_key
-    except (OSError, RuntimeError, TypeError, ValueError):
-        return False
+        inside = os.path.commonpath([base_key, target_key]) == base_key
+    except (OSError, RuntimeError, TypeError, ValueError, ToolDenied) as exc:
+        inside = False
+        raw = str(path) if "raw" not in locals() else raw
+        detail = str(exc) or "无法解析路径"
+    else:
+        detail = "路径不在工作区内"
+    if inside:
+        return True
+    if raise_on_error:
+        raise ToolDenied(f"安全限制：越界操作已被拦截：{raw}（{detail}）")
+    return False
 
 
-def _require_safe_path(path_str: str, root: Path | None = None) -> Path:
-    if not _is_safe_path(path_str, root):
-        raise ToolDenied("安全限制：越界操作已被拦截。")
-    base = Path(root).expanduser().resolve() if root is not None else Path.cwd().resolve()
-    return _resolve_candidate(path_str, base)
+def _require_path(
+    path: str | os.PathLike[str], root: Path | str | None = None
+) -> Path:
+    raw = _path_text(path)
+    # 与 is_inside_workspace 一致：未显式给根时使用进程 CWD；
+    # AgentTools 永远显式传入原 CWD，避免 bat 的仓库根劫持。
+    base = (
+        Path.cwd().resolve()
+        if root is None
+        else Path(root).expanduser().resolve()
+    )
+    is_inside_workspace(raw, base)
+    return _resolve_candidate(raw, base)
+
+
+def _is_safe_path(path_str: str, root: Path | str | None = None) -> bool:
+    """兼容旧调用：返回路径是否落在工作区内，不抛异常。"""
+    return is_inside_workspace(path_str, root, raise_on_error=False)
 
 
 def _is_within_cwd(path: str, cwd: Path) -> bool:
@@ -295,7 +392,7 @@ def _ask(prompt: str) -> str:
     try:
         return input(prompt)
     except EOFError as exc:
-        raise ToolDenied(CANCEL_MESSAGE) from exc
+        raise ToolDenied(_CANCEL_MESSAGE) from exc
 
 
 def _execute(
@@ -303,6 +400,8 @@ def _execute(
     command: str,
     argv: list[str],
     cwd: Path,
+    *,
+    env: dict[str, str] | None = None,
 ) -> ExecResult:
     timeout = config.settings.request.timeout_sec
     try:
@@ -313,6 +412,7 @@ def _execute(
             timeout=timeout,
             shell=False,
             creationflags=_NO_WINDOW,
+            env=env,
         )
     except FileNotFoundError as exc:
         raise ToolDenied(f"命令不存在：{argv[0]}，PATH 中找不到") from exc
@@ -334,6 +434,7 @@ def run_exec(
     *,
     confirm: Callable[[str], str] | None = None,
 ) -> ExecResult:
+    """手动 `/exec`：保持逐次确认与仓库根边界，不复用 Agent 的只读策略。"""
     if not command.strip():
         raise ToolDenied("用法：/exec <命令>")
     tokens = split_command(command)
@@ -357,18 +458,113 @@ def run_exec(
             "本地命令执行已关闭；如需启用，把 config\\settings.json 的 "
             "tools.exec_enabled 改为 true 后重试"
         )
-    if not is_whitelisted(command, settings.exec_whitelist):
+    if not is_whitelisted(command, MANUAL_EXEC_PREFIXES):
         raise ToolDenied(
-            f"命令不在白名单内：{command}；"
-            f"允许的前缀：{'；'.join(settings.exec_whitelist)}"
+            f"命令不在兼容白名单内：{command}；"
+            f"允许的前缀：{'；'.join(MANUAL_EXEC_PREFIXES)}"
         )
     if settings.exec_require_confirm:
         answer = (confirm or _ask)(f"执行本地命令？\n  {command}\n[y/N] ")
         if answer.strip().lower() not in {"y", "yes", "是"}:
-            raise ToolDenied(CANCEL_MESSAGE)
+            raise ToolDenied(_CANCEL_MESSAGE)
 
     argv = resolve_argv(command)
     return _execute(config, command, argv, config.base_dir)
+
+
+# --------------------------------------------------------------------------- #
+# 强类型文件工具：既可直接调用，也可由 AgentTools 绑定工作区后调用
+# --------------------------------------------------------------------------- #
+
+
+def read_file(path: str, *, root: Path | str | None = None) -> str:
+    target = _require_path(path, root)
+    try:
+        if not target.is_file():
+            raise ToolDenied(f"不是可读取的文件：{path}")
+        size = target.stat().st_size
+        if size > MAX_READ_BYTES:
+            raise ToolDenied(
+                f"文件超过 {MAX_READ_BYTES // 1024} KiB，已拒绝读取：{path}"
+            )
+        raw = target.read_bytes()
+    except ToolDenied:
+        raise
+    except OSError as exc:
+        raise ToolDenied(f"读取失败：{path}；{exc.strerror or exc}") from exc
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ToolDenied(f"文件不是 UTF-8：{path}") from exc
+
+
+def write_file(path: str, content: str, *, root: Path | str | None = None) -> int:
+    if not isinstance(content, str):
+        raise ToolDenied("write_file 的 content 必须是字符串")
+    target = _require_path(path, root)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        data = content.encode("utf-8")
+        target.write_bytes(data)
+    except OSError as exc:
+        raise ToolDenied(f"写入失败：{path}；{exc.strerror or exc}") from exc
+    return len(data)
+
+
+def move_file(
+    src: str, dst: str, *, root: Path | str | None = None
+) -> str:
+    source = _require_path(src, root)
+    target = _require_path(dst, root)
+    if source == target:
+        raise ToolDenied(f"源和目标相同：{src}")
+    try:
+        if not source.is_file():
+            raise ToolDenied(f"不是可移动的文件：{src}")
+        if target.exists():
+            raise ToolDenied(f"目标已存在：{dst}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(target))
+    except ToolDenied:
+        raise
+    except OSError as exc:
+        raise ToolDenied(f"移动失败：{src} -> {dst}；{exc.strerror or exc}") from exc
+    return f"重命名 {src} -> {dst}"
+
+
+def delete_file(path: str, *, root: Path | str | None = None) -> str:
+    target = _require_path(path, root)
+    try:
+        if not target.is_file():
+            raise ToolDenied(f"不是可删除的文件：{path}")
+        target.unlink()
+    except ToolDenied:
+        raise
+    except OSError as exc:
+        raise ToolDenied(f"删除失败：{path}；{exc.strerror or exc}") from exc
+    return f"删除 {path}"
+
+
+def list_dir(path: str = ".", *, root: Path | str | None = None) -> list[str]:
+    target = _require_path(path, root)
+    if not target.is_dir():
+        raise ToolDenied(f"不是目录：{path}")
+    entries: list[str] = []
+    truncated = False
+    try:
+        with os.scandir(target) as iterator:
+            for entry in iterator:
+                if len(entries) >= MAX_LIST_ENTRIES:
+                    truncated = True
+                    break
+                suffix = "/" if entry.is_dir(follow_symlinks=False) else ""
+                entries.append(entry.name + suffix)
+    except OSError as exc:
+        raise ToolDenied(f"目录读取失败：{path}；{exc.strerror or exc}") from exc
+    entries.sort(key=lambda item: (not item.endswith("/"), item.casefold()))
+    if truncated:
+        entries.append("…")
+    return entries
 
 
 class AgentTools:
@@ -376,120 +572,148 @@ class AgentTools:
 
     def __init__(self, config: AppConfig, root: Path | None = None) -> None:
         self.config = config
-        if root is not None:
-            self.root = Path(root).expanduser().resolve()
-        else:
-            # bat 为导入包会 cd 到仓库根；Agent 沙盒必须回到用户原 CWD。
-            original = os.environ.get("VANITAS_ORIG_CWD")
-            self.root = (
-                Path(original).expanduser().resolve()
-                if original
-                else Path.cwd().resolve()
-            )
+        self.root = _workspace_root(root)
         if self.root.parent == self.root:
             raise ToolDenied("安全限制：工作目录不能是磁盘根目录")
 
     def _require(self, path: str) -> Path:
-        return _require_safe_path(path, self.root)
+        return _require_path(path, self.root)
 
     def read_file(self, path: str) -> str:
-        target = self._require(path)
-        try:
-            if not target.is_file():
-                raise ToolDenied(f"不是可读取的文件：{path}")
-            size = target.stat().st_size
-            if size > MAX_READ_BYTES:
-                raise ToolDenied(
-                    f"文件超过 {MAX_READ_BYTES // 1024} KiB，已拒绝读取：{path}"
-                )
-            raw = target.read_bytes()
-        except ToolDenied:
-            raise
-        except OSError as exc:
-            raise ToolDenied(f"读取失败：{path}；{exc.strerror or exc}") from exc
-        try:
-            return raw.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ToolDenied(f"文件不是 UTF-8：{path}") from exc
+        return read_file(path, root=self.root)
 
     def write_file(self, path: str, content: str) -> int:
-        if not isinstance(content, str):
-            raise ToolDenied("write_file 的 content 必须是字符串")
-        target = self._require(path)
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            data = content.encode("utf-8")
-            target.write_bytes(data)
-        except OSError as exc:
-            raise ToolDenied(f"写入失败：{path}；{exc.strerror or exc}") from exc
-        return len(data)
+        return write_file(path, content, root=self.root)
+
+    def move_file(self, src: str, dst: str) -> str:
+        return move_file(src, dst, root=self.root)
+
+    def delete_file(self, path: str) -> str:
+        return delete_file(path, root=self.root)
 
     def list_dir(self, path: str = ".") -> list[str]:
-        target = self._require(path)
-        if not target.is_dir():
-            raise ToolDenied(f"不是目录：{path}")
-        entries: list[str] = []
-        truncated = False
-        try:
-            with os.scandir(target) as iterator:
-                for entry in iterator:
-                    if len(entries) >= MAX_LIST_ENTRIES:
-                        truncated = True
-                        break
-                    suffix = "/" if entry.is_dir(follow_symlinks=False) else ""
-                    entries.append(entry.name + suffix)
-        except OSError as exc:
-            raise ToolDenied(f"目录读取失败：{path}；{exc.strerror or exc}") from exc
-        entries.sort(key=lambda item: (not item.endswith("/"), item.casefold()))
-        if truncated:
-            entries.append("…")
-        return entries
+        return list_dir(path, root=self.root)
 
-    def run_shell(self, command: str) -> ExecResult:
+    # ------------------------------------------------------------------ #
+    # 只读 Shell
+    # ------------------------------------------------------------------ #
+
+    def run_shell_ro(self, command: str) -> ExecResult:
+        """只读命令执行：前缀白名单 + 写操作参数黑名单，不启动 shell。"""
         if not isinstance(command, str) or not command.strip():
             raise ToolDenied("shell 命令不能为空")
         command = command.strip()
-        if any(char in command for char in SHELL_METACHARS):
-            raise ToolDenied("安全限制：不允许管道、重定向或命令串联。")
         tokens = split_command(command)
+        prefix = self._readonly_prefix(tokens)
+        if prefix not in READONLY_SHELL_PREFIXES:
+            raise ToolDenied(
+                f"安全限制：只允许只读命令；收到 {prefix!r}。"
+                f"允许：{'、'.join(sorted(READONLY_SHELL_PREFIXES))}"
+            )
+        self._reject_write_flags(tokens)
+        self._check_readonly_paths(tokens, prefix)
+        if prefix in _READONLY_BUILTINS:
+            return self._run_builtin(command, prefix, tokens)
+        env = os.environ.copy()
+        env.update(
+            {
+                "GIT_PAGER": "cat",
+                "PAGER": "cat",
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_OPTIONAL_LOCKS": "0",
+            }
+        )
+        return _execute(self.config, command, tokens, self.root, env=env)
+
+    # 兼容旧测试/调用；语义已改为只读，不再接受 ren/del 等修改命令。
+    def run_shell(self, command: str) -> ExecResult:
+        return self.run_shell_ro(command)
+
+    @staticmethod
+    def _readonly_prefix(tokens: list[str]) -> str:
         name = _command_name(tokens[0])
-        if name in AGENT_BLOCKED_COMMANDS:
-            raise ToolDenied(f"安全限制：不允许执行解释器或脚本宿主命令：{name}")
-        self._check_command(tokens, name)
-        if not self.config.settings.tools.exec_enabled:
-            raise ToolDenied(
-                "本地命令执行已关闭；如需启用，把 config\\settings.json 的 "
-                "tools.exec_enabled 改为 true 后重试"
-            )
-        argv = resolve_argv(command)
-        return _execute(self.config, command, argv, self.root)
-
-    def _check_command(self, tokens: list[str], name: str) -> None:
-        if _destructive_verb(tokens) is not None:
-            targets = _is_destructive_command(tokens)
-            if not targets:
-                if not any(token in _HELP_SWITCHES for token in tokens):
-                    raise ToolDenied("安全限制：破坏性命令必须显式指定目标路径")
-            else:
-                outside = [
-                    path for path in targets if not _is_safe_path(path, self.root)
-                ]
-                if outside:
-                    raise ToolDenied("安全限制：越界操作已被拦截。")
-            return
-
         if name == "git":
-            if len(tokens) < 2 or tokens[1].lower() not in AGENT_GIT_SUBCOMMANDS:
-                raise ToolDenied("安全限制：Agent 只允许 git status。")
-        elif name not in AGENT_READONLY_COMMANDS:
-            raise ToolDenied(
-                "安全限制：Agent 只允许只读命令或当前目录内的破坏性操作。"
-            )
+            if len(tokens) < 2:
+                return "git"
+            return f"git {tokens[1].lower()}"
+        return name
 
-        outside = [
-            token
-            for token in tokens[1:]
-            if token and not _looks_like_switch(token) and not _is_safe_path(token, self.root)
-        ]
-        if outside:
-            raise ToolDenied("安全限制：越界操作已被拦截。")
+    @staticmethod
+    def _reject_write_flags(tokens: list[str]) -> None:
+        for token in tokens:
+            low = token.lower()
+            if low in _READONLY_BLOCKED_EXACT or low.startswith(
+                _READONLY_BLOCKED_PREFIXES
+            ):
+                raise ToolDenied(
+                    f"安全限制：只读 Shell 不允许写操作参数 {token!r}"
+                )
+
+    def _check_readonly_paths(self, tokens: list[str], prefix: str) -> None:
+        if prefix == "git" or prefix.startswith("git "):
+            self._check_git(tokens)
+            return
+        if prefix == "echo":
+            return
+        name = prefix
+        args = tokens[1:]
+        if name in {"dir", "ls", "type", "cat", "head", "tail", "wc", "grep"}:
+            candidates = [token for token in args if not _looks_like_switch(token)]
+        elif name == "find":
+            # 保守策略：find 的非开关参数全部按工作区路径校验；通配符
+            # 如 *.md 会解析为工作区内路径，不会误放行绝对外部路径。
+            candidates = [token for token in args if not _looks_like_switch(token)]
+        elif name == "findstr":
+            non_switches = [token for token in args if not _looks_like_switch(token)]
+            candidates = non_switches[1:]
+        else:
+            candidates = []
+        for candidate in candidates:
+            is_inside_workspace(candidate, self.root)
+
+    def _check_git(self, tokens: list[str]) -> None:
+        for token in tokens[1:]:
+            low = token.lower()
+            if low in _GIT_BLOCKED_OPTIONS or low.startswith(_GIT_BLOCKED_PREFIXES):
+                raise ToolDenied(
+                    f"安全限制：git 只读子命令不允许参数 {token!r}"
+                )
+        if "--" in tokens:
+            for candidate in tokens[tokens.index("--") + 1:]:
+                is_inside_workspace(candidate, self.root)
+
+    def _run_builtin(
+        self, command: str, prefix: str, tokens: list[str]
+    ) -> ExecResult:
+        try:
+            if prefix == "echo":
+                text = " ".join(tokens[1:])
+                if not text:
+                    text = "ECHO is on."
+                return ExecResult(command, 0, text + "\n", "")
+            if prefix == "pwd":
+                return ExecResult(command, 0, str(self.root) + "\n", "")
+            if prefix in {"dir", "ls"}:
+                args = [token for token in tokens[1:] if not _looks_like_switch(token)]
+                target = args[0] if args else "."
+                names = self.list_dir(target)
+                return ExecResult(command, 0, "\n".join(names) + "\n", "")
+            # type / cat
+            args = [token for token in tokens[1:] if not _looks_like_switch(token)]
+            if not args:
+                raise ToolDenied(f"{prefix} 需要至少一个文件")
+            chunks: list[str] = []
+            for path in args:
+                target = self._require(path)
+                if not target.is_file():
+                    raise ToolDenied(f"不是可读取的文件：{path}")
+                if target.stat().st_size > MAX_READ_BYTES:
+                    raise ToolDenied(
+                        f"文件超过 {MAX_READ_BYTES // 1024} KiB，已拒绝读取：{path}"
+                    )
+                chunks.append(_decode(target.read_bytes()))
+            return ExecResult(command, 0, "".join(chunks), "")
+        except ToolDenied as exc:
+            raise
+        except OSError as exc:
+            raise ToolDenied(f"只读命令执行失败：{command}；{exc.strerror or exc}") from exc

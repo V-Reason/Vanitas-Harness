@@ -88,7 +88,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_verbose(chat)
 
     agent = sub.add_parser(
-        "agent", help="进入 Agent 闭环模式，动作需逐次确认"
+        "agent", help="进入 Agent 闭环模式，修改类动作需确认"
     )
     agent.add_argument("--model", default=None, help="模型 id，见 vanitas models")
     agent.add_argument("--profile", default=None, help="档位编号")

@@ -38,7 +38,7 @@
 - **异常**：禁止空 catch/吞异常。捕获后必须带上下文抛出或转译为用户可读错误；不得向用户泄露堆栈。
 - **资源**：文件、进程、连接、HTTP 响应必须确定性释放（`with` / `try-finally` / `close`）。
 - **并发与状态**：涉及共享可变状态必须有明确所有权；本项目是单进程单实例，禁止引入后台线程池或隐式并发。
-- **契约兼容**：对外字段「宽进严出」；不得删除既有字段或改变语义；配置 schema 只允许追加模型条目，不得改字段名。
+- **契约兼容**：对外字段「宽进严出」；模型 schema 只允许追加条目，不得改字段名。`tools.exec_whitelist` 按本轮任务书显式退役，属于已声明的破坏性配置变更，必须同步测试、文档与回滚说明。
 - **单向依赖**：`cli → 业务模块 → 基础设施`；禁止循环引用，禁止业务层直接依赖终端渲染细节。
 - **可维护性**：命名自解释；注释只写「为什么」，不复述代码；不为覆盖率写无断言测试。
 - **Hot-path**：流式渲染与请求循环内不得做无界缓冲、深拷贝或全量重扫。
@@ -80,7 +80,7 @@
 | 第三方依赖 | 除 `prompt_toolkit` 外禁止 `psutil/requests/httpx/rich/click` 等 |
 | `.bat` | 只允许根目录 `vanitas.bat` 薄壳（≤5 条核心指令，不含 `@echo off`/`setlocal` 样板）；不得承载启动逻辑 |
 | 行尾 | `*.bat` 必须 UTF-8 无 BOM + CRLF；其余文本 LF |
-| 自动工具循环 | 仅允许 `vanitas agent` 的受控闭环：每步展示动作并 `[y/N]`，沙盒根为 CWD，最多 5 步；`/exec` 仍手动逐次确认。禁止后台队列、无人值守循环与绕过确认的钩子 |
+| 自动工具循环 | 仅允许 `vanitas agent` 的受控闭环：单动作只读 `read_file/list_dir/run_shell_ro` 自动执行，写/删/移动 `write_file/delete_file/move_file` 必须确认；动作数组统一打印清单并只弹一次 `[y/N]`；沙盒根为原 CWD，最多 5 轮。`/exec` 仍手动逐次确认。禁止后台队列、无人值守循环与绕过确认的钩子 |
 | 单实例 | 一次只允许一个 `llama-server`；启动新模型前由守卫回收旧实例 |
 | 评测脚本 | `tests\multi_model_benchmark.py` 的既有参数与退出码契约不得破坏 |
 
@@ -93,7 +93,7 @@
 | `docs\总设计方案.md` | 架构、模块边界、配置/进程/接口契约、取舍 | 设计或契约变化时 |
 | `docs\项目现状.md` | 环境、库存、实测矩阵、已知问题、未验证边界、下一步 | 每次实测或版本发布后 |
 | `docs\用户使用手册.md` | 安装、命令、REPL、翻译、批处理、排障 | 用户可见行为变化时 |
-| `docs\ClaudeCode范式笔记.md` | 交互范式来源与取舍（D1–D6） | 交互设计变化时 |
+| `docs\ClaudeCode范式笔记.md` | 交互范式来源与取舍（D1–D7） | 交互设计变化时 |
 | `AGENTS.md` | 开发纪律、红线、验证门禁、协作契约 | 规范变化时 |
 | `README.md` | 一页索引与最短上手路径 | 入口或文档结构变化时 |
 
@@ -107,7 +107,7 @@
 # 1) 语法
 Get-ChildItem vanitas\*.py, tests\test_*.py | ForEach-Object { python -m py_compile $_.FullName }
 
-# 2) 单测（当前 209 例）
+# 2) 单测（当前 226 例）
 python -m unittest discover -s tests
 
 # 3) 静态红线
@@ -143,7 +143,8 @@ python -m vanitas stop
 
 - 并发（`-np 1`）、长上下文质量、持续压测、TTY 交互、`--foreground`、`.md/.txt` 真机翻译、5xx 重试路径尚未验证。
 - v0.4.1 的 16 色配色与三处覆盖式进度未做真人 TTY 验收（仅伪 TTY 单测 + 强制 `always` 抓字节）。
-- `vanitas agent` 的动作闭环仅在 fake 模型与临时目录下验证；默认入口与 `{cwd}` 注入已真机验证（`<WORKSPACE>`），但真实模型是否稳定输出动作、真实终端 `[y/N]` 观感与真实改名/删除尚未验收。
+- `vanitas agent` 的默认入口、`{cwd}` 注入、批量 `move_file` 清单与一次 `[y/N]`、`run_shell_ro` 拒绝写命令、工作区外读取拦截已用 qwen7b 真机冒烟；但真实终端 `[y/N]` 观感、真实删除、模型在 shell 被拒后自动改用 `move_file`，以及 5 轮耗尽提示仍未验收。
+- `exec_whitelist` 已退役；`config/settings.json` 的 `tools` 只保留 `exec_enabled` 与 `exec_require_confirm`。Agent 只读权限以 `tools.py` 的硬编码前缀为唯一事实源，不再允许配置文件扩展。
 - Agent 路径约束是参数级沙盒，不是 OS 级隔离；程序内部自行写文件仍需人工判断。
 - 混合换行的 `.srt` 会静默产出 `0 段`（已定位未修，见现状第 5 节）。
 - HY-MT2 显存余量约 500 MiB，是本机最紧的模型。

@@ -1,4 +1,4 @@
-"""Agent 闭环：动作解析、确认、执行、系统反馈与步数上限。"""
+"""Agent 闭环：分级审批、批量动作、执行反馈与步数上限。"""
 
 from __future__ import annotations
 
@@ -61,6 +61,10 @@ def quiet_run(fn):
     return value, out.getvalue(), err.getvalue()
 
 
+def action_payload(name: str, **parameters) -> str:
+    return json.dumps({"action": name, "parameters": parameters}, ensure_ascii=False)
+
+
 class AgentTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = load_config()
@@ -111,7 +115,6 @@ class AgentTests(unittest.TestCase):
         fake_repl.configure.assert_called_once_with(system=None, task="agent")
         fake_repl.run.assert_called_once()
         self.assertIn("Agent 已就绪", out.getvalue())
-        self.assertNotIn("不自动执行", out.getvalue())
 
     def test_plain_text_finishes_without_confirmation(self) -> None:
         plans: list[str] = []
@@ -125,13 +128,24 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(runner.calls[0][0], "run")
         self.assertFalse(runner.calls[0][2])
 
-    def test_write_file_executes_and_feeds_result_back(self) -> None:
-        action = json.dumps(
-            {
-                "action": "write_file",
-                "parameters": {"path": "a.txt", "content": "你好"},
-            }
+    def test_read_only_action_runs_without_confirmation(self) -> None:
+        (self.root / "a.txt").write_text("alpha", encoding="utf-8")
+        plans: list[str] = []
+        repl, runner = self.make_repl(
+            [action_payload("read_file", path="a.txt"), "读完了"],
+            confirm=lambda plan: plans.append(plan) or True,
         )
+        _value, out, _err = quiet_run(lambda: repl._chat("读文件"))
+        self.assertIn("读完了", out)
+        self.assertEqual(plans, [])
+        self.assertEqual(len(runner.calls), 2)
+        self.assertEqual(runner.calls[1][0], "followup")
+        feedback = runner.calls[1][1]
+        self.assertTrue(feedback.startswith("[系统反馈] 执行成功："))
+        self.assertIn("alpha", feedback)
+
+    def test_write_file_executes_and_feeds_result_back(self) -> None:
+        action = action_payload("write_file", path="a.txt", content="你好")
         plans: list[str] = []
         repl, runner = self.make_repl(
             [action, "已经写好了"],
@@ -155,86 +169,133 @@ class AgentTests(unittest.TestCase):
         self.assertIn("a.txt", feedbacks[0])
 
     def test_user_refusal_cancels_without_execution(self) -> None:
-        action = json.dumps(
-            {
-                "action": "write_file",
-                "parameters": {"path": "a.txt", "content": "x"},
-            }
-        )
+        action = action_payload("write_file", path="a.txt", content="x")
         repl, runner = self.make_repl([action], confirm=lambda _plan: False)
         _value, out, _err = quiet_run(lambda: repl._chat("写文件"))
         self.assertFalse((self.root / "a.txt").exists())
         self.assertIn("已取消", out)
         self.assertEqual(len(runner.calls), 1)
 
+    def test_outside_read_is_denied_and_fed_back(self) -> None:
+        action = action_payload("read_file", path="../escape.txt")
+        repl, runner = self.make_repl([action, "改用工作区文件"])
+        _value, out, err = quiet_run(lambda: repl._chat("越界读"))
+        self.assertIn("越界", err)
+        self.assertIn("改用工作区文件", out)
+        self.assertEqual(len(runner.calls), 2)
+        feedback = runner.calls[1][1]
+        self.assertTrue(feedback.startswith("[系统反馈] 执行失败："))
+        self.assertIn("越界", feedback)
+
     def test_outside_write_is_blocked_after_confirmation(self) -> None:
-        action = json.dumps(
-            {
-                "action": "write_file",
-                "parameters": {"path": "../escape.txt", "content": "x"},
-            }
-        )
-        repl, runner = self.make_repl([action, "不会继续"])
+        action = action_payload("write_file", path="../escape.txt", content="x")
+        repl, runner = self.make_repl([action, "改用工作区"])
         outside = self.root.parent / "escape.txt"
         if outside.exists():
             outside.unlink()
         _value, out, err = quiet_run(lambda: repl._chat("越界写"))
-        self.assertIn("越界操作", err)
-        self.assertNotIn("不会继续", out)
-        self.assertEqual(len(runner.calls), 1)
+        self.assertIn("越界", err)
+        self.assertIn("改用工作区", out)
+        self.assertEqual(len(runner.calls), 2)
         self.assertFalse(outside.exists())
+        self.assertIn("执行失败", runner.calls[1][1])
 
-    def test_shell_success_and_failure_are_fed_back(self) -> None:
-        action = json.dumps(
-            {
-                "action": "shell",
-                "parameters": {"command": "ren a.txt b.txt"},
-            }
+    def test_batch_move_uses_one_summary_and_one_confirmation(self) -> None:
+        (self.root / "a.md").write_text("a", encoding="utf-8")
+        (self.root / "b.md").write_text("b", encoding="utf-8")
+        batch = json.dumps(
+            [
+                {"action": "move_file", "parameters": {"src": "a.md", "dst": "a.srt"}},
+                {"action": "move_file", "parameters": {"src": "b.md", "dst": "b.srt"}},
+            ]
         )
-        success = mock.Mock(
-            return_value=mock.Mock(returncode=0, stdout=b"", stderr=b"")
+        plans: list[str] = []
+        repl, runner = self.make_repl(
+            [batch, "批量完成"],
+            confirm=lambda plan: plans.append(plan) or True,
         )
-        repl, runner = self.make_repl([action, "改名完成"])
-        with mock.patch("vanitas.tools.subprocess.run", success):
-            _value, out, _err = quiet_run(lambda: repl._chat("改名"))
-        self.assertIn("改名完成", out)
-        self.assertEqual(success.call_count, 1)
-        self.assertTrue(
-            any(
-                item["content"].startswith("[系统反馈] 执行成功：")
-                for item in repl.session.messages
-                if item["role"] == "user"
-            )
-        )
+        _value, out, _err = quiet_run(lambda: repl._chat("把 md 改成 srt"))
+        self.assertEqual(len(plans), 1)
+        self.assertIn("批量操作（2 项）", plans[0])
+        self.assertIn("1. 重命名 a.md -> a.srt", plans[0])
+        self.assertIn("2. 重命名 b.md -> b.srt", plans[0])
+        self.assertTrue((self.root / "a.srt").exists())
+        self.assertTrue((self.root / "b.srt").exists())
+        self.assertFalse((self.root / "a.md").exists())
+        self.assertIn("批量完成", out)
+        self.assertEqual(len(runner.calls), 2)
+        self.assertIn("批量执行完成：2 项，成功 2，失败 0", runner.calls[1][1])
 
-        failure = mock.Mock(
-            return_value=mock.Mock(returncode=1, stdout=b"", stderr=b"boom")
+    def test_batch_read_only_actions_use_one_confirmation(self) -> None:
+        (self.root / "a.txt").write_text("a", encoding="utf-8")
+        (self.root / "b.txt").write_text("b", encoding="utf-8")
+        batch = json.dumps(
+            [
+                {"action": "read_file", "parameters": {"path": "a.txt"}},
+                {"action": "read_file", "parameters": {"path": "b.txt"}},
+            ]
         )
-        repl2, _runner2 = self.make_repl([action, "失败后收尾"])
-        with mock.patch("vanitas.tools.subprocess.run", failure):
-            _value2, out2, _err2 = quiet_run(lambda: repl2._chat("改名"))
-        self.assertIn("失败后收尾", out2)
-        self.assertTrue(
-            any(
-                item["content"].startswith("[系统反馈] 执行失败：")
-                for item in repl2.session.messages
-                if item["role"] == "user"
-            )
+        plans: list[str] = []
+        repl, runner = self.make_repl(
+            [batch, "读完了"],
+            confirm=lambda plan: plans.append(plan) or True,
         )
+        _value, out, _err = quiet_run(lambda: repl._chat("读两个文件"))
+        self.assertEqual(len(plans), 1)
+        self.assertIn("批量操作（2 项）", plans[0])
+        self.assertIn("读完了", out)
+        self.assertEqual(len(runner.calls), 2)
+        feedback = runner.calls[1][1]
+        self.assertIn("批量执行完成：2 项，成功 2，失败 0", feedback)
 
-    def test_max_steps_stops_before_sixth_action(self) -> None:
-        first = json.dumps(
-            {
-                "action": "write_file",
-                "parameters": {"path": "one.txt", "content": "1"},
-            }
+    def test_batch_partial_failure_continues_and_reports(self) -> None:
+        (self.root / "a.md").write_text("a", encoding="utf-8")
+        batch = json.dumps(
+            [
+                {"action": "move_file", "parameters": {"src": "a.md", "dst": "a.srt"}},
+                {"action": "move_file", "parameters": {"src": "nope.md", "dst": "x.srt"}},
+            ]
         )
-        second = json.dumps(
-            {
-                "action": "write_file",
-                "parameters": {"path": "two.txt", "content": "2"},
-            }
+        plans: list[str] = []
+        repl, runner = self.make_repl(
+            [batch, "收尾"],
+            confirm=lambda plan: plans.append(plan) or True,
         )
+        _value, out, err = quiet_run(lambda: repl._chat("批量改名"))
+        self.assertEqual(len(plans), 1)
+        self.assertIn("收尾", out)
+        self.assertIn("工具拒绝", err)
+        self.assertTrue((self.root / "a.srt").exists())
+        feedback = runner.calls[1][1]
+        self.assertIn("批量执行完成：2 项，成功 1，失败 1", feedback)
+        self.assertIn("2. 失败", feedback)
+
+    def test_shell_modification_is_denied_and_fed_back(self) -> None:
+        action = action_payload("run_shell_ro", command="ren a.txt b.txt")
+        repl, runner = self.make_repl([action, "改用 move_file"])
+        with mock.patch("vanitas.tools.subprocess.run") as runner_proc:
+            _value, out, err = quiet_run(lambda: repl._chat("用 shell 改名"))
+        runner_proc.assert_not_called()
+        self.assertIn("只允许只读命令", err)
+        self.assertIn("改用 move_file", out)
+        self.assertEqual(len(runner.calls), 2)
+        self.assertIn("执行失败", runner.calls[1][1])
+
+    def test_shell_read_only_echo_runs_without_confirmation(self) -> None:
+        action = action_payload("run_shell_ro", command="echo hi")
+        plans: list[str] = []
+        repl, runner = self.make_repl(
+            [action, "执行完成"],
+            confirm=lambda plan: plans.append(plan) or True,
+        )
+        _value, out, _err = quiet_run(lambda: repl._chat("echo"))
+        self.assertEqual(plans, [])
+        self.assertIn("执行完成", out)
+        self.assertIn("hi", runner.calls[1][1])
+
+    def test_max_steps_stops_before_second_action(self) -> None:
+        first = action_payload("write_file", path="one.txt", content="1")
+        second = action_payload("write_file", path="two.txt", content="2")
         repl, runner = self.make_repl([first, second, "结束"], max_steps=1)
         _value, out, _err = quiet_run(lambda: repl._chat("连续写"))
         self.assertTrue((self.root / "one.txt").exists())
@@ -243,17 +304,56 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(len(runner.calls), 2)
 
     def test_bad_json_and_unknown_action_do_not_execute(self) -> None:
-        for text in ('{"action":', '{"action":"nope","parameters":{}}'):
+        for text in (
+            '{"action":',
+            '{"action":"nope","parameters":{}}',
+            '[{"action":"nope","parameters":{}}]',
+        ):
             with self.subTest(text=text):
                 repl, runner = self.make_repl([text])
-                _value, _out, err = quiet_run(lambda: repl._chat("坏动作"))
-                self.assertIn("动作", err + _out)
+                _value, out, err = quiet_run(lambda: repl._chat("坏动作"))
+                self.assertIn("动作", err + out)
                 self.assertEqual(len(runner.calls), 1)
 
     def test_json_without_action_is_final_text(self) -> None:
         repl, _runner = self.make_repl(['{"result":"ok"}'])
         _value, out, _err = quiet_run(lambda: repl._chat("输出"))
         self.assertIn('{"result":"ok"}', out)
+
+
+class ActionParserTests(unittest.TestCase):
+    def test_parses_single_alias_and_batch(self) -> None:
+        single = agent._parse_actions(action_payload("shell", command="echo hi"))
+        self.assertEqual(single[0].name, "run_shell_ro")
+        batch = agent._parse_actions(
+            '[{"action":"list_dir","parameters":{}},'
+            '{"action":"delete_file","parameters":{"path":"a"}}]'
+        )
+        self.assertEqual([item.name for item in batch], ["list_dir", "delete_file"])
+
+    def test_move_accepts_source_destination_aliases(self) -> None:
+        actions = agent._parse_actions(
+            '{"action":"move_file","parameters":'
+            '{"source":"a.md","destination":"a.srt"}}'
+        )
+        self.assertEqual(actions[0].parameters, {"src": "a.md", "dst": "a.srt"})
+
+    def test_any_array_requires_confirmation(self) -> None:
+        actions = agent._parse_actions(
+            '[{"action":"read_file","parameters":{"path":"a.txt"}}]'
+        )
+        self.assertTrue(agent._needs_confirmation(actions, is_batch=True))
+        self.assertFalse(agent._needs_confirmation(actions))
+
+    def test_rejects_empty_or_oversized_batch(self) -> None:
+        with self.assertRaises(ValueError):
+            agent._parse_actions("[]")
+        oversized = "[" + ",".join(
+            '{"action":"list_dir","parameters":{}}'
+            for _ in range(agent.MAX_BATCH_ACTIONS + 1)
+        ) + "]"
+        with self.assertRaises(ValueError):
+            agent._parse_actions(oversized)
 
 
 if __name__ == "__main__":
