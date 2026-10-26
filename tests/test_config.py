@@ -112,6 +112,15 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("del", config.settings.tools.destructive_commands)
         self.assertEqual(config.settings.batch.max_tokens_limit, 8192)
         self.assertEqual(config.settings.translate.max_split_depth, 3)
+        self.assertEqual(config.settings.translate.default_preset, "general")
+        self.assertEqual(
+            config.settings.translate.presets["general"]["task_template"],
+            "translate",
+        )
+        self.assertEqual(
+            config.settings.translate.presets["asmr"]["task_template"],
+            "translate_asmr",
+        )
         self.assertEqual(config.settings.request.progress_interval_ms, 200)
         self.assertEqual(config.settings.launcher.log_tail_lines, 15)
         self.assertEqual(config.settings.ui.spinner_interval_ms, 300)
@@ -174,6 +183,49 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.settings.request.health_timeout_sec, 3.0)
         self.assertEqual(config.settings.launcher.log_tail_lines, 15)
         self.assertEqual(config.settings.ui.spinner_interval_ms, 300)
+
+    def test_translate_presets_are_optional(self) -> None:
+        del self.settings["translate"]["default_preset"]
+        del self.settings["translate"]["presets"]
+        self.write_settings()
+        with clean_env():
+            config = self.load()
+        self.assertEqual(config.settings.translate.default_preset, "general")
+        self.assertEqual(config.settings.translate.presets, {})
+
+    def test_translate_presets_are_validated(self) -> None:
+        for presets in (
+            "translate",
+            {"bad": "not-a-mapping"},
+            {"bad": {"task_template": 3}},
+            {"bad": {"unknown": "x"}},
+        ):
+            with self.subTest(presets=presets):
+                self.settings["translate"]["presets"] = presets
+                self.write_settings()
+                with clean_env():
+                    with self.assertRaises(ConfigError):
+                        self.load()
+
+    def test_translate_preset_window_fields(self) -> None:
+        with clean_env():
+            config = load_config()
+        asmr = config.settings.translate.presets["asmr"]
+        self.assertEqual(asmr["window_size"], 6)
+        self.assertEqual(asmr["max_window_chars"], 250)
+
+        self.settings["translate"]["presets"]["asmr"]["window_size"] = 0
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError):
+                self.load()
+
+        self.settings["translate"]["presets"]["asmr"]["window_size"] = 6
+        self.settings["translate"]["presets"]["asmr"]["max_window_chars"] = 10
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError):
+                self.load()
 
     def test_agent_action_policy_must_cover_all_actions(self) -> None:
         self.settings["agent"]["confirm_actions"].remove("delete_file")

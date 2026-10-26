@@ -152,6 +152,21 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(code, 4)
         self.assertIn("--jobs", err)
 
+    def test_translate_help_lists_preset(self) -> None:
+        with clean_env():
+            code, out, _err = run(["translate", "--help"])
+        self.assertEqual(code, 0)
+        self.assertIn("--preset", out)
+
+    def test_translate_unknown_preset_exit_4(self) -> None:
+        with clean_env():
+            code, _out, err = run(
+                ["translate", "a.srt", "--preset", "nope"]
+            )
+        self.assertEqual(code, 4)
+        self.assertIn("未知翻译预设", err)
+        self.assertIn("general", err)
+
     def test_palette_disabled_in_pipe(self) -> None:
         # redirect_stdout 之后 sys.stdout 不是 TTY，auto 必须降级为纯文本
         with clean_env():

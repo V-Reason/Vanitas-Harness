@@ -122,8 +122,11 @@ TRANSLATE_FIELDS = frozenset(
         "monitor_lines",
         "temperature",
         "max_split_depth",
+        "default_preset",
+        "presets",
     }
 )
+PRESET_FIELDS = frozenset({"task_template", "window_size", "max_window_chars"})
 UI_FIELDS = frozenset({"color", "spinner_interval_ms", "theme"})
 THEME_KEYS = frozenset({"prompt", "success", "error", "warn", "info", "muted", "accent"})
 COLOR_MODES = frozenset({"auto", "always", "never"})
@@ -364,6 +367,8 @@ class TranslateSettings:
     monitor_lines: int = 5
     temperature: float = 0.2
     max_split_depth: int = 3
+    default_preset: str = "general"
+    presets: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1171,6 +1176,37 @@ def _load_settings(document: dict) -> Settings:
         minimum=1,
         maximum=10,
     )
+    default_preset = translate.get("default_preset", "general")
+    if not isinstance(default_preset, str) or not default_preset.strip():
+        _fail("settings.translate.default_preset", "必须是非空字符串")
+    default_preset = default_preset.strip()
+
+    raw_presets = translate.get("presets", {})
+    if not isinstance(raw_presets, dict):
+        _fail("settings.translate.presets", "必须是 JSON 对象")
+    presets: dict = {}
+    for preset_name, raw_preset in raw_presets.items():
+        label = f"settings.translate.presets.{preset_name}"
+        if not isinstance(preset_name, str) or not preset_name.strip():
+            _fail("settings.translate.presets", "预设名必须是非空字符串")
+        entry = _as_mapping(raw_preset, label)
+        _reject_unknown(entry, PRESET_FIELDS, label)
+        template = entry.get("task_template", "translate")
+        if not isinstance(template, str) or not template.strip():
+            _fail(f"{label}.task_template", "必须是非空字符串")
+        window_size = _as_optional_int(
+            entry, "window_size", label, 1, minimum=1
+        )
+        max_window_chars = _as_optional_int(
+            entry, "max_window_chars", label, 250, minimum=50
+        )
+        normalized = {"task_template": template.strip()}
+        if "window_size" in entry:
+            normalized["window_size"] = window_size
+        if "max_window_chars" in entry:
+            normalized["max_window_chars"] = max_window_chars
+        presets[preset_name.strip()] = normalized
+
     translate_settings = TranslateSettings(
         source_suffixes=tuple(cleaned_suffixes),
         chunk_chars=_as_int(translate, "chunk_chars", "settings.translate", minimum=50),
@@ -1183,6 +1219,8 @@ def _load_settings(document: dict) -> Settings:
         monitor_lines=monitor_lines,
         temperature=translate_temperature,
         max_split_depth=max_split_depth,
+        default_preset=default_preset,
+        presets=presets,
     )
 
     ui_settings = _load_ui(document["ui"]) if "ui" in document else _default_ui()

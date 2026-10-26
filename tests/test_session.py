@@ -43,7 +43,10 @@ class SessionTests(unittest.TestCase):
         self.assertIn("hello", message)
         self.assertNotIn("{date}", message)
         self.assertIn("当前日期：", message)
-        stamp = message.splitlines()[0].split("：", 1)[1]
+        stamp_line = next(
+            line for line in message.splitlines() if "当前日期：" in line
+        )
+        stamp = stamp_line.split("：", 1)[1]
         self.assertRegex(stamp, STAMP)
 
     def test_agent_template_uses_explicit_cwd(self) -> None:

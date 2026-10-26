@@ -27,7 +27,7 @@ class PromptTests(unittest.TestCase):
         self.assertTrue(prompts.system_prompt(self.prompt_dir).strip())
         self.assertEqual(
             prompts.task_names(self.prompt_dir),
-            ["agent", "chat", "code", "translate"],
+            ["agent", "chat", "code", "translate", "translate_asmr"],
         )
         for name in prompts.task_names(self.prompt_dir):
             text = prompts.load_task(self.prompt_dir, name)
@@ -74,6 +74,17 @@ class PromptTests(unittest.TestCase):
         self.assertIn("当前模型：{model}", text)
         self.assertIn("请直接回答", text)
         self.assertNotIn("复述", text)
+
+    def test_task_translate_asmr_contract(self) -> None:
+        text = prompts.load_task(self.prompt_dir, "translate_asmr")
+        self.assertIn("{input}", text)
+        self.assertIn("{context_history}", text)
+        self.assertIn("【ASR 瑕疵容错与语流校正】", text)
+        self.assertIn("【拟声拟态词与动作音效规范】", text)
+        self.assertIn("【强制输入/输出序号契约】", text)
+        self.assertIn("チュッ", text)
+        self.assertIn("はぁ", text)
+        self.assertIn("[#序号]", text)
 
     def test_task_agent_enforces_sandbox_and_tool_priority(self) -> None:
         text = prompts.load_task(self.prompt_dir, "agent")

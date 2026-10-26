@@ -100,6 +100,8 @@ class AgentTests(unittest.TestCase):
         max_steps: int | None = None,
         confirm=None,
         toolbox=None,
+        max_parse_retries: int = 2,
+        stagnation_limit: int = 3,
     ):
         repl = agent.AgentRepl(
             self.config,
@@ -109,6 +111,8 @@ class AgentTests(unittest.TestCase):
             tools=toolbox or tools.AgentTools(self.config, self.root),
             max_steps=max_steps,
             confirm=confirm if confirm is not None else (lambda _plan: True),
+            max_parse_retries=max_parse_retries,
+            stagnation_limit=stagnation_limit,
         )
         repl.client = mock.Mock()
         runner = ScriptedRunner(repl.session, turns)
@@ -451,10 +455,63 @@ class AgentTests(unittest.TestCase):
             '[{"action":"nope","parameters":{}}]',
         ):
             with self.subTest(text=text):
-                repl, runner = self.make_repl([text])
+                repl, runner = self.make_repl([text], max_parse_retries=0)
                 _value, out, err = quiet_run(lambda: repl._chat("坏动作"))
                 self.assertIn("动作", err + out)
                 self.assertEqual(len(runner.calls), 1)
+
+    def test_parse_error_self_correction_recovers(self) -> None:
+        action = action_payload("write_file", path="a.txt", content="ok")
+        repl, runner = self.make_repl(['{"action":', action, "完成"])
+        _value, out, _err = quiet_run(lambda: repl._chat("写文件"))
+        self.assertEqual(
+            (self.root / "a.txt").read_text(encoding="utf-8"), "ok"
+        )
+        self.assertEqual(
+            [call[0] for call in runner.calls],
+            ["run", "followup", "followup"],
+        )
+        feedback = runner.calls[1][1]
+        self.assertTrue(feedback.startswith("<tool_result>"))
+        self.assertIn("动作解析错误", feedback)
+        self.assertIn("纠偏要求", feedback)
+        self.assertIn("双反斜杠", feedback)
+        self.assertIn("自愈回灌（1/2）", out)
+        self.assertIn("完成", out)
+
+    def test_parse_error_exhaustion_halts(self) -> None:
+        bad = '{"action":'
+        repl, runner = self.make_repl(
+            [bad, bad, bad, bad], max_parse_retries=2
+        )
+        _value, out, err = quiet_run(lambda: repl._chat("坏动作"))
+        self.assertEqual(len(runner.calls), 3)
+        self.assertIn("（2/2）", out)
+        self.assertIn("解析失败", err)
+
+    def test_stagnation_detection_trips_breaker(self) -> None:
+        (self.root / "a.txt").write_text("alpha", encoding="utf-8")
+        action = action_payload("read_file", path="a.txt")
+        repl, runner = self.make_repl(
+            [action, action, action], max_steps=10
+        )
+        with mock.patch.object(
+            repl.agent_tools,
+            "read_file",
+            wraps=repl.agent_tools.read_file,
+        ) as read:
+            _value, out, _err = quiet_run(lambda: repl._chat("反复读"))
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual(len(runner.calls), 3)
+        self.assertIn("检测到动作连续 3 次停滞，已触发硬熔断保护", out)
+        self.assertNotIn("已达最大步数", out)
+        feedbacks = [
+            item["content"]
+            for item in repl.session.messages
+            if item["role"] == "user"
+            and item["content"].startswith("<tool_result>")
+        ]
+        self.assertEqual(len(feedbacks), 2)
 
     def test_json_without_action_is_final_text(self) -> None:
         repl, _runner = self.make_repl(['{"result":"ok"}'])

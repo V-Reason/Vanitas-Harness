@@ -51,6 +51,7 @@ CANCEL_MESSAGE = "已取消"
 _CANCEL_MESSAGE = CANCEL_MESSAGE
 _COMMAND_SUFFIXES = (".exe", ".com", ".bat", ".cmd")
 _HELP_SWITCHES = frozenset({"/?", "-?", "-h", "--help"})
+MAX_CAPTURE_BYTES = 512 * 1024  # 512 KiB 底层流物理硬截断上限
 
 
 @dataclass
@@ -68,6 +69,27 @@ def _decode(raw: bytes) -> str:
         except (UnicodeDecodeError, LookupError):
             continue
     return raw.decode("utf-8", "replace")
+
+
+def _truncate_bytes(
+    raw: bytes, max_bytes: int = MAX_CAPTURE_BYTES
+) -> tuple[bytes, bool, int]:
+    """在内存解码前对底层子进程输出实施字节级硬折叠，杜绝 OOM。"""
+    if len(raw) <= max_bytes:
+        return raw, False, 0
+    omitted = len(raw) - max_bytes
+    head_size = max_bytes // 4
+    tail_size = max_bytes - head_size
+    folded = raw[:head_size] + b"\n... [stdout truncated] ...\n" + raw[-tail_size:]
+    return folded, True, omitted
+
+
+def _append_capture_warning(text: str, label: str, omitted: int) -> str:
+    note = (
+        f"[... 底层{label}超出 {MAX_CAPTURE_BYTES // 1024} KiB，"
+        f"已在字节流阶段硬截断，丢弃 {omitted} 字节 ...]"
+    )
+    return f"{text}\n{note}" if text else note
 
 
 def normalize(command: str) -> str:
@@ -344,11 +366,21 @@ def _execute(
         raise ToolDenied(f"命令超过 {timeout:.0f}s 未结束，已终止：{command}") from exc
     except OSError as exc:
         raise ToolDenied(f"命令启动失败：{exc.strerror or exc}") from exc
+    raw_stdout = completed.stdout or b""
+    raw_stderr = completed.stderr or b""
+    stdout_bytes, stdout_truncated, stdout_omitted = _truncate_bytes(raw_stdout)
+    stderr_bytes, stderr_truncated, stderr_omitted = _truncate_bytes(raw_stderr)
+    stdout = _decode(stdout_bytes)
+    stderr = _decode(stderr_bytes)
+    if stdout_truncated:
+        stdout = _append_capture_warning(stdout, "标准输出", stdout_omitted)
+    if stderr_truncated:
+        stderr = _append_capture_warning(stderr, "标准错误", stderr_omitted)
     return ExecResult(
         command=command,
         exit_code=completed.returncode,
-        stdout=_decode(completed.stdout or b""),
-        stderr=_decode(completed.stderr or b""),
+        stdout=stdout,
+        stderr=stderr,
     )
 
 
