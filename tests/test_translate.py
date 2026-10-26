@@ -14,8 +14,11 @@ if str(ROOT) not in sys.path:
 from vanitas.config import TranslateSettings  # noqa: E402
 from vanitas.errors import EngineError, TranslateError  # noqa: E402
 from vanitas.translate import (  # noqa: E402
+    TranslationEngine,
+    TranslationOptions,
     chunk_text,
     parse_srt,
+    sanitize_translation_output,
     translate_file,
 )
 
@@ -162,6 +165,148 @@ class TranslateTests(unittest.TestCase):
     def test_missing_file_rejected(self) -> None:
         with self.assertRaises(TranslateError):
             translate_file(echo_chat, self.dir / "nope.srt", SETTINGS)
+
+
+class FakeTranslationClient:
+    def __init__(self, *, truncate_over: int | None = None) -> None:
+        self.calls: list[dict] = []
+        self.truncate_over = truncate_over
+
+    def chat(self, messages, *, max_tokens, temperature=0.2):
+        self.calls.append(
+            {
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+        )
+        prompt = str(messages[-1]["content"])
+        marker = "【当前待翻译内容】\n"
+        source = prompt.split(marker, 1)[1] if marker in prompt else prompt
+        if self.truncate_over is not None and len(source) > self.truncate_over:
+            return {
+                "choices": [
+                    {
+                        "message": {"content": "半句"},
+                        "finish_reason": "length",
+                    }
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "message": {"content": f"译{len(self.calls)}"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"completion_tokens": 3},
+            "timings": {"predicted_per_second": 10.0, "predicted_n": 3},
+        }
+
+
+class TranslationEngineTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.prompt_dir = ROOT / "config" / "prompts"
+
+    def make_engine(self, client, **options) -> TranslationEngine:
+        return TranslationEngine(
+            client,
+            self.prompt_dir,
+            "系统提示",
+            options=TranslationOptions(**options),
+        )
+
+    def test_context_sentinel_and_fifo(self) -> None:
+        client = FakeTranslationClient()
+        stats = []
+        engine = TranslationEngine(
+            client,
+            self.prompt_dir,
+            "系统提示",
+            options=TranslationOptions(context_window=2),
+            on_stat=stats.append,
+        )
+        engine.translate("alpha")
+        engine.translate("beta")
+        engine.translate("gamma")
+        engine.translate("delta")
+
+        first_prompt = client.calls[0]["messages"][-1]["content"]
+        self.assertIn("（无前文，故事开端）", first_prompt)
+        second_prompt = client.calls[1]["messages"][-1]["content"]
+        self.assertIn("alpha", second_prompt)
+        third_prompt = client.calls[2]["messages"][-1]["content"]
+        self.assertIn("alpha", third_prompt)
+        fourth_prompt = client.calls[3]["messages"][-1]["content"]
+        self.assertNotIn("alpha", fourth_prompt)
+        self.assertIn("beta", fourth_prompt)
+        self.assertEqual(len(stats), 4)
+        self.assertTrue(all(item.tokens == 3 for item in stats))
+        self.assertTrue(all(item.tps == 10.0 for item in stats))
+
+    def test_truncated_output_is_split_and_retried(self) -> None:
+        client = FakeTranslationClient(truncate_over=5)
+        engine = self.make_engine(client, max_split_depth=3)
+        translated = engine.translate("abcdefghij")
+        self.assertEqual(translated, "译2译3")
+        self.assertGreaterEqual(len(client.calls), 3)
+
+    def test_budget_drops_old_context(self) -> None:
+        client = FakeTranslationClient()
+        engine = self.make_engine(
+            client,
+            n_ctx=2000,
+            context_window=5,
+            min_output_tokens=128,
+            prompt_safety_tokens=32,
+        )
+        # 先塞入足够长的历史，再请求一次，必须从最老端丢弃而不是直接报错。
+        for index in range(4):
+            engine.translate(f"MARK{index}-" + "历史" * 200)
+        try:
+            engine.translate("当前" * 60)
+        except TranslateError as exc:
+            self.fail(f"预算门禁不应在这里失败：{exc}")
+        last_prompt = client.calls[-1]["messages"][-1]["content"]
+        self.assertNotIn("MARK0-", last_prompt)
+
+    def test_sanitize_quotes_and_fences(self) -> None:
+        self.assertEqual(sanitize_translation_output('"你好"', "hello"), "你好")
+        self.assertEqual(sanitize_translation_output("“你好”", "hello"), "你好")
+        self.assertEqual(
+            sanitize_translation_output('```text\n“你好”\n```', "hello"),
+            "你好",
+        )
+        self.assertEqual(
+            sanitize_translation_output("“早上好”", "「おはよう」"),
+            "“早上好”",
+        )
+        self.assertEqual(
+            sanitize_translation_output("“未闭合", "hello"),
+            "“未闭合",
+        )
+
+    def test_synthetic_test_ja_quotes_are_preserved(self) -> None:
+        source_blocks = [
+            block.strip()
+            for block in (ROOT / "tests" / "fixtures" / "test_ja.md")
+            .read_text(encoding="utf-8")
+            .split("\n\n")
+            if block.strip()
+        ]
+        translated_blocks = [
+            block.strip()
+            for block in (ROOT / "tests" / "fixtures" / "test_ja.zh.md")
+            .read_text(encoding="utf-8")
+            .split("\n\n")
+            if block.strip()
+        ]
+        self.assertEqual(len(source_blocks), len(translated_blocks))
+        for source, translated in zip(source_blocks, translated_blocks):
+            self.assertEqual(
+                sanitize_translation_output(translated, source), translated
+            )
+            self.assertEqual(translated.count("“"), translated.count("”"))
 
 
 if __name__ == "__main__":

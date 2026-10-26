@@ -26,7 +26,7 @@
 
 - 观察：`src/screens/REPL.tsx` 组合 `SpinnerWithVerb`（等待态动词 + 计时）、`VirtualMessageList`（长对话虚拟化）、`useStdin`/`useInput`（按键直通），消息体在流式期间持续重绘。
 - 可移植性：**「等待要有可见状态、首字要立刻出现、结束后要有耗时」** 是终端用户的核心感知，跟 Ink 无关。
-- 本项目映射：`vanitas/render.py` 增量写 stdout 并 flush；等待期用 `⋯` 覆盖式进度（批 3）；结束打印 `· token 数 · 耗时 · 首字 · t/s`（来源 `usage`，绝不用 SSE 分片数冒充 token）。
+- 本项目映射：`vanitas/render.py` 增量写 stdout 并 flush；等待期用 `⋯` 覆盖式进度；结束打印 `· token 数 · 耗时 · t/s`，`-v` 追加首字；t/s 优先服务端 `timings.predicted_per_second`，其次 `usage`，绝不用 SSE 分片数冒充 token。
 
 ### D4 工具调用必须「白名单 + 逐次确认」
 
@@ -68,6 +68,7 @@
 4. **`/exec` 手动、默认关闭、逐次确认**：只做「白名单内、可见、可拒绝」的最小安全面，不实现自动循环，也不预留空钩子（D4）。`vanitas agent` 只做规划输出，不执行 action。
 5. **会话与历史分离**：`/save` 存业务消息（可跨进程恢复），输入历史交给 `prompt_toolkit`；`/clear` 保留系统提示（D2、D5）。
 6. **上下文预算按档位算，不猜**：历史预算 `min(profile.ctx, repl.max_context_tokens) - context_reserve_tokens`；单轮输出预算 `max(min_output_tokens, profile.ctx - 历史 tokens - reserve)`。超预算丢最早轮次并提示裁剪数量；不实现自动摘要（那属于 auto-compact，明确不做）。
+7. **翻译保留“可见的上下文”**：`TranslationEngine` 携带最近 N 段原文/译文摘要；`monitor.py` 用 ANSI 局部重绘最近 5 段，让用户能肉眼核对跨段人称与术语；业务层只发 `SegmentStat`，不直接画终端。`finish_reason=length` 时按句末/中点拆分重译，避免半句静默输出。
 
 ### 代码回溯索引（DoD：≥3 个设计点可回溯）
 
@@ -79,3 +80,4 @@
 | D4 白名单 + 确认 | `vanitas/tools.py` → `run`/`_confirm` |
 | D5 会话边界 | `vanitas/session.py` + `/save` `/load` `/clear` |
 | D6 端点可见性 | `vanitas/launcher.py` → `running()`；`vanitas/repl.py` → `/model` `/status` |
+| D7 翻译上下文与看板 | `vanitas/translate.py` → `TranslationEngine`；`vanitas/monitor.py` → `TranslationMonitor` |

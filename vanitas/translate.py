@@ -8,19 +8,31 @@
 from __future__ import annotations
 
 import re
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from . import prompts
+from .client import LlamaClient
 from .config import AppConfig, ModelSpec
-from .engine import EngineClient
-from .errors import EngineError, TranslateError
+from .errors import EngineError, OutputTruncated, TranslateError
+from .metrics import (
+    PROMPT_OVERHEAD,
+    SegmentStat,
+    estimate_tokens,
+    translation_budget,
+)
 
 SENTENCE_ENDERS = "。！？!?；;"
 BLOCK_SEP = re.compile(r"(\r?\n[ \t]*\r?\n)")
 SRT_TIME = re.compile(r"^\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}")
 BOM = b"\xef\xbb\xbf"
+FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)\n```$", re.DOTALL)
+QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’", "「": "」", "『": "』"}
+QUOTE_CHARS = frozenset(QUOTE_PAIRS) | frozenset(QUOTE_PAIRS.values())
+RETRY_SPLIT_DEPTH = 3
 
 
 @dataclass
@@ -58,24 +70,221 @@ def extract_content(result: dict) -> str:
     return content
 
 
-def make_engine_chat(
-    client: EngineClient, prompt_dir: Path, system_text: str
-) -> Callable[[str], str]:
-    """把「一段文本」映射为「一段译文」；超时/重试由 EngineClient 负责。"""
-    template = prompts.load_task(prompt_dir, "translate")
+@dataclass(frozen=True)
+class TranslationOptions:
+    n_ctx: int = 8192
+    context_window: int = 5
+    context_summary_chars: int = 200
+    min_output_tokens: int = 512
+    output_ratio: float = 2.5
+    prompt_safety_tokens: int = 64
+    temperature: float = 0.2
+    max_split_depth: int = RETRY_SPLIT_DEPTH
 
-    def chat(text: str) -> str:
-        prompt = prompts.render(template, {"input": text})
-        messages = [
-            {"role": "system", "content": system_text},
-            {"role": "user", "content": prompt},
-        ]
-        max_tokens = max(256, min(2048, len(text) * 2))
-        return extract_content(
-            client.chat(messages, max_tokens=max_tokens, temperature=0.2)
+
+def _has_dialogue_quotes(text: str) -> bool:
+    return any(char in QUOTE_CHARS for char in text)
+
+
+def sanitize_translation_output(raw_text: str, source_text: str) -> str:
+    """剥离模型额外加上的代码围栏/外层引号，同时保护原文对白引号。
+
+    规则：
+    - 先剥 Markdown 代码围栏（无论 source 是否有引号）；
+    - source 含任何对白引号时，正文原样返回，不删任何引号；
+    - source 无引号时，循环剥离成对的外层 ASCII/中文引号；不配对保留。
+    """
+    text = raw_text.strip()
+    if not text:
+        return text
+    for _ in range(3):
+        match = FENCE_RE.match(text)
+        if not match:
+            break
+        text = match.group(1).strip()
+    if _has_dialogue_quotes(source_text):
+        return text
+    for _ in range(3):
+        if len(text) < 2:
+            break
+        opening, closing = text[0], text[-1]
+        if QUOTE_PAIRS.get(opening) != closing:
+            break
+        text = text[1:-1].strip()
+    return text
+
+
+def _clip(text: str, limit: int) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 1)] + "…"
+
+
+class TranslationEngine:
+    """单段翻译管线：滑动上下文、预算门禁、截断重译与统计事件。"""
+
+    def __init__(
+        self,
+        client: LlamaClient,
+        prompt_dir: Path,
+        system_text: str,
+        *,
+        options: TranslationOptions | None = None,
+        on_stat: Callable[[SegmentStat], None] | None = None,
+    ) -> None:
+        self._client = client
+        self._template = prompts.load_task(prompt_dir, "translate")
+        self._system = system_text
+        self._options = options or TranslationOptions()
+        window = max(0, int(self._options.context_window))
+        self._history: deque[tuple[str, str]] = deque(maxlen=window)
+        self._on_stat = on_stat
+
+    def __call__(self, text: str) -> str:
+        return self.translate(text)
+
+    def translate(self, text: str) -> str:
+        return self._translate_once(text, depth=0)
+
+    # ------------------------------------------------------------------ #
+    # 内部
+    # ------------------------------------------------------------------ #
+
+    def _context_text(self) -> str:
+        if not self._history:
+            return "（无前文，故事开端）"
+        limit = max(20, int(self._options.context_summary_chars))
+        lines: list[str] = []
+        for index, (source, translation) in enumerate(self._history, start=1):
+            lines.append(f"[{index}] 原文：{_clip(source, limit)}")
+            lines.append(f"    译文：{_clip(translation, limit)}")
+        return "\n".join(lines)
+
+    def _render(self, text: str) -> tuple[list[dict], int, int]:
+        prompt = prompts.render(
+            self._template,
+            {"input": text, "context_history": self._context_text()},
         )
+        messages: list[dict] = []
+        if self._system.strip():
+            messages.append({"role": "system", "content": self._system})
+        messages.append({"role": "user", "content": prompt})
+        prompt_tokens = (
+            estimate_tokens(self._system)
+            + estimate_tokens(prompt)
+            + PROMPT_OVERHEAD
+        )
+        return messages, prompt_tokens, estimate_tokens(text)
 
-    return chat
+    def _translate_once(self, text: str, *, depth: int) -> str:
+        options = self._options
+        messages, prompt_tokens, input_tokens = self._render(text)
+        desired = max(
+            int(options.min_output_tokens),
+            int(int(input_tokens) * float(options.output_ratio)),
+        )
+        while (
+            self._history
+            and prompt_tokens + desired
+            > int(options.n_ctx) - int(options.prompt_safety_tokens)
+        ):
+            self._history.popleft()
+            messages, prompt_tokens, input_tokens = self._render(text)
+
+        try:
+            budget = translation_budget(
+                options.n_ctx,
+                prompt_tokens,
+                input_tokens,
+                min_output_tokens=options.min_output_tokens,
+                output_ratio=options.output_ratio,
+                safety_tokens=options.prompt_safety_tokens,
+            )
+        except ValueError as exc:
+            raise TranslateError(str(exc)) from exc
+
+        started = time.perf_counter()
+        result = self._client.chat(
+            messages,
+            max_tokens=budget.max_tokens,
+            temperature=options.temperature,
+        )
+        elapsed_s = time.perf_counter() - started
+        choices = result.get("choices") or []
+        finish_reason = ""
+        if choices and isinstance(choices[0], dict):
+            finish_reason = str(choices[0].get("finish_reason") or "")
+        if finish_reason == "length":
+            if depth >= options.max_split_depth or len(text) <= 1:
+                raise OutputTruncated(
+                    f"输出达到长度上限，拆分 {options.max_split_depth} 层仍未完成"
+                )
+            parts = _split_for_retry(text)
+            if len(parts) <= 1:
+                raise OutputTruncated("输出达到长度上限，无法继续拆分")
+            return "".join(
+                self._translate_once(part, depth=depth + 1) for part in parts
+            )
+
+        raw = extract_content(result)
+        translated = sanitize_translation_output(raw, text)
+        raw_usage = result.get("usage")
+        usage = raw_usage if isinstance(raw_usage, dict) else {}
+        raw_timings = result.get("timings")
+        timings = raw_timings if isinstance(raw_timings, dict) else {}
+        tokens = (
+            int(usage.get("completion_tokens") or 0)
+            or int(timings.get("predicted_n") or 0)
+            or estimate_tokens(translated)
+        )
+        server_tps = float(timings.get("predicted_per_second") or 0.0)
+        if server_tps > 0:
+            tps = server_tps
+            tps_source = "server.timings"
+        else:
+            tps = tokens / elapsed_s if elapsed_s > 0 else 0.0
+            tps_source = "client.usage" if usage else "estimate"
+        self._history.append((text, translated))
+        if self._on_stat is not None:
+            self._on_stat(
+                SegmentStat(
+                    source=text,
+                    translation=translated,
+                    elapsed_s=elapsed_s,
+                    tokens=tokens,
+                    tps=tps,
+                    tps_source=tps_source,
+                )
+            )
+        return translated
+
+
+def make_engine_chat(
+    client: LlamaClient,
+    prompt_dir: Path,
+    system_text: str,
+    *,
+    n_ctx: int = 8192,
+    context_window: int = 5,
+    context_summary_chars: int = 200,
+    min_output_tokens: int = 512,
+    output_ratio: float = 2.5,
+    prompt_safety_tokens: int = 64,
+    on_stat: Callable[[SegmentStat], None] | None = None,
+) -> Callable[[str], str]:
+    """兼容入口：返回可调用的单段翻译函数。"""
+    options = TranslationOptions(
+        n_ctx=n_ctx,
+        context_window=context_window,
+        context_summary_chars=context_summary_chars,
+        min_output_tokens=min_output_tokens,
+        output_ratio=output_ratio,
+        prompt_safety_tokens=prompt_safety_tokens,
+    )
+    return TranslationEngine(
+        client, prompt_dir, system_text, options=options, on_stat=on_stat
+    )
 
 
 def chunk_text(text: str, limit: int) -> list[str]:
@@ -100,6 +309,20 @@ def chunk_text(text: str, limit: int) -> list[str]:
     if rest:
         chunks.append(rest)
     return chunks
+
+
+def _split_for_retry(text: str) -> list[str]:
+    """优先在句末标点/空格二分；最差按中点切，保证所有字符不丢。"""
+    if len(text) <= 1:
+        return []
+    parts = chunk_text(text, max(1, len(text) // 2))
+    parts = [part for part in parts if part]
+    if len(parts) >= 2:
+        return parts
+    middle = max(1, len(text) // 2)
+    if middle >= len(text):
+        return [text]
+    return [text[:middle], text[middle:]]
 
 
 def _translate_chunks(
@@ -341,7 +564,25 @@ def translate_file(
 
 
 def build_chat_for(
-    config: AppConfig, model: ModelSpec, port: int, prompt_dir: Path
+    config: AppConfig,
+    model: ModelSpec,
+    port: int,
+    prompt_dir: Path,
+    *,
+    on_stat: Callable[[SegmentStat], None] | None = None,
 ) -> Callable[[str], str]:
-    client = EngineClient.for_model(config, model, port)
-    return make_engine_chat(client, prompt_dir, prompts.system_prompt(prompt_dir))
+    client = LlamaClient.for_model(config, model, port)
+    profile = config.resolve_profile(model)
+    settings = config.settings.translate
+    return make_engine_chat(
+        client,
+        prompt_dir,
+        prompts.system_prompt(prompt_dir),
+        n_ctx=profile.ctx,
+        context_window=settings.context_window,
+        context_summary_chars=settings.context_summary_chars,
+        min_output_tokens=settings.min_output_tokens,
+        output_ratio=settings.output_ratio,
+        prompt_safety_tokens=settings.prompt_safety_tokens,
+        on_stat=on_stat,
+    )

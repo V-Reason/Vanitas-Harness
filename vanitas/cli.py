@@ -25,7 +25,7 @@ from .errors import (
     TranslateError,
     VanitasError,
 )
-from .progress import Spinner
+from .monitor import TranslationMonitor
 from .repl import Repl
 from .ui import Palette, resolve_enabled
 
@@ -269,32 +269,35 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
     model = _resolve_model(config, args.model, "translate")
     profile = config.resolve_profile(model, args.profile)
     out_dir = Path(args.out_dir).expanduser() if args.out_dir else None
-    chat, _port = _translate_chat(config, model, profile, palette)
+    settings = config.settings.translate
+    monitor = TranslationMonitor(
+        stream=sys.stderr,
+        enabled=palette.enabled,
+        capacity=settings.monitor_lines,
+        palette=palette,
+    )
+    chat, _port = _translate_chat(
+        config, model, profile, palette, on_stat=monitor.record
+    )
     print(palette.meta(f"{model.display} · 档位 {profile.key}"))
     failures = 0
     for raw in args.inputs:
         source = Path(raw).expanduser()
         try:
-            with Spinner(f"正在翻译 {source.name}", palette) as spin:
-                outcome = translate.translate_file(
-                    chat,
-                    source,
-                    config.settings.translate,
-                    out_dir=out_dir,
-                    on_segment=(
-                        lambda done, total, name=source.name: spin.update(
-                            f"正在翻译 {name}（{done}/{total}）"
-                        )
-                    ),
-                )
-                target = outcome.output.name if outcome.output else "—"
-                spin.done(
-                    f"{outcome.source.name} → {target} · {outcome.segments} 段"
-                )
+            outcome = translate.translate_file(
+                chat,
+                source,
+                settings,
+                out_dir=out_dir,
+            )
         except TranslateError as exc:
             print(palette.err(f"{raw}：{exc}"), file=sys.stderr)
             failures += 1
             continue
+        target = outcome.output.name if outcome.output else "—"
+        monitor.print_line(
+            palette.ok(f"{outcome.source.name} → {target} · {outcome.segments} 段")
+        )
         for failure in outcome.failures:
             print(
                 palette.err(
@@ -303,6 +306,7 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                 file=sys.stderr,
             )
         failures += len(outcome.failures)
+    monitor.finish()
     if failures:
         print(
             palette.warn(f"完成，但 {failures} 处失败（失败段保留原文）"),
@@ -312,10 +316,27 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
     return 0
 
 
-def _translate_chat(config: AppConfig, model: ModelSpec, profile, palette: Palette):
+def _translate_chat(
+    config: AppConfig,
+    model: ModelSpec,
+    profile,
+    palette: Palette,
+    *,
+    on_stat=None,
+):
     client, port = _ensure_engine(config, model, profile, palette)
+    settings = config.settings.translate
     chat = translate.make_engine_chat(
-        client, config.config_dir / "prompts", prompts.system_prompt(config.config_dir / "prompts")
+        client,
+        config.config_dir / "prompts",
+        prompts.system_prompt(config.config_dir / "prompts"),
+        n_ctx=profile.ctx,
+        context_window=settings.context_window,
+        context_summary_chars=settings.context_summary_chars,
+        min_output_tokens=settings.min_output_tokens,
+        output_ratio=settings.output_ratio,
+        prompt_safety_tokens=settings.prompt_safety_tokens,
+        on_stat=on_stat,
     )
     return chat, port
 

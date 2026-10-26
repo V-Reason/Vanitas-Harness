@@ -43,5 +43,9 @@ class TranslateError(VanitasError):
     """翻译流水线的结构性失败（文件不可读、分段解析失败等）。"""
 
 
+class OutputTruncated(TranslateError):
+    """模型输出在长度上限处被截断；调用方可拆分输入重试。"""
+
+
 class ToolDenied(VanitasError):
     """/exec 被配置、白名单或用户确认拒绝。"""
