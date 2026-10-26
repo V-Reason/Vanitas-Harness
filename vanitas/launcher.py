@@ -45,11 +45,11 @@ class RunStatus:
 
 
 def run_dir() -> Path:
-    return Path.home() / ".vanitas_run"
+    return Path.home() / ".vanitas" / "run"
 
 
 def log_dir() -> Path:
-    return Path.home() / ".vanitas_logs"
+    return Path.home() / ".vanitas" / "logs"
 
 
 def record_path(model_id: str) -> Path:

@@ -13,7 +13,7 @@
     "kill_wait_sec": 5
   },
   "repl": {
-    "history_file": "~/.vanitas_history",
+    "history_file": "~/.vanitas/history",
     "max_context_tokens": 8192,
     "stream": true,
     "context_reserve_tokens": 512,

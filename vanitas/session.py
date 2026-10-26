@@ -166,4 +166,4 @@ class Session:
 
 def default_save_path() -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return Path.home() / ".vanitas_sessions" / f"{stamp}.json"
+    return Path.home() / ".vanitas" / "sessions" / f"{stamp}.json"

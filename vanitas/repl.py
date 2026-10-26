@@ -745,7 +745,7 @@ class Repl:
                     )
                     print(self.palette.meta(f"{record.model_id} {state_text}"))
         else:
-            print(self.palette.meta("无运行记录，serve 会在 ~/.vanitas_run/ 下写入"))
+            print(self.palette.meta("无运行记录，serve 会在 ~/.vanitas/run/ 下写入"))
         gpu = guard.gpu_status()
         print(
             self.palette.meta(gpu)

@@ -13,7 +13,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from vanitas.config import load_config  # noqa: E402
-from vanitas.session import Session, context_budget, estimate_tokens  # noqa: E402
+from vanitas.session import (  # noqa: E402
+    Session,
+    context_budget,
+    default_save_path,
+    estimate_tokens,
+)
 
 STAMP = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
@@ -60,6 +65,13 @@ class SessionTests(unittest.TestCase):
     def test_budget_helpers_are_reexported(self) -> None:
         self.assertEqual(context_budget(4096, 8192), 3584)
         self.assertGreaterEqual(estimate_tokens("你好"), 2)
+
+    def test_default_save_path_is_under_vanitas_sessions(self) -> None:
+        home = Path(r"<WORKSPACE>\home")
+        with mock.patch("vanitas.session.Path.home", return_value=home):
+            path = default_save_path()
+        self.assertEqual(path.parent, home / ".vanitas" / "sessions")
+        self.assertEqual(path.suffix, ".json")
 
 
 if __name__ == "__main__":

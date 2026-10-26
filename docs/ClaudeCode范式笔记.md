@@ -20,7 +20,7 @@
 
 - 观察：`src/history.ts` 用 `MAX_HISTORY_ITEMS = 100` 截断窗口；写盘调用 `appendFile(historyPath, jsonLines.join(''), { mode: 0o600 })` 收紧权限；并发写用 lockfile；另有「粘贴内容引用占位符」（`[Pasted text #N +M lines]`）避免把大段粘贴塞进历史。
 - 可移植性：历史是**编辑器状态**，会话是**业务状态**，两者生命周期不同。claude 把历史条数、权限、锁分开处理，正是踩过坑的痕迹。
-- 本项目映射：`prompt_toolkit.FileHistory(~/.vanitas_history)`，保留条数上限；非 TTY 分支不写历史；粘贴占位符不引入（单机短输入，KISS）。
+- 本项目映射：`prompt_toolkit.FileHistory(~/.vanitas/history)`，保留条数上限；非 TTY 分支不写历史；粘贴占位符不引入（单机短输入，KISS）。
 
 ### D3 流式输出以「首 token 上屏」为第一体验指标
 
