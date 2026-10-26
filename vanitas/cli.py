@@ -255,8 +255,8 @@ def _cmd_chat(config: AppConfig, args: argparse.Namespace, palette: Palette) -> 
 
 def _cmd_agent(config: AppConfig, args: argparse.Namespace, palette: Palette) -> int:
     verbose = bool(getattr(args, "verbose", False))
-    # 无子命令时 argparse 不会生成 agent 的可选参数，必须统一按缺省处理。
-    model = _resolve_model(config, getattr(args, "model", None), "general")
+    # Agent 默认使用 role=light 的 minicpm；vanitas chat 仍保持 role=general。
+    model = _resolve_model(config, getattr(args, "model", None), "light")
     profile = config.resolve_profile(model, getattr(args, "profile", None))
     return agent_mod.run_agent(
         config,

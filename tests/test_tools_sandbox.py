@@ -292,6 +292,24 @@ class ReadonlyShellTests(unittest.TestCase):
             self.toolbox.run_shell_ro("python -m unittest ..\\evil.py")
         self.assertIn("越界", str(ctx.exception))
 
+    def test_python_verify_absolute_path_allowed(self) -> None:
+        script = self.root / "verify.py"
+        script.write_text("print('ok')\n", encoding="utf-8")
+        fake = mock.Mock(
+            return_value=subprocess.CompletedProcess([], 0, stdout=b"ok\n", stderr=b"")
+        )
+        with mock.patch("vanitas.tools.subprocess.run", fake):
+            result = self.toolbox.run_shell_ro(f'python "{script}"')
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(fake.call_args.kwargs["shell"])
+        self.assertEqual(
+            tools.AgentTools._readonly_prefix(["python", str(script)]),
+            "python verify.py",
+        )
+        with self.assertRaises(ToolDenied) as ctx:
+            self.toolbox.run_shell_ro(r"python C:\Windows\System32\verify.py")
+        self.assertIn("越界", str(ctx.exception))
+
     def test_python_other_scripts_are_rejected(self) -> None:
         with self.assertRaises(ToolDenied) as ctx:
             self.toolbox.run_shell_ro("python evil.py")

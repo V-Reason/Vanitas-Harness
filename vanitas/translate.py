@@ -30,7 +30,7 @@ BLOCK_SEP = re.compile(r"(\r?\n[ \t]*\r?\n)")
 SRT_TIME = re.compile(r"^\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}")
 WINDOW_ID_RE = re.compile(r"^\[#(\d+)\]\s*(.*)$")
 ASR_HALLUCINATION_PATTERNS = re.compile(
-    r"(?:ご視聴ありがとうございました|チャンネル登録|高評価|Thank you for watching|Watching|Sous-titres)",
+    r"(?:ご視聴ありがとうございました|チャンネル登録|高評価|ベルマーク|Thank you for watching|Please subscribe|Sous-titres)",
     re.IGNORECASE,
 )
 BOM = b"\xef\xbb\xbf"
@@ -413,7 +413,12 @@ def rebuild_srt(blocks: list[tuple[Subtitle, str]], eol: str) -> str:
     for subtitle, separator in blocks:
         if subtitle.index and subtitle.timing:
             text = _normalize_eol(subtitle.text, target)
-            output.append(target.join([subtitle.index, subtitle.timing, text]))
+            if text.strip():
+                output.append(target.join([subtitle.index, subtitle.timing, text]))
+            else:
+                # 空正文不能再拼末尾换行，否则会与块分隔符叠加成三连换行，
+                # 导致下一块被 parse_srt 误判为未识别内容。
+                output.append(target.join([subtitle.index, subtitle.timing]))
         else:
             output.append(_normalize_eol(subtitle.text, target))
         output.append(_normalize_eol(separator, target))

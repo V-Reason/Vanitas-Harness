@@ -188,7 +188,8 @@ class CliSmokeTests(unittest.TestCase):
                 code, _out, err = run([])
         self.assertEqual(code, 0, err)
         called.assert_called_once()
-        _args, kwargs = called.call_args
+        args, kwargs = called.call_args
+        self.assertEqual(args[1].id, "minicpm")
         self.assertIsNone(kwargs["system"])
 
     def test_translate_two_files_get_independent_compact_stats(self) -> None:
