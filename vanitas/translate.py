@@ -28,6 +28,7 @@ from .metrics import (
 SENTENCE_ENDERS = "。！？!?；;"
 BLOCK_SEP = re.compile(r"(\r?\n[ \t]*\r?\n)")
 SRT_TIME = re.compile(r"^\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}")
+WINDOW_ID_RE = re.compile(r"^\[#(\d+)\]\s*(.*)$")
 BOM = b"\xef\xbb\xbf"
 FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)\n```$", re.DOTALL)
 QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’", "「": "」", "『": "』"}
@@ -131,9 +132,10 @@ class TranslationEngine:
         *,
         options: TranslationOptions,
         on_stat: Callable[[SegmentStat], None] | None = None,
+        task_template: str = "translate",
     ) -> None:
         self._client = client
-        self._template = prompts.load_task(prompt_dir, "translate")
+        self._template = prompts.load_task(prompt_dir, task_template)
         self._system = system_text
         self._options = options
         window = max(0, int(self._options.context_window))
@@ -273,6 +275,7 @@ def make_engine_chat(
     temperature: float,
     max_split_depth: int,
     on_stat: Callable[[SegmentStat], None] | None = None,
+    task_template: str = "translate",
 ) -> Callable[[str], str]:
     """兼容入口：返回可调用的单段翻译函数。"""
     options = TranslationOptions(
@@ -286,7 +289,12 @@ def make_engine_chat(
         max_split_depth=max_split_depth,
     )
     return TranslationEngine(
-        client, prompt_dir, system_text, options=options, on_stat=on_stat
+        client,
+        prompt_dir,
+        system_text,
+        options=options,
+        on_stat=on_stat,
+        task_template=task_template,
     )
 
 
@@ -352,8 +360,8 @@ def _translate_chunks(
     return "".join(translated)
 
 
-def parse_srt(text: str, eol: str) -> list[tuple[Subtitle, str]]:
-    """返回 [(字幕块, 块后分隔符)]；无法识别的块按原文保留。"""
+def parse_srt(text: str, eol: str = "\n") -> list[tuple[Subtitle, str]]:
+    """解析 SRT 字幕块：使用 splitlines() 兼容任意混合换行（CRLF/LF/CR），彻底阻断 0 段静默写回。"""
     blocks: list[tuple[Subtitle, str]] = []
     pieces = BLOCK_SEP.split(text)
     index = 0
@@ -366,14 +374,20 @@ def parse_srt(text: str, eol: str) -> list[tuple[Subtitle, str]]:
                 previous, previous_sep = blocks[-1]
                 blocks[-1] = (previous, previous_sep + content + separator)
             continue
-        lines = content.split(eol)
-        if len(lines) >= 2 and lines[0].strip().isdigit() and SRT_TIME.match(lines[1].strip()):
+
+        # 核心修复点：使用 splitlines() 处理单块内部的混合换行，不再使用脆弱的 content.split(eol)
+        raw_lines = [line.strip("\r\n") for line in content.splitlines()]
+        if (
+            len(raw_lines) >= 2
+            and raw_lines[0].strip().isdigit()
+            and SRT_TIME.match(raw_lines[1].strip())
+        ):
             blocks.append(
                 (
                     Subtitle(
-                        index=lines[0].strip(),
-                        timing=lines[1],
-                        text=eol.join(lines[2:]),
+                        index=raw_lines[0].strip(),
+                        timing=raw_lines[1].strip(),
+                        text=eol.join(raw_lines[2:]),
                     ),
                     separator,
                 )
@@ -383,15 +397,22 @@ def parse_srt(text: str, eol: str) -> list[tuple[Subtitle, str]]:
     return blocks
 
 
+def _normalize_eol(text: str, eol: str) -> str:
+    """把任意换行统一为目标 eol，避免重组后残留混合行尾。"""
+    target = eol or "\n"
+    return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", target)
+
+
 def rebuild_srt(blocks: list[tuple[Subtitle, str]], eol: str) -> str:
+    target = eol or "\n"
     output: list[str] = []
     for subtitle, separator in blocks:
         if subtitle.index and subtitle.timing:
-            text = subtitle.text.replace("\r\n", "\n").replace("\n", eol)
-            output.append(eol.join([subtitle.index, subtitle.timing, text]))
+            text = _normalize_eol(subtitle.text, target)
+            output.append(target.join([subtitle.index, subtitle.timing, text]))
         else:
-            output.append(subtitle.text)
-        output.append(separator)
+            output.append(_normalize_eol(subtitle.text, target))
+        output.append(_normalize_eol(separator, target))
     return "".join(output)
 
 
@@ -408,6 +429,44 @@ def split_prose(text: str) -> list[tuple[str, str]]:
     return paragraphs
 
 
+def parse_window_response(
+    raw_text: str, expected_ids: list[str]
+) -> tuple[bool, dict[str, str], list[str]]:
+    """解析带有 [#序号] 前缀的模型多行输出。
+
+    返回：(是否完全对齐, {序号: 译文}, 缺失序号列表)。
+    支持同一序号下多行字幕的自动合并（续行逻辑）。
+    重复序号、额外序号与乱序都判为失败，交给调用方整体回退。
+    """
+    translations: dict[str, list[str]] = {}
+    order: list[str] = []
+    current_id: str | None = None
+    duplicated = False
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        match = WINDOW_ID_RE.match(stripped)
+        if match:
+            current_id = match.group(1)
+            if current_id in translations:
+                duplicated = True
+                continue
+            translations[current_id] = [match.group(2).strip()]
+            order.append(current_id)
+        elif current_id is not None:
+            translations[current_id].append(stripped)
+
+    missing = [cid for cid in expected_ids if cid not in translations]
+    if duplicated or missing or order != expected_ids:
+        return False, {}, missing
+
+    aligned_dict = {
+        cid: "\n".join(translations[cid]).strip() for cid in expected_ids
+    }
+    return True, aligned_dict, []
+
+
 def translate_srt(
     chat: Callable[[str], str],
     text: str,
@@ -417,27 +476,95 @@ def translate_srt(
     eol: str,
     failures: list[TranslationFailure],
     on_segment: Callable[[int, int], None] | None = None,
+    window_size: int = 1,
+    max_window_chars: int = 250,
 ) -> str:
     blocks = parse_srt(text, eol)
-    total = sum(1 for subtitle, _ in blocks if subtitle.index and subtitle.text.strip())
+    valid_items = [
+        (index, block)
+        for index, (block, _separator) in enumerate(blocks)
+        if block.index and block.text.strip()
+    ]
+    total = len(valid_items)
     done = 0
-    for subtitle, _separator in blocks:
-        if not subtitle.text.strip() or not subtitle.index:
-            continue
-        result = _translate_chunks(
-            chat,
-            subtitle.text,
-            chunk_chars=chunk_chars,
-            source=source,
-            label=f"line {subtitle.index}",
-            failures=failures,
-        )
-        if result is not None:
-            subtitle.text = result
-        # 失败时保留原文，继续下一条
-        done += 1
+
+    if window_size <= 1:
+        for _block_index, subtitle in valid_items:
+            result = _translate_chunks(
+                chat,
+                subtitle.text,
+                chunk_chars=chunk_chars,
+                source=source,
+                label=f"line {subtitle.index}",
+                failures=failures,
+            )
+            if result is not None:
+                subtitle.text = result
+            # 失败时保留原文，继续下一条
+            done += 1
+            if on_segment is not None:
+                on_segment(done, total)
+        return rebuild_srt(blocks, eol)
+
+    windows: list[list[tuple[int, Subtitle]]] = []
+    current: list[tuple[int, Subtitle]] = []
+    current_chars = 0
+    for item in valid_items:
+        text_len = len(item[1].text)
+        if current and (
+            len(current) >= window_size
+            or current_chars + text_len > max_window_chars
+        ):
+            windows.append(current)
+            current = []
+            current_chars = 0
+        current.append(item)
+        current_chars += text_len
+        if len(current) >= window_size:
+            windows.append(current)
+            current = []
+            current_chars = 0
+    if current:
+        windows.append(current)
+
+    for window in windows:
+        expected_ids = [item[1].index for item in window]
+        fallback = len(set(expected_ids)) != len(expected_ids)
+        if not fallback:
+            batch_prompt = "\n".join(
+                f"[#{item[1].index}] {item[1].text}" for item in window
+            )
+            try:
+                batch_output = chat(batch_prompt)
+                ok, aligned, _missing = parse_window_response(
+                    batch_output, expected_ids
+                )
+                if ok:
+                    for _block_index, subtitle in window:
+                        subtitle.text = aligned[subtitle.index]
+                else:
+                    fallback = True
+            except (EngineError, TranslateError):
+                fallback = True
+
+        if fallback:
+            # 硬熔断：该窗口原地回退为逐句串行，绝不采用部分对齐结果
+            for _block_index, subtitle in window:
+                result = _translate_chunks(
+                    chat,
+                    subtitle.text,
+                    chunk_chars=chunk_chars,
+                    source=source,
+                    label=f"line {subtitle.index}",
+                    failures=failures,
+                )
+                if result is not None:
+                    subtitle.text = result
+
+        done += len(window)
         if on_segment is not None:
             on_segment(done, total)
+
     return rebuild_srt(blocks, eol)
 
 
@@ -513,6 +640,8 @@ def translate_file(
     *,
     out_dir: Path | None = None,
     on_segment: Callable[[int, int], None] | None = None,
+    window_size: int = 1,
+    max_window_chars: int = 250,
 ) -> TranslationOutcome:
     source = Path(source)
     if not source.is_file():
@@ -537,6 +666,8 @@ def translate_file(
             eol=eol,
             failures=failures,
             on_segment=on_segment,
+            window_size=window_size,
+            max_window_chars=max_window_chars,
         )
     else:
         segments = sum(1 for paragraph, _ in split_prose(text) if paragraph.strip())

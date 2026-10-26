@@ -3,6 +3,9 @@
 # 批处理必须保持 CRLF：cmd 对 LF-only 的标签跳转与续行行为不可靠
 *.bat text eol=crlf
 
+# 混合 EOL 夹具必须按字节保留，禁止行尾归一化
+tests/fixtures/sample_asmr.srt -text
+
 # 二进制资产永不参与行尾转换
 *.gguf binary
 *.dll binary

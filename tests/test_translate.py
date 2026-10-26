@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import tempfile
 import unittest
@@ -18,6 +19,8 @@ from vanitas.translate import (  # noqa: E402
     TranslationOptions,
     chunk_text,
     parse_srt,
+    parse_window_response,
+    rebuild_srt,
     sanitize_translation_output,
     translate_file,
 )
@@ -108,6 +111,207 @@ class TranslateTests(unittest.TestCase):
         self.assertFalse(raw.startswith(b"\xef\xbb\xbf"))
         self.assertNotIn(b"\r\n", raw)
         self.assertEqual(parse_srt(raw.decode("utf-8"), "\n")[0][0].index, "1")
+
+    def test_parse_srt_mixed_eol_recovers_all_blocks(self) -> None:
+        text = (
+            "1\r\n00:00:01,000 --> 00:00:02,000\r\nHello\r\n\r\n"
+            "2\n00:00:03,000 --> 00:00:04,000\nWorld\n\n"
+            "3\r\n00:00:05,000 --> 00:00:06,000\n"
+            "Third one\r\nThird two\r\n"
+        )
+        blocks = parse_srt(text, "\r\n")
+        self.assertEqual([block.index for block, _ in blocks], ["1", "2", "3"])
+        self.assertEqual(
+            [block.timing for block, _ in blocks],
+            [
+                "00:00:01,000 --> 00:00:02,000",
+                "00:00:03,000 --> 00:00:04,000",
+                "00:00:05,000 --> 00:00:06,000",
+            ],
+        )
+        self.assertEqual(blocks[2][0].text, "Third one\r\nThird two")
+
+        rebuilt = rebuild_srt(blocks, "\n")
+        self.assertNotIn("\r", rebuilt)
+        self.assertTrue(rebuilt.startswith("1\n00:00:01,000"))
+
+        source = self.write("mixed.srt", text)
+        outcome = translate_file(echo_chat, source, SETTINGS)
+        self.assertEqual(outcome.segments, 3)
+        self.assertEqual(outcome.failures, [])
+        translated = outcome.output.read_text(encoding="utf-8")
+        for expected in ("译Hello", "译World", "译Third one"):
+            self.assertIn(expected, translated)
+
+    def test_parse_window_response_success_and_missing(self) -> None:
+        ok, aligned, missing = parse_window_response(
+            "[#1] 第一句\n[#2] 第二句", ["1", "2"]
+        )
+        self.assertTrue(ok)
+        self.assertEqual(aligned, {"1": "第一句", "2": "第二句"})
+        self.assertEqual(missing, [])
+
+        ok, aligned, missing = parse_window_response(
+            "[#1] 第一句", ["1", "2"]
+        )
+        self.assertFalse(ok)
+        self.assertEqual(aligned, {})
+        self.assertEqual(missing, ["2"])
+
+        ok, aligned, _missing = parse_window_response(
+            "[#2] 第二句\n[#1] 第一句", ["1", "2"]
+        )
+        self.assertFalse(ok)
+        self.assertEqual(aligned, {})
+
+        ok, aligned, _missing = parse_window_response(
+            "[#1] 第一句\n[#2] 第二句\n[#3] 多翻", ["1", "2"]
+        )
+        self.assertFalse(ok)
+        self.assertEqual(aligned, {})
+
+    def _windowed_srt(self) -> str:
+        return (
+            "1\n00:00:01,000 --> 00:00:02,000\n一\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\n二\n\n"
+            "3\n00:00:05,000 --> 00:00:06,000\n三\n\n"
+            "4\n00:00:07,000 --> 00:00:08,000\n四\n"
+        )
+
+    def test_translate_srt_windowed_flow(self) -> None:
+        source = self.write("window.srt", self._windowed_srt())
+        calls: list[str] = []
+
+        def chat(prompt: str) -> str:
+            calls.append(prompt)
+            if "\n" not in prompt:
+                return f"译{prompt}"
+            lines: list[str] = []
+            for line in prompt.splitlines():
+                match = re.match(r"^\[#(\d+)\]\s*(.*)$", line)
+                if match:
+                    lines.append(f"[#{match.group(1)}] 译{match.group(2)}")
+            return "\n".join(lines)
+
+        progress: list[tuple[int, int]] = []
+        outcome = translate_file(
+            chat,
+            source,
+            SETTINGS,
+            window_size=2,
+            on_segment=lambda done, total: progress.append((done, total)),
+        )
+        self.assertEqual(outcome.segments, 4)
+        self.assertEqual(outcome.failures, [])
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all("\n" in call for call in calls))
+        self.assertEqual(progress, [(2, 4), (4, 4)])
+        translated = outcome.output.read_text(encoding="utf-8")
+        blocks = parse_srt(translated, "\n")
+        self.assertEqual([block.index for block, _ in blocks], ["1", "2", "3", "4"])
+        self.assertEqual(
+            [block.timing for block, _ in blocks],
+            [
+                "00:00:01,000 --> 00:00:02,000",
+                "00:00:03,000 --> 00:00:04,000",
+                "00:00:05,000 --> 00:00:06,000",
+                "00:00:07,000 --> 00:00:08,000",
+            ],
+        )
+        self.assertEqual(
+            [block.text for block, _ in blocks],
+            ["译一", "译二", "译三", "译四"],
+        )
+
+    def test_translate_srt_windowed_fallback_on_guardrail_trip(self) -> None:
+        source = self.write("fallback.srt", self._windowed_srt())
+        batch_calls = 0
+        single_calls = 0
+
+        def chat(prompt: str) -> str:
+            nonlocal batch_calls, single_calls
+            if "\n" in prompt:
+                batch_calls += 1
+                # 只回第一行，故意漏掉同窗第二个序号
+                return prompt.splitlines()[0]
+            single_calls += 1
+            return f"译{prompt}"
+
+        progress: list[tuple[int, int]] = []
+        outcome = translate_file(
+            chat,
+            source,
+            SETTINGS,
+            window_size=2,
+            on_segment=lambda done, total: progress.append((done, total)),
+        )
+        self.assertEqual(batch_calls, 2)
+        self.assertEqual(single_calls, 4)
+        self.assertEqual(outcome.segments, 4)
+        self.assertEqual(outcome.failures, [])
+        self.assertEqual(progress, [(2, 4), (4, 4)])
+        translated = outcome.output.read_text(encoding="utf-8")
+        blocks = parse_srt(translated, "\n")
+        self.assertEqual([block.index for block, _ in blocks], ["1", "2", "3", "4"])
+        self.assertEqual(
+            [block.text for block, _ in blocks],
+            ["译一", "译二", "译三", "译四"],
+        )
+
+    def test_translate_file_with_asmr_preset_end_to_end(self) -> None:
+        source = ROOT / "tests" / "fixtures" / "sample_asmr.srt"
+        raw = source.read_bytes()
+        self.assertIn(b"\r\n", raw)
+        self.assertIn(b"\n", raw.replace(b"\r\n", b""))
+        self.assertFalse(raw.startswith(b"\xef\xbb\xbf"))
+
+        out_dir = self.dir / "asmr"
+        calls: list[str] = []
+
+        def mock_chat(prompt: str) -> str:
+            calls.append(prompt)
+            if "[#1]" in prompt:
+                return (
+                    "[#1] 那、那个……是离耳朵太近了吗？\n"
+                    "[#2] 啾……呵呵，连耳垂都红透了呢。\n"
+                    "[#3] （在耳边低语）哈啊……已经忍不住了吗？\n"
+                    "[#4] "
+                )
+            return f"译{prompt}"
+
+        outcome = translate_file(
+            mock_chat,
+            source,
+            SETTINGS,
+            out_dir=out_dir,
+            window_size=4,
+        )
+        self.assertEqual(outcome.output, out_dir / "sample_asmr.zh.srt")
+        self.assertTrue(outcome.output.is_file())
+        self.assertEqual(outcome.segments, 4)
+        self.assertEqual(outcome.failures, [])
+        self.assertEqual(len(calls), 1)
+
+        translated = outcome.output.read_text(encoding="utf-8")
+        blocks = parse_srt(translated, "\r\n")
+        self.assertEqual([block.index for block, _ in blocks], ["1", "2", "3", "4"])
+        self.assertEqual(
+            [block.timing for block, _ in blocks],
+            [
+                "00:00:01,000 --> 00:00:03,500",
+                "00:00:04,000 --> 00:00:06,000",
+                "00:00:07,000 --> 00:00:09,000",
+                "00:00:10,000 --> 00:00:12,000",
+            ],
+        )
+        self.assertEqual(
+            blocks[0][0].text, "那、那个……是离耳朵太近了吗？"
+        )
+        self.assertIn("啾", blocks[1][0].text)
+        self.assertIn("（在耳边低语）", blocks[2][0].text)
+        self.assertIn("哈啊……", blocks[2][0].text)
+        self.assertEqual(blocks[3][0].text.strip(), "")
+        self.assertNotIn("ご視聴", translated)
 
     def test_srt_segment_failure_keeps_original_and_reports(self) -> None:
         def failing_chat(text: str) -> str:
@@ -229,6 +433,21 @@ class TranslationEngineTests(unittest.TestCase):
             "系统提示",
             options=translation_options(**options),
         )
+
+    def test_engine_uses_configured_task_template(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt_dir = Path(tmp)
+            (prompt_dir / "task_translate_custom.md").write_text(
+                "CUSTOM {input}", encoding="utf-8"
+            )
+            engine = TranslationEngine(
+                FakeTranslationClient(),
+                prompt_dir,
+                "系统提示",
+                options=translation_options(),
+                task_template="translate_custom",
+            )
+        self.assertEqual(engine._template, "CUSTOM {input}")
 
     def test_context_sentinel_and_fifo(self) -> None:
         client = FakeTranslationClient()

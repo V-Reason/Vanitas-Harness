@@ -16,7 +16,13 @@ from pathlib import Path
 
 from . import __version__, agent as agent_mod, batch as batch_mod, guard, launcher, prompts, translate
 from .client import LlamaClient
-from .config import AppConfig, DEFAULT_THEME, ModelSpec, load_config
+from .config import (
+    AppConfig,
+    DEFAULT_THEME,
+    ModelSpec,
+    TranslateSettings,
+    load_config,
+)
 from .errors import (
     ConfigError,
     EngineError,
@@ -116,6 +122,11 @@ def _build_parser() -> argparse.ArgumentParser:
     translate_cmd.add_argument("--profile", default=None, help="档位编号")
     translate_cmd.add_argument("--out-dir", default=None, help="输出目录，默认与原文件同目录")
     translate_cmd.add_argument("--jobs", type=int, default=1, help="并发数；引擎为 -np 1，实际串行")
+    translate_cmd.add_argument(
+        "--preset",
+        default=None,
+        help="翻译预设（如 general / asmr），对应 config/settings.json 中的 presets",
+    )
 
     batch_cmd = sub.add_parser("batch", help="按 JSONL 批量执行任务")
     batch_cmd.add_argument("tasks", help="tasks.jsonl 路径")
@@ -262,6 +273,34 @@ def _cmd_repl(config: AppConfig, args: argparse.Namespace, palette: Palette) -> 
     return Repl(config, palette=palette, verbose=verbose).run()
 
 
+def _resolve_translate_preset(
+    settings: TranslateSettings,
+    requested: str | None,
+    prompt_dir: Path,
+) -> tuple[str, str]:
+    """把 --preset 解析为 (预设名, 任务模板名)，并提前校验模板存在。"""
+    presets = settings.presets or {}
+    if requested is None:
+        name = (settings.default_preset or "general").strip()
+    else:
+        name = requested.strip()
+    entry = presets.get(name)
+    if entry is None:
+        if requested is not None:
+            available = "、".join(sorted(presets)) or "无"
+            raise ConfigError(f"未知翻译预设 {name!r}；可用：{available}")
+        template = "translate"
+    else:
+        template = str(entry.get("task_template") or "translate").strip()
+    try:
+        prompts.load_task(prompt_dir, template)
+    except ConfigError as exc:
+        raise ConfigError(
+            f"翻译预设 {name!r} 的模板 {template!r} 不可用：{exc}"
+        ) from exc
+    return name, template
+
+
 def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette) -> int:
     if args.jobs < 1:
         print(palette.err("--jobs 必须 ≥ 1"), file=sys.stderr)
@@ -271,10 +310,22 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
             palette.warn("服务端为 -np 1，--jobs 只并行解析，请求仍然串行"),
             file=sys.stderr,
         )
+    settings = config.settings.translate
+    try:
+        _preset_name, task_template = _resolve_translate_preset(
+            settings,
+            getattr(args, "preset", None),
+            config.config_dir / "prompts",
+        )
+    except ConfigError as exc:
+        print(palette.err(str(exc)), file=sys.stderr)
+        return 4
+    preset_info = settings.presets.get(_preset_name, {})
+    window_size = int(preset_info.get("window_size", 1))
+    max_window_chars = int(preset_info.get("max_window_chars", 250))
     model = _resolve_model(config, args.model, "translate")
     profile = config.resolve_profile(model, args.profile)
     out_dir = Path(args.out_dir).expanduser() if args.out_dir else None
-    settings = config.settings.translate
     monitor = TranslationMonitor(
         stream=sys.stderr,
         enabled=palette.enabled,
@@ -282,7 +333,12 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
         palette=palette,
     )
     chat, _port = _translate_chat(
-        config, model, profile, palette, on_stat=monitor.record
+        config,
+        model,
+        profile,
+        palette,
+        on_stat=monitor.record,
+        task_template=task_template,
     )
     print(palette.meta(f"{model.display} · 档位 {profile.key}"))
     failures = 0
@@ -296,6 +352,8 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                 source,
                 settings,
                 out_dir=out_dir,
+                window_size=window_size,
+                max_window_chars=max_window_chars,
             )
         except TranslateError as exc:
             print(palette.err(f"{raw}：{exc}"), file=sys.stderr)
@@ -335,6 +393,7 @@ def _translate_chat(
     palette: Palette,
     *,
     on_stat=None,
+    task_template: str = "translate",
 ):
     client, port = _ensure_engine(config, model, profile, palette)
     settings = config.settings.translate
@@ -351,6 +410,7 @@ def _translate_chat(
         temperature=settings.temperature,
         max_split_depth=settings.max_split_depth,
         on_stat=on_stat,
+        task_template=task_template,
     )
     return chat, port
 
