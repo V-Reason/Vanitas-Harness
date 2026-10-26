@@ -148,7 +148,8 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(len(runner.calls), 2)
         self.assertEqual(runner.calls[1][0], "followup")
         feedback = runner.calls[1][1]
-        self.assertTrue(feedback.startswith("[系统反馈] 执行成功："))
+        self.assertTrue(feedback.startswith("<tool_result>\n执行成功："))
+        self.assertTrue(feedback.endswith("\n</tool_result>"))
         self.assertIn("alpha", feedback)
 
     def test_write_file_executes_and_feeds_result_back(self) -> None:
@@ -169,10 +170,11 @@ class AgentTests(unittest.TestCase):
         feedbacks = [
             item["content"]
             for item in repl.session.messages
-            if item["role"] == "user" and item["content"].startswith("[系统反馈]")
+            if item["role"] == "user" and item["content"].startswith("<tool_result>")
         ]
         self.assertTrue(feedbacks)
-        self.assertTrue(feedbacks[0].startswith("[系统反馈] 执行成功："))
+        self.assertTrue(feedbacks[0].startswith("<tool_result>\n执行成功："))
+        self.assertTrue(feedbacks[0].endswith("</tool_result>"))
         self.assertIn("a.txt", feedbacks[0])
 
     def test_user_refusal_cancels_without_execution(self) -> None:
@@ -191,7 +193,7 @@ class AgentTests(unittest.TestCase):
         self.assertIn("改用工作区文件", out)
         self.assertEqual(len(runner.calls), 2)
         feedback = runner.calls[1][1]
-        self.assertTrue(feedback.startswith("[系统反馈] 执行失败："))
+        self.assertTrue(feedback.startswith("<tool_result>\n执行失败："))
         self.assertIn("越界", feedback)
 
     def test_outside_write_is_blocked_after_confirmation(self) -> None:
@@ -249,6 +251,48 @@ class AgentTests(unittest.TestCase):
         self.assertIn("批量完成", out)
         self.assertEqual(len(runner.calls), 2)
         self.assertIn("批量执行完成：2 项，成功 2，失败 0", runner.calls[1][1])
+
+    def test_tagged_batch_writes_two_files_with_one_confirmation(self) -> None:
+        payload = (
+            "<tool_call>\n"
+            '[{"action":"write_file","parameters":{"path":"a.txt","content":"hello"}},'
+            '{"action":"write_file","parameters":{"path":"b.txt","content":"hello"}}]\n'
+            "</tool_call>"
+        )
+        plans: list[str] = []
+        repl, runner = self.make_repl(
+            [payload, "两个文件都写好了"],
+            confirm=lambda plan: plans.append(plan) or True,
+        )
+        _value, out, _err = quiet_run(lambda: repl._chat("同时创建 a.txt 和 b.txt"))
+        self.assertEqual(len(plans), 1)
+        self.assertIn("批量操作（2 项）", plans[0])
+        self.assertEqual((self.root / "a.txt").read_text(encoding="utf-8"), "hello")
+        self.assertEqual((self.root / "b.txt").read_text(encoding="utf-8"), "hello")
+        self.assertIn("两个文件都写好了", out)
+        self.assertNotIn("<tool_call>", out)
+        self.assertNotIn('{"action"', out)
+        feedback = runner.calls[1][1]
+        self.assertTrue(feedback.startswith("<tool_result>\n"))
+        self.assertIn("批量执行完成：2 项，成功 2，失败 0", feedback)
+        self.assertIn("1. 成功：写入 a.txt", feedback)
+        self.assertIn("2. 成功：写入 b.txt", feedback)
+
+    def test_single_tagged_write_shows_one_plan(self) -> None:
+        payload = (
+            "<tool_call>\n"
+            '[{"action":"write_file","parameters":{"path":"a.txt","content":"x"}}]\n'
+            "</tool_call>"
+        )
+        plans: list[str] = []
+        repl, _runner = self.make_repl(
+            [payload, "完成"],
+            confirm=lambda plan: plans.append(plan) or True,
+        )
+        _value, _out, _err = quiet_run(lambda: repl._chat("写一个文件"))
+        self.assertEqual(len(plans), 1)
+        self.assertIn("将写入文件 a.txt", plans[0])
+        self.assertNotIn("批量操作", plans[0])
 
     def test_batch_read_only_actions_do_not_ask_for_confirmation(self) -> None:
         (self.root / "a.txt").write_text("a", encoding="utf-8")
@@ -407,8 +451,8 @@ class ActionParserTests(unittest.TestCase):
         write = agent._parse_actions(
             '[{"action":"write_file","parameters":{"path":"a.txt","content":"x"}}]'
         )
-        self.assertFalse(agent._needs_confirmation(read, is_batch=True))
-        self.assertTrue(agent._needs_confirmation(write, is_batch=True))
+        self.assertFalse(agent._needs_confirmation(read))
+        self.assertTrue(agent._needs_confirmation(write))
 
     def test_stream_suppresses_action_json_and_streams_text(self) -> None:
         out = io.StringIO()

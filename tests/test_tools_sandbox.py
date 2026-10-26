@@ -109,6 +109,25 @@ class FileToolTests(unittest.TestCase):
             self.toolbox.move_file("a.txt", "b.txt")
         self.assertIn("目标已存在", str(ctx.exception))
 
+    def test_move_rejects_missing_source_with_clear_message(self) -> None:
+        with self.assertRaises(ToolDenied) as ctx:
+            self.toolbox.move_file("nope.md", "x.srt")
+        self.assertEqual(str(ctx.exception), "源文件不存在或路径非法")
+
+    def test_move_rejects_illegal_path_characters(self) -> None:
+        self.toolbox.write_file("a.md", "a")
+        for src, dst in (
+            ("a#.md", "a.srt"),
+            ("a.md", "a#.srt"),
+            ("a?.md", "a.srt"),
+            ("a.md", "a*.srt"),
+        ):
+            with self.subTest(src=src, dst=dst):
+                with self.assertRaises(ToolDenied) as ctx:
+                    self.toolbox.move_file(src, dst)
+                self.assertEqual(str(ctx.exception), "源文件不存在或路径非法")
+        self.assertTrue((self.root / "a.md").exists())
+
     def test_delete_rejects_directory(self) -> None:
         (self.root / "sub").mkdir()
         with self.assertRaises(ToolDenied):

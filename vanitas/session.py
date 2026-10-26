@@ -23,7 +23,8 @@ __all__ = ["Session", "context_budget", "default_save_path", "estimate_tokens"]
 # Agent 的首轮消息已经带入完整 task_agent 契约；后续用户输入只需短提醒，
 # 否则每轮重复 1,450 tokens 的模板会在 4K 档位下很快触发上下文裁剪。
 _AGENT_CONTINUATION = (
-    "【Agent 继续】沿用当前工具契约；需要工具时只输出 JSON，普通文本表示完成。\n"
+    "【Agent 继续】沿用当前工具契约；需要工具时只输出 "
+    "<tool_call>[...]</tool_call>，普通文本表示完成。\n"
     "当前工作目录：{cwd}\n任务：\n{input}"
 )
 

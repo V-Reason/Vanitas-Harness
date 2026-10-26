@@ -511,16 +511,30 @@ def write_file(path: str, content: str, *, root: Path | str | None = None) -> in
     return len(data)
 
 
+_MOVE_ILLEGAL_CHARS = frozenset('#<>"|?*')
+
+
+def _reject_illegal_move_text(value: str) -> None:
+    """模型常把 `#`、通配符等路径污染带进 move_file；提前给出可读拒绝。"""
+    if any(
+        char in _MOVE_ILLEGAL_CHARS or ord(char) < 32
+        for char in value
+    ):
+        raise ToolDenied("源文件不存在或路径非法")
+
+
 def move_file(
     src: str, dst: str, *, root: Path | str | None = None
 ) -> str:
     source = _require_path(src, root)
     target = _require_path(dst, root)
+    _reject_illegal_move_text(src)
+    _reject_illegal_move_text(dst)
     if source == target:
         raise ToolDenied(f"源和目标相同：{src}")
     try:
         if not source.is_file():
-            raise ToolDenied(f"不是可移动的文件：{src}")
+            raise ToolDenied("源文件不存在或路径非法")
         if target.exists():
             raise ToolDenied(f"目标已存在：{dst}")
         target.parent.mkdir(parents=True, exist_ok=True)

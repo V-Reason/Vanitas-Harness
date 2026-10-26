@@ -92,8 +92,15 @@ class PromptTests(unittest.TestCase):
         self.assertIn("JSON 路径转义", text)
         self.assertIn("Invalid \\escape", text)
         self.assertIn("不要编造", text)
-        self.assertIn("[系统反馈]", text)
+        self.assertIn("<tool_result>", text)
         self.assertIn("普通中文文本", text)
+        self.assertIn("【输出格式强约束】", text)
+        self.assertIn("<tool_call>", text)
+        self.assertIn("必须且只能", text)
+        self.assertIn("【任务逻辑纠偏】", text)
+        self.assertIn("严禁", text)
+        self.assertIn("【截断防御】", text)
+        self.assertIn("如果写入内容过长", text)
 
     def test_unknown_placeholder_in_template_rejected(self) -> None:
         (self.temp_dir / "bad.md").write_text("hi {unknown}\n", encoding="utf-8")

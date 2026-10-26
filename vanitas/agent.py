@@ -1,10 +1,11 @@
 """Agent 受控闭环：解析动作、分级审批、执行并把结果回填给模型。
 
 安全边界：
-- 单动作 `read_file` / `list_dir` / `run_shell_ro` 自动执行；
+- 单动作与只读数组的 `read_file` / `list_dir` / `run_shell_ro` 自动执行；
 - 修改动作 `write_file` / `delete_file` / `move_file` 必须确认；
-- 动作数组统一打印清单并只弹一次 [y/N]，不因全只读而自动跳过；
-- 工具层 `AgentTools` 以工作区为根，越界、坏 JSON 与执行失败都转为纯文本反馈。
+- 含修改的动作数组只弹一次 [y/N]；全只读数组不确认；
+- 工具层 `AgentTools` 以工作区为根，越界、坏 JSON 与执行失败都转成
+  `<tool_result>` 纯文本反馈，避免原始动作 JSON 污染终端。
 """
 
 from __future__ import annotations
@@ -34,7 +35,12 @@ _JSON_PATH_VALUE_RE = re.compile(
     r'((?:[^"\\]|\\.)*)(")',
     re.DOTALL,
 )
-_JSON_LINE_START_RE = re.compile(r"(?m)^[ \t]*([\[{])")
+_TOOL_CALL_RE = re.compile(
+    r"<tool_call\s*>\s*(.*?)\s*</tool_call\s*>", re.DOTALL | re.IGNORECASE
+)
+TOOL_CALL_OPEN = "<tool_call>"
+TOOL_CALL_CLOSE = "</tool_call>"
+_JSON_DECODER = json.JSONDecoder(strict=False)
 _HEX = frozenset("0123456789abcdefABCDEF")
 _VALID_JSON_ESCAPES = frozenset('"\\/bfnrt')
 
@@ -186,86 +192,198 @@ def _json_loads(text: str):
         return json.loads(text, strict=False)
 
 
+def _json_variants(text: str) -> list[str]:
+    """按“原样 → 路径字段修复 → 全局转义兜底”的顺序给出候选文本。"""
+    variants = [text]
+    repaired = _repair_path_escapes(text)
+    if repaired not in variants:
+        variants.append(repaired)
+    repaired_all = _repair_invalid_json_escapes(repaired)
+    if repaired_all not in variants:
+        variants.append(repaired_all)
+    return variants
+
+
 def _load_action_json(text: str):
-    """先按标准 JSON 解析，失败后只修复路径字段，最后再做全局转义兜底。"""
-    try:
-        return _json_loads(text)
-    except json.JSONDecodeError as first_error:
-        repaired = _repair_path_escapes(text)
+    """先按标准 JSON 解析，失败后逐级修复路径字段与非法转义。"""
+    first_error: json.JSONDecodeError | None = None
+    for candidate in _json_variants(text):
         try:
-            return _json_loads(repaired)
-        except json.JSONDecodeError:
-            second = _repair_invalid_json_escapes(repaired)
-            try:
-                return _json_loads(second)
-            except json.JSONDecodeError:
-                raise first_error
+            return _json_loads(candidate)
+        except json.JSONDecodeError as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is None:  # pragma: no cover - _json_variants 永远非空
+        raise json.JSONDecodeError("无法解析 JSON", text, 0)
+    raise first_error
 
 
-def _has_action_payload(payload: object) -> bool:
+def _payload_calls(payload: object) -> list[dict] | None:
+    """把顶层 payload 规范成动作 dict 列表；普通 JSON 返回 None。"""
     if isinstance(payload, dict):
-        return "action" in payload
+        return [payload] if "action" in payload else None
     if isinstance(payload, list):
-        return bool(payload) and all(
-            isinstance(item, dict) and "action" in item for item in payload
-        )
-    return False
-
-
-def _embedded_action_text(text: str) -> str | None:
-    """提取“解释文字 + 尾部 JSON 动作块”中的动作块。
-
-    只接受从某一行行首开始的 JSON 对象/数组，避免把正文里的普通 JSON
-    示例当成动作；动作数组仍会由上层走一次清单确认。
-    """
-    for match in reversed(list(_JSON_LINE_START_RE.finditer(text))):
-        if match.start() == 0:
-            continue
-        candidate = text[match.start():].strip()
-        if candidate.endswith("```"):
-            candidate = candidate[:-3].rstrip()
-        try:
-            payload = _load_action_json(candidate)
-        except json.JSONDecodeError:
-            continue
-        if _has_action_payload(payload):
-            return candidate
+        if not payload:
+            return []
+        if not all(isinstance(item, dict) for item in payload):
+            return None
+        if not any("action" in item for item in payload):
+            return None
+        return list(payload)
     return None
 
 
-def _parse_actions(text: str) -> list[AgentAction] | None:
-    """解析单动作/动作数组；支持前置解释文字后的尾部 JSON 动作块。"""
+def _balanced_json_blocks(text: str) -> list[str]:
+    """用栈扫描字符串外的成对 `{}`/`[]`，返回每个顶层块。"""
+    blocks: list[str] = []
+    stack: list[str] = []
+    start = 0
+    in_string = False
+    escaped = False
+    pairs = {"}": "{", "]": "["}
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char in "[{":
+            if not stack:
+                start = index
+            stack.append(char)
+            continue
+        if char not in "]}":
+            continue
+        if not stack:
+            continue
+        if stack[-1] != pairs[char]:
+            # 损坏的嵌套不拖累后续独立块；从下一个起始括号重新开始。
+            stack.clear()
+            continue
+        stack.pop()
+        if not stack:
+            blocks.append(text[start : index + 1])
+    return blocks
+
+
+def _raw_decode_action(text: str) -> object | None:
+    """从任意 `{`/`[` 起点用 raw_decode 提取前面正确的 JSON。"""
+    for candidate in _json_variants(text):
+        for start, char in enumerate(candidate):
+            if char not in "[{":
+                continue
+            try:
+                payload, _end = _JSON_DECODER.raw_decode(candidate[start:])
+            except json.JSONDecodeError:
+                continue
+            if _payload_calls(payload) is None:
+                continue
+            return payload
+    return None
+
+
+def _payloads_from_block(block: str) -> list[dict] | None:
+    try:
+        payload = _load_action_json(block)
+    except json.JSONDecodeError:
+        return None
+    return _payload_calls(payload)
+
+
+def _payloads_from_text(text: str) -> list[dict] | None:
+    """按 direct → raw_decode → 栈平衡的顺序提取一个文本片段中的调用。"""
     stripped = text.strip()
     if not stripped:
         return None
     try:
-        if stripped[0] in "[{":
-            payload = _load_action_json(stripped)
-        else:
-            embedded = _embedded_action_text(stripped)
-            if embedded is None:
-                return None
-            payload = _load_action_json(embedded)
-    except json.JSONDecodeError as exc:
-        if '"action"' in stripped or stripped.startswith("["):
+        payload = _load_action_json(stripped)
+    except json.JSONDecodeError:
+        pass
+    else:
+        calls = _payload_calls(payload)
+        if calls is not None:
+            return calls
+
+    decoded = _raw_decode_action(text)
+    if decoded is not None:
+        calls = _payload_calls(decoded)
+        if calls is not None:
+            if not isinstance(decoded, dict):
+                return calls
+            # 多对象文本重新按块解析，避免反斜杠修复改变 raw_decode 的偏移。
+            blocks = _balanced_json_blocks(text)
+            if len(blocks) > 1:
+                recovered: list[dict] = []
+                for block in blocks:
+                    extra = _payloads_from_block(block)
+                    if extra:
+                        recovered.extend(extra)
+                if recovered:
+                    return recovered
+            return calls
+
+    calls = []
+    recognized = False
+    for block in _balanced_json_blocks(text):
+        extra = _payloads_from_block(block)
+        if extra is None:
+            continue
+        recognized = True
+        calls.extend(extra)
+    return calls if recognized else None
+
+
+def extract_tool_calls(text: str) -> list[dict] | None:
+    """提取 `<tool_call>` 或裸 JSON 中的动作对象。
+
+    返回 None 表示没有工具调用（按普通文本处理）；返回空列表表示识别到
+    空动作数组，由 `_parse_actions` 统一报错。
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    matches = list(_TOOL_CALL_RE.finditer(text))
+    if matches:
+        calls: list[dict] = []
+        recognized = False
+        for match in matches:
+            payloads = _payloads_from_text(match.group(1))
+            if payloads is None:
+                continue
+            recognized = True
+            calls.extend(payloads)
+        return calls if recognized else None
+    return _payloads_from_text(text)
+
+
+def _looks_like_action_attempt(text: str) -> bool:
+    if "<tool_call" in text.lower():
+        return True
+    return '"action"' in text
+
+
+def _parse_actions(text: str) -> list[AgentAction] | None:
+    """解析标签化/裸 JSON 动作；无法识别时回落到最终自然语言。"""
+    stripped = text.strip()
+    if not stripped:
+        return None
+    payloads = extract_tool_calls(stripped)
+    if payloads is None:
+        if _looks_like_action_attempt(stripped):
             raise ValueError(
-                f"动作 JSON 解析失败：第 {exc.lineno} 行第 {exc.colno} 列：{exc.msg}"
-            ) from exc
+                "动作 JSON 解析失败：无法从输出中提取合法的工具调用"
+            )
         return None
-
-    if isinstance(payload, list):
-        if not payload:
-            raise ValueError("动作数组不能为空")
-        if len(payload) > MAX_BATCH_ACTIONS:
-            raise ValueError(f"单次最多 {MAX_BATCH_ACTIONS} 个动作")
-        return [_action_from_payload(item) for item in payload]
-
-    if not isinstance(payload, dict):
-        raise ValueError("动作 JSON 顶层必须是对象或数组")
-    if "action" not in payload:
-        # 允许模型用普通 JSON 作为最终答复；只有带 action 的才是工具调用。
-        return None
-    return [_action_from_payload(payload)]
+    if not payloads:
+        raise ValueError("动作数组不能为空")
+    if len(payloads) > MAX_BATCH_ACTIONS:
+        raise ValueError(f"单次最多 {MAX_BATCH_ACTIONS} 个动作")
+    return [_action_from_payload(item) for item in payloads]
 
 
 def _parse_action(text: str) -> AgentAction | None:
@@ -310,9 +428,7 @@ def _describe(action: AgentAction) -> str:
     return f"将删除文件 {action.parameters['path']}"
 
 
-def _needs_confirmation(
-    actions: list[AgentAction], *, is_batch: bool = False
-) -> bool:
+def _needs_confirmation(actions: list[AgentAction]) -> bool:
     # 只读动作（含只读数组）直接执行；只有写/删/移动才确认。
     # 批量清单仍由 _confirm_actions 汇总，只要数组里有一个修改动作就只问一次。
     return any(action.name in CONFIRM_ACTIONS for action in actions)
@@ -326,17 +442,19 @@ def _clip_feedback(text: str) -> str:
 
 
 class _AgentAnswerStream:
-    """把 Agent 的流式输出分成“动作 JSON”和“最终自然语言”。
+    """把 Agent 的流式输出分成“动作块”和“最终自然语言”。
 
-    初始阶段先看首个非空白字符：`{` / `[` 直接进入动作模式，整段丢弃。
-    进入自然语言后，行首若再次出现 `{` / `[`（典型是“解释文字 + 动作块”），
-    暂停输出并缓存尾部；上层确认是动作后丢弃，不是动作则 `flush_suppressed()`。
+    初始阶段先看首个非空白字符：`{` / `[` 进入 JSON 抑制，`<tool_call>`
+    进入标签抑制。进入自然语言后，行首的 `{` / `[` 仍按旧兼容处理；
+    `<tool_call>` 可在任意位置识别，且允许标签跨流式 chunk。
     """
 
     def __init__(self) -> None:
         self._target = sys.stdout
         self._buffer = ""
-        self._mode = "initial"  # initial | text | suppressed
+        self._suppressed = ""
+        self._restore: list[str] = []
+        self._mode = "initial"  # initial | text | probe_tag | suppress_tag | suppress_json
         self._line_start = False
         self._wrote = False
 
@@ -346,58 +464,106 @@ class _AgentAnswerStream:
 
     @property
     def suppressed(self) -> bool:
-        return self._mode == "suppressed"
+        return bool(self._restore) or self._mode in {
+            "probe_tag",
+            "suppress_tag",
+            "suppress_json",
+        }
 
     def write(self, text: str) -> int:
         for char in text:
-            if self._mode == "suppressed":
-                self._buffer += char
-                continue
-            if self._mode == "initial":
-                self._buffer += char
-                stripped = self._buffer.lstrip()
-                if not stripped:
-                    continue
-                if stripped[0] in "[{":
-                    self._mode = "suppressed"
-                    self._buffer = ""
-                    continue
-                self._mode = "text"
-                pending = self._buffer
-                self._buffer = ""
-                self._line_start = pending.endswith(("\n", "\r"))
-                self._send(pending)
-                continue
-            if char in "\r\n":
-                self._send(char)
-                self._buffer = ""
-                self._line_start = True
-                continue
-            if self._line_start:
-                self._buffer += char
-                if char in " \t":
-                    continue
-                if char in "[{":
-                    self._mode = "suppressed"
-                    self._buffer = ""
-                    continue
-                pending = self._buffer
-                self._buffer = ""
-                self._line_start = False
-                self._send(pending)
-                continue
-            self._send(char)
+            self._feed(char)
         return len(text)
+
+    def _feed(self, char: str) -> None:
+        if self._mode == "suppress_tag":
+            self._suppressed += char
+            if self._suppressed.lower().endswith(TOOL_CALL_CLOSE):
+                self._restore.append(self._suppressed)
+                self._suppressed = ""
+                self._mode = "text"
+                self._line_start = False
+            return
+        if self._mode == "suppress_json":
+            self._suppressed += char
+            return
+        if self._mode in {"initial", "probe_tag"}:
+            self._probe(char)
+            return
+        if self._mode != "text":
+            self._send(char)
+            return
+        if self._line_start:
+            self._buffer += char
+            if char in " \t":
+                return
+            stripped = self._buffer.lstrip(" \t")
+            if stripped.startswith(("{", "[")):
+                self._enter_json()
+                return
+            if stripped == "<":
+                self._mode = "probe_tag"
+                return
+            if TOOL_CALL_OPEN.startswith(stripped.lower()):
+                return
+            pending = self._buffer
+            self._buffer = ""
+            self._line_start = pending.endswith(("\n", "\r"))
+            self._send(pending)
+            return
+
+        if char == "<":
+            self._mode = "probe_tag"
+            self._buffer = char
+            return
+        if char in "\r\n":
+            self._send(char)
+            self._line_start = True
+            return
+        self._send(char)
+
+    def _probe(self, char: str) -> None:
+        self._buffer += char
+        stripped = self._buffer.lstrip(" \t")
+        if not stripped:
+            return
+        if stripped.startswith(("{", "[")):
+            self._enter_json()
+            return
+        if TOOL_CALL_OPEN.startswith(stripped.lower()):
+            if stripped.lower() == TOOL_CALL_OPEN:
+                self._suppressed = self._buffer
+                self._buffer = ""
+                self._mode = "suppress_tag"
+            return
+        pending = self._buffer
+        self._buffer = ""
+        self._mode = "text"
+        self._line_start = pending.endswith(("\n", "\r"))
+        self._send(pending)
+
+    def _enter_json(self) -> None:
+        self._suppressed = self._buffer
+        self._buffer = ""
+        self._mode = "suppress_json"
 
     def flush(self) -> None:
         self._target.flush()
 
     def flush_suppressed(self) -> None:
-        if self._mode != "suppressed":
+        parts = list(self._restore)
+        if self._mode in {"suppress_tag", "suppress_json"}:
+            parts.append(self._suppressed)
+        elif self._mode == "probe_tag":
+            parts.append(self._buffer)
+        if not parts:
             return
-        pending = self._buffer
+        pending = "".join(parts)
+        self._restore = []
+        self._suppressed = ""
         self._buffer = ""
         self._mode = "text"
+        self._line_start = pending.endswith(("\n", "\r"))
         self._send(pending)
 
     def _send(self, text: str) -> None:
@@ -469,9 +635,8 @@ class AgentRepl(Repl):
                 print(self.palette.warn(f"已达最大步数 {self.max_steps}"))
                 return
 
-            is_batch = result.text.lstrip().startswith("[")
-            if _needs_confirmation(actions, is_batch=is_batch):
-                if not self._confirm_actions(actions, is_batch=is_batch):
+            if _needs_confirmation(actions):
+                if not self._confirm_actions(actions):
                     print(self.palette.meta("已取消"))
                     return
             else:
@@ -486,10 +651,8 @@ class AgentRepl(Repl):
             if result is None or result.interrupted:
                 return
 
-    def _confirm_actions(
-        self, actions: list[AgentAction], *, is_batch: bool = False
-    ) -> bool:
-        if len(actions) == 1 and not is_batch:
+    def _confirm_actions(self, actions: list[AgentAction]) -> bool:
+        if len(actions) == 1:
             plan = _describe(actions[0])
         else:
             lines = [f"批量操作（{len(actions)} 项）："]
@@ -528,21 +691,22 @@ class AgentRepl(Repl):
             results.append((action, ok, detail))
 
         if len(results) == 1:
-            action, ok, detail = results[0]
+            _action, ok, detail = results[0]
             status = "执行成功" if ok else "执行失败"
-            return _clip_feedback(f"[系统反馈] {status}：{detail}")
-
-        succeeded = sum(1 for _action, ok, _detail in results if ok)
-        failed = len(results) - succeeded
-        lines = [
-            f"[系统反馈] 批量执行完成：{len(results)} 项，成功 {succeeded}，失败 {failed}"
-        ]
-        for index, (action, ok, detail) in enumerate(results, start=1):
-            status = "成功" if ok else "失败"
-            lines.append(f"{index}. {status}：{_summary(action)}")
-            if not ok:
-                lines.append(f"   {detail}")
-        return _clip_feedback("\n".join(lines))
+            body = f"{status}：{detail}"
+        else:
+            succeeded = sum(1 for _action, ok, _detail in results if ok)
+            failed = len(results) - succeeded
+            lines = [
+                f"批量执行完成：{len(results)} 项，成功 {succeeded}，失败 {failed}"
+            ]
+            for index, (action, ok, detail) in enumerate(results, start=1):
+                status = "成功" if ok else "失败"
+                lines.append(f"{index}. {status}：{_summary(action)}")
+                lines.append(f"   {detail.rstrip()}")
+            body = "\n".join(lines)
+        clipped = _clip_feedback(body)
+        return f"<tool_result>\n{clipped}\n</tool_result>"
 
     def _execute(self, action: AgentAction) -> tuple[bool, str]:
         params = action.parameters

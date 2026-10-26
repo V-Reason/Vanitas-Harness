@@ -191,7 +191,7 @@ class ChatRunnerTests(unittest.TestCase):
             ]
         )
         runner = self.make_runner(client)
-        feedback = "[系统反馈] 执行成功：已写入 a.txt"
+        feedback = "<tool_result>\n执行成功：已写入 a.txt\n</tool_result>"
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             runner.run_followup(feedback, display=False)
         self.assertEqual(self.session.messages[0]["role"], "user")
