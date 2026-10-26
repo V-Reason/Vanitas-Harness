@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 import unittest
@@ -47,18 +48,33 @@ class SessionTests(unittest.TestCase):
 
     def test_agent_template_uses_explicit_cwd(self) -> None:
         session = Session(system="sys", task="agent")
-        message = session.build_user_message(
-            "hello",
-            self.prompt_dir,
-            "alias",
-            cwd=r"<WORKSPACE>\demo\workspace",
-        )
+        with mock.patch.dict(os.environ, {"VANITAS_ORIG_CWD": ""}):
+            message = session.build_user_message(
+                "hello",
+                self.prompt_dir,
+                "alias",
+                cwd=r"<WORKSPACE>\demo\workspace",
+            )
         self.assertIn("当前工作目录：T:\\demo\\workspace", message)
         self.assertNotIn("{cwd}", message)
 
+    def test_agent_template_prefers_original_cwd_env(self) -> None:
+        session = Session(system="sys", task="agent")
+        with mock.patch.dict(os.environ, {"VANITAS_ORIG_CWD": r"<WORKSPACE>"}):
+            message = session.build_user_message(
+                "hello",
+                self.prompt_dir,
+                "alias",
+                cwd=r"<WORKSPACE>\repo",
+            )
+        self.assertIn("当前工作目录：T:\\test", message)
+
     def test_agent_template_defaults_to_process_cwd(self) -> None:
         session = Session(system="sys", task="agent")
-        with mock.patch("vanitas.session.os.getcwd", return_value=r"<WORKSPACE>\fallback"):
+        with (
+            mock.patch.dict(os.environ, {"VANITAS_ORIG_CWD": ""}),
+            mock.patch("vanitas.session.os.getcwd", return_value=r"<WORKSPACE>\fallback"),
+        ):
             message = session.build_user_message("hello", self.prompt_dir, "alias")
         self.assertIn("当前工作目录：T:\\fallback", message)
 

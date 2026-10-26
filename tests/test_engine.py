@@ -99,11 +99,11 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(response.closed)
 
     def test_repeat_penalty_only_above_one(self) -> None:
-        client = EngineClient(SETTINGS, "127.0.0.1", 4063, repeat_penalty=1.1)
+        client = EngineClient(SETTINGS, "127.0.0.1", 4062, repeat_penalty=1.1)
         payload = client._build_payload([], 16, 0.2, None)
         self.assertEqual(payload["repeat_penalty"], 1.1)
 
-        plain = EngineClient(SETTINGS, "127.0.0.1", 4063)
+        plain = EngineClient(SETTINGS, "127.0.0.1", 4062)
         self.assertNotIn("repeat_penalty", plain._build_payload([], 16, 0.2, None))
 
 

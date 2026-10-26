@@ -242,13 +242,14 @@ def _cmd_chat(config: AppConfig, args: argparse.Namespace, palette: Palette) -> 
 
 def _cmd_agent(config: AppConfig, args: argparse.Namespace, palette: Palette) -> int:
     verbose = bool(getattr(args, "verbose", False))
-    model = _resolve_model(config, args.model, "general")
-    profile = config.resolve_profile(model, args.profile)
+    # 无子命令时 argparse 不会生成 agent 的可选参数，必须统一按缺省处理。
+    model = _resolve_model(config, getattr(args, "model", None), "general")
+    profile = config.resolve_profile(model, getattr(args, "profile", None))
     return agent_mod.run_agent(
         config,
         model,
         profile.key,
-        system=args.system,
+        system=getattr(args, "system", None),
         palette=palette,
         verbose=verbose,
     )
@@ -397,7 +398,7 @@ HANDLERS = {
     "agent": _cmd_agent,
     "translate": _cmd_translate,
     "batch": _cmd_batch,
-    None: _cmd_repl,
+    None: _cmd_agent,
 }
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -218,6 +219,13 @@ class ToolsTests(unittest.TestCase):
             self.assertFalse(tools._is_safe_path(str(root.parent / "outside.txt"), root))
             self.assertFalse(tools._is_safe_path("bad\x00name", root))
             self.assertFalse(tools._is_safe_path(r"C:\Windows\System32\xxx", root))
+
+    def test_agent_tools_default_root_prefers_original_cwd(self) -> None:
+        config = make_config()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"VANITAS_ORIG_CWD": tmp}):
+                toolbox = tools.AgentTools(config)
+            self.assertEqual(toolbox.root, Path(tmp).resolve())
 
     def test_agent_tools_read_write_list_inside_root(self) -> None:
         config = make_config()

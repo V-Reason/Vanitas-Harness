@@ -73,7 +73,7 @@ class CliSmokeTests(unittest.TestCase):
         with clean_env():
             code, out, _err = run(["models"])
         self.assertEqual(code, 0)
-        for model_id in ("qwen7b", "minicpm", "hymt", "qwen3b"):
+        for model_id in ("qwen7b", "minicpm", "hymt"):
             self.assertIn(model_id, out)
         self.assertIn("4060", out)
         self.assertIn("qwen2.5-7b-instruct-q6_k", out)
@@ -166,6 +166,15 @@ class CliSmokeTests(unittest.TestCase):
                 code, _out, _err = run(["agent"])
         self.assertEqual(code, 0)
         called.assert_called_once()
+
+    def test_default_command_dispatches_agent_without_subcommand_args(self) -> None:
+        with clean_env():
+            with mock.patch.object(cli.agent_mod, "run_agent", return_value=0) as called:
+                code, _out, err = run([])
+        self.assertEqual(code, 0, err)
+        called.assert_called_once()
+        _args, kwargs = called.call_args
+        self.assertIsNone(kwargs["system"])
 
     def test_translate_two_files_get_independent_compact_stats(self) -> None:
         first = self.dir / "a.srt"

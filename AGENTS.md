@@ -78,7 +78,7 @@
 | 启动参数语义 | `-fa on`、`-fit off`、`-a`、`--metrics`、`-np 1`、分片只传首片，不得「顺手优化」 |
 | 端口/模型硬编码 | `vanitas\*.py` 不得出现 `8080/8081/8082` 或模型名/端口/ctx/KV 字面量，一律从 `config\` 读 |
 | 第三方依赖 | 除 `prompt_toolkit` 外禁止 `psutil/requests/httpx/rich/click` 等 |
-| `.bat` | 只允许根目录 `vanitas.bat` 薄壳（≤5 行有效指令）；不得承载启动逻辑 |
+| `.bat` | 只允许根目录 `vanitas.bat` 薄壳（≤5 条核心指令，不含 `@echo off`/`setlocal` 样板）；不得承载启动逻辑 |
 | 行尾 | `*.bat` 必须 UTF-8 无 BOM + CRLF；其余文本 LF |
 | 自动工具循环 | 仅允许 `vanitas agent` 的受控闭环：每步展示动作并 `[y/N]`，沙盒根为 CWD，最多 5 步；`/exec` 仍手动逐次确认。禁止后台队列、无人值守循环与绕过确认的钩子 |
 | 单实例 | 一次只允许一个 `llama-server`；启动新模型前由守卫回收旧实例 |
@@ -107,7 +107,7 @@
 # 1) 语法
 Get-ChildItem vanitas\*.py, tests\test_*.py | ForEach-Object { python -m py_compile $_.FullName }
 
-# 2) 单测（当前 206 例）
+# 2) 单测（当前 209 例）
 python -m unittest discover -s tests
 
 # 3) 静态红线
@@ -143,7 +143,7 @@ python -m vanitas stop
 
 - 并发（`-np 1`）、长上下文质量、持续压测、TTY 交互、`--foreground`、`.md/.txt` 真机翻译、5xx 重试路径尚未验证。
 - v0.4.1 的 16 色配色与三处覆盖式进度未做真人 TTY 验收（仅伪 TTY 单测 + 强制 `always` 抓字节）。
-- `vanitas agent` 闭环仅在 fake 模型与临时目录下验证；真实模型是否稳定输出动作、真实终端 `[y/N]` 观感与真实改名/删除尚未验收。
+- `vanitas agent` 的动作闭环仅在 fake 模型与临时目录下验证；默认入口与 `{cwd}` 注入已真机验证（`<WORKSPACE>`），但真实模型是否稳定输出动作、真实终端 `[y/N]` 观感与真实改名/删除尚未验收。
 - Agent 路径约束是参数级沙盒，不是 OS 级隔离；程序内部自行写文件仍需人工判断。
 - 混合换行的 `.srt` 会静默产出 `0 段`（已定位未修，见现状第 5 节）。
 - HY-MT2 显存余量约 500 MiB，是本机最紧的模型。

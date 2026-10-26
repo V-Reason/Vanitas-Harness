@@ -24,8 +24,8 @@ class LauncherPathTests(unittest.TestCase):
                 self.assertEqual(launcher.run_dir(), home / ".vanitas" / "run")
                 self.assertEqual(launcher.log_dir(), home / ".vanitas" / "logs")
                 self.assertEqual(
-                    launcher.record_path("qwen3b"),
-                    home / ".vanitas" / "run" / "qwen3b.json",
+                    launcher.record_path("minicpm"),
+                    home / ".vanitas" / "run" / "minicpm.json",
                 )
 
     def test_ensure_dirs_creates_new_layout(self) -> None:

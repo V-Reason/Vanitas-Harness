@@ -48,10 +48,10 @@ class ReplCompletionTests(unittest.TestCase):
 
     def test_model_and_profile_arguments(self) -> None:
         ids = [item[0] for item in self.repl._completion_candidates("/model ")]
-        self.assertEqual(ids, ["qwen7b", "minicpm", "hymt", "qwen3b"])
+        self.assertEqual(ids, ["qwen7b", "minicpm", "hymt"])
 
         prefix = self.repl._completion_candidates("/model qw")
-        self.assertEqual([item[0] for item in prefix], ["qwen7b", "qwen3b"])
+        self.assertEqual([item[0] for item in prefix], ["qwen7b"])
         self.assertEqual(prefix[0][1], -2)
 
         profiles = [
@@ -78,7 +78,7 @@ class ReplCompletionTests(unittest.TestCase):
         completions = list(completer.get_completions(Document(), None))
         self.assertEqual(
             [item.text for item in completions],
-            ["qwen7b", "minicpm", "hymt", "qwen3b"],
+            ["qwen7b", "minicpm", "hymt"],
         )
 
 
@@ -156,11 +156,11 @@ class ReplSwitchTests(unittest.TestCase):
 
     def test_switch_not_ready_stops_and_starts(self) -> None:
         record = RunRecord(
-            model_id="qwen3b",
+            model_id="hymt",
             pid=123,
-            port=4063,
+            port=4062,
             profile="1",
-            alias="qwen2.5-3b-instruct-q4_k_m",
+            alias="HY-MT2-7B-Q6_K",
             started_at="2026-10-26T00:00:00",
             log_path="x.log",
         )
@@ -170,10 +170,10 @@ class ReplSwitchTests(unittest.TestCase):
             mock.patch.object(repl_mod.launcher, "start", return_value=record) as start,
             mock.patch.object(repl_mod.launcher, "wait_ready", return_value=0.0),
         ):
-            _value, out, _err = quiet_run(lambda: self.repl._cmd_model("qwen3b"))
+            _value, out, _err = quiet_run(lambda: self.repl._cmd_model("hymt"))
         stop.assert_called_once()
         start.assert_called_once()
-        self.assertEqual(self.repl.model.id, "qwen3b")
+        self.assertEqual(self.repl.model.id, "hymt")
         self.assertIsNotNone(self.repl.client)
         self.assertIsNotNone(self.repl.chat_runner)
         self.assertIn("已切换", out)

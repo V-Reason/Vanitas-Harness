@@ -88,13 +88,16 @@ class Session:
         if not self.task:
             # 无任务模板时仍注入秒级运行时信息；有模板时由模板的 {date} 负责。
             return prompts.render("当前时间：{date}\n\n{input}", {"input": text})
+        # bat 会先 cd 到仓库根以保证 python -m vanitas 可导入；原 CWD 由
+        # VANITAS_ORIG_CWD 透传，优先于调用方传入值和进程 CWD。
+        cwd = os.environ.get("VANITAS_ORIG_CWD") or cwd or os.getcwd()
         template = prompts.load_task(prompt_dir, self.task)
         return prompts.render(
             template,
             {
                 "input": text,
                 "model": model_alias,
-                "cwd": cwd if cwd is not None else os.getcwd(),
+                "cwd": cwd,
             },
         )
 

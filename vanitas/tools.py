@@ -376,7 +376,16 @@ class AgentTools:
 
     def __init__(self, config: AppConfig, root: Path | None = None) -> None:
         self.config = config
-        self.root = Path(root).expanduser().resolve() if root is not None else Path.cwd().resolve()
+        if root is not None:
+            self.root = Path(root).expanduser().resolve()
+        else:
+            # bat 为导入包会 cd 到仓库根；Agent 沙盒必须回到用户原 CWD。
+            original = os.environ.get("VANITAS_ORIG_CWD")
+            self.root = (
+                Path(original).expanduser().resolve()
+                if original
+                else Path.cwd().resolve()
+            )
         if self.root.parent == self.root:
             raise ToolDenied("安全限制：工作目录不能是磁盘根目录")
 

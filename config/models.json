@@ -47,22 +47,6 @@
         "3": {"ctx": 4096, "kv_k": "f16", "kv_v": "f16", "desc": "4K + F16（需空闲 ≥7.2G）"}
       },
       "default_profile": "1"
-    },
-    {
-      "id": "qwen3b",
-      "display": "Qwen2.5-3B Q4_K_M",
-      "path": "models/qwen2.5-3b-instruct-q4_k_m.gguf",
-      "port": 4063,
-      "alias": "qwen2.5-3b-instruct-q4_k_m",
-      "shards": 1,
-      "role": "baseline",
-      "template_kwargs": {"enable_thinking": false},
-      "repeat_penalty": 1.1,
-      "profiles": {
-        "1": {"ctx": 8192, "kv_k": "q4_0", "kv_v": "q4_0", "desc": "8K + Q4_0 KV（默认）"},
-        "2": {"ctx": 4096, "kv_k": "f16", "kv_v": "f16", "desc": "4K + F16"}
-      },
-      "default_profile": "1"
     }
   ]
 }

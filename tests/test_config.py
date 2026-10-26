@@ -68,10 +68,10 @@ class ConfigTests(unittest.TestCase):
     def test_repo_config_loads(self) -> None:
         with clean_env():
             config = load_config()
-        self.assertEqual(len(config.models), 4)
+        self.assertEqual(len(config.models), 3)
         self.assertEqual(
             [config.effective_port(model) for model in config.models],
-            [4060, 4061, 4062, 4063],
+            [4060, 4061, 4062],
         )
         qwen = config.model("qwen7b")
         self.assertEqual(qwen.shards, 2)
@@ -81,7 +81,6 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.model_by_role("translate").id, "hymt")
         self.assertTrue(config.models[0].template_kwargs["enable_thinking"] is False)
         self.assertEqual(qwen.repeat_penalty, 1.0)
-        self.assertEqual(config.model("qwen3b").repeat_penalty, 1.1)
 
     def test_defaults_come_from_settings(self) -> None:
         with clean_env():
@@ -121,7 +120,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.settings.translate.monitor_lines, 5)
 
     def test_repeat_penalty_below_one_rejected(self) -> None:
-        self.models["models"][3]["repeat_penalty"] = 0.9
+        self.models["models"][0]["repeat_penalty"] = 0.9
         self.write_models()
         with clean_env():
             with self.assertRaises(ConfigError):
