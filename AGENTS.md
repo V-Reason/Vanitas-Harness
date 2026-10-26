@@ -108,7 +108,7 @@
 # 1) 语法
 Get-ChildItem vanitas\*.py, tests\test_*.py | ForEach-Object { python -m py_compile $_.FullName }
 
-# 2) 单测（当前 282 例）
+# 2) 单测（当前 300 例）
 python -m unittest discover -s tests
 python -m unittest tests.test_agent_parser
 
@@ -148,7 +148,7 @@ python -m vanitas stop
 - `vanitas agent` 的默认入口、`{cwd}` 注入、只读列目录不确认、批量 `move_file` 清单与一次 `[y/N]`、三连输入不触发上下文裁剪、最终答复流式（实测 111 次写入）、解释文字后的尾部动作 JSON、`run_shell_ro` 拒绝写命令、工作区外读取拦截均已用 qwen7b 真机冒烟；工具调用已改为 `<tool_call>` 标签优先，`raw_decode`/栈平衡兜底与 `<tool_result>` 反馈由单测覆盖；qwen7b 已真机输出 `<tool_call>` 数组并一次确认创建 `a.txt`/`b.txt`。真实终端 `[y/N]` 观感、真实删除、模型在 shell 被拒后自动改用 `move_file`，以及 `max_steps` 耗尽提示仍未验收。
 - `exec_whitelist` 已退役；Agent 的步数/批量/反馈/审批在 `settings.agent`，文件限制、只读 Shell、`/exec` 前缀与写参数拦截在 `settings.tools`。配置可调整策略，但破坏性命令与写参数黑名单的安全底线只能追加、不能删除。
 - Agent 路径约束是参数级沙盒，不是 OS 级隔离；程序内部自行写文件仍需人工判断。
-- 混合换行的 `.srt` 会静默产出 `0 段`（已定位未修，见现状第 5 节）。
+- 混合换行的 `.srt` 已修复：`parse_srt` 使用 `splitlines()`，`rebuild_srt` 统一目标 EOL（见现状第 17 节）。
 - HY-MT2 显存余量约 500 MiB，是本机最紧的模型。
 - 完整清单与取证见 [docs/项目现状.md](docs/项目现状.md) 第 5、6 节；不得把未验证项写成已结论。
 
