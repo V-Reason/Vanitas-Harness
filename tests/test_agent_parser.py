@@ -179,6 +179,27 @@ class ParseActionsTests(unittest.TestCase):
                 action_aliases={},
             )
 
+    def test_minicpm_function_xml_with_cdata(self) -> None:
+        raw = (
+            '<function name="write_file">'
+            '<param name="path">a.py</param>'
+            '<param name="content"><![CDATA[import json\nprint("ok")]]></param>'
+            "</function>"
+        )
+        calls = agent.extract_tool_calls(raw)
+        self.assertEqual(calls[0]["action"], "write_file")  # type: ignore[index]
+        self.assertEqual(calls[0]["parameters"]["path"], "a.py")  # type: ignore[index]
+        self.assertEqual(
+            calls[0]["parameters"]["content"],  # type: ignore[index]
+            'import json\nprint("ok")',
+        )
+        actions = parse_actions(raw)
+        self.assertEqual(actions[0].name, "write_file")  # type: ignore[index]
+        self.assertEqual(
+            actions[0].parameters["content"],  # type: ignore[index]
+            'import json\nprint("ok")',
+        )
+
 
 class TaggedStreamTests(unittest.TestCase):
     def test_pure_tag_is_not_emitted(self) -> None:
@@ -219,6 +240,25 @@ class TaggedStreamTests(unittest.TestCase):
                 stream.write(chunk)
         self.assertEqual(out.getvalue(), "")
         self.assertTrue(stream.suppressed)
+
+    def test_function_xml_is_suppressed(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            stream = agent._AgentAnswerStream()
+            stream.write('前文\n<function name="read_file">')
+            stream.write('<param name="path">a.txt</param>')
+            self.assertTrue(stream.suppressed)
+            stream.write("</function>\n后文")
+        value = out.getvalue()
+        self.assertIn("前文", value)
+        self.assertIn("后文", value)
+        self.assertNotIn("<function", value)
+
+        results = io.StringIO()
+        with contextlib.redirect_stdout(results):
+            stream = agent._AgentAnswerStream()
+            stream.write("<function_results>ok</function_results>完成")
+        self.assertEqual(results.getvalue(), "完成")
 
     def test_legacy_line_start_json_is_suppressed(self) -> None:
         out = io.StringIO()
