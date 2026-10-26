@@ -19,7 +19,7 @@ class LlamaClient(EngineClient):
         messages: list[dict],
         *,
         max_tokens: int,
-        temperature: float = 0.2,
+        temperature: float,
         timeout: float | None = None,
         on_progress: Callable[[dict], None] | None = None,
     ) -> Iterator[dict]:
@@ -37,7 +37,7 @@ class LlamaClient(EngineClient):
         *,
         system: str | None = None,
         max_tokens: int,
-        temperature: float = 0.2,
+        temperature: float,
         timeout: float | None = None,
         on_progress: Callable[[dict], None] | None = None,
     ) -> Iterator[dict]:

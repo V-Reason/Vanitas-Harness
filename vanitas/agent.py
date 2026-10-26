@@ -16,20 +16,14 @@ import sys
 from dataclasses import dataclass
 from typing import Callable
 
-from .config import AppConfig, ModelSpec
+from .config import AGENT_ACTION_NAMES, AppConfig, ModelSpec
 from .errors import ToolDenied
 from .render import format_text
 from .repl import Repl
 from .tools import AgentTools, ExecResult
 from .ui import Palette
 
-DEFAULT_MAX_STEPS = 5
-MAX_FEEDBACK_CHARS = 8000
-MAX_BATCH_ACTIONS = 100
-AUTO_ACTIONS = frozenset({"read_file", "list_dir", "run_shell_ro"})
-CONFIRM_ACTIONS = frozenset({"write_file", "delete_file", "move_file"})
-ACTION_NAMES = AUTO_ACTIONS | CONFIRM_ACTIONS
-_ACTION_ALIASES = {"shell": "run_shell_ro"}
+ACTION_NAMES = AGENT_ACTION_NAMES
 _JSON_PATH_VALUE_RE = re.compile(
     r'("(?:path|src|dst|source|dest|destination|file|files|command)"\s*:\s*")'
     r'((?:[^"\\]|\\.)*)(")',
@@ -58,8 +52,8 @@ def _require_text(params: dict, key: str) -> str:
     return value.strip()
 
 
-def _build_action(name: str, params: dict) -> AgentAction:
-    name = _ACTION_ALIASES.get(name, name)
+def _build_action(name: str, params: dict, aliases: dict[str, str]) -> AgentAction:
+    name = aliases.get(name, name)
     if name not in ACTION_NAMES:
         raise ValueError(f"未知动作：{name!r}")
     if name == "read_file":
@@ -93,7 +87,9 @@ def _build_action(name: str, params: dict) -> AgentAction:
     )
 
 
-def _action_from_payload(payload: object) -> AgentAction:
+def _action_from_payload(
+    payload: object, aliases: dict[str, str]
+) -> AgentAction:
     if not isinstance(payload, dict):
         raise ValueError("每个动作必须是 JSON 对象")
     if "action" not in payload:
@@ -104,7 +100,7 @@ def _action_from_payload(payload: object) -> AgentAction:
     raw_params = payload.get("parameters", {})
     if not isinstance(raw_params, dict):
         raise ValueError("parameters 必须是 JSON 对象")
-    return _build_action(name.strip(), raw_params)
+    return _build_action(name.strip(), raw_params, aliases)
 
 
 def _escape_path_backslashes(value: str) -> str:
@@ -367,7 +363,12 @@ def _looks_like_action_attempt(text: str) -> bool:
     return '"action"' in text
 
 
-def _parse_actions(text: str) -> list[AgentAction] | None:
+def _parse_actions(
+    text: str,
+    *,
+    max_batch_actions: int,
+    action_aliases: dict[str, str],
+) -> list[AgentAction] | None:
     """解析标签化/裸 JSON 动作；无法识别时回落到最终自然语言。"""
     stripped = text.strip()
     if not stripped:
@@ -381,14 +382,25 @@ def _parse_actions(text: str) -> list[AgentAction] | None:
         return None
     if not payloads:
         raise ValueError("动作数组不能为空")
-    if len(payloads) > MAX_BATCH_ACTIONS:
-        raise ValueError(f"单次最多 {MAX_BATCH_ACTIONS} 个动作")
-    return [_action_from_payload(item) for item in payloads]
+    if len(payloads) > max_batch_actions:
+        raise ValueError(f"单次最多 {max_batch_actions} 个动作")
+    return [
+        _action_from_payload(item, action_aliases) for item in payloads
+    ]
 
 
-def _parse_action(text: str) -> AgentAction | None:
+def _parse_action(
+    text: str,
+    *,
+    max_batch_actions: int,
+    action_aliases: dict[str, str],
+) -> AgentAction | None:
     """兼容旧调用：只接受单动作；批量必须走 `_parse_actions`。"""
-    actions = _parse_actions(text)
+    actions = _parse_actions(
+        text,
+        max_batch_actions=max_batch_actions,
+        action_aliases=action_aliases,
+    )
     if actions is None:
         return None
     if len(actions) != 1:
@@ -428,17 +440,18 @@ def _describe(action: AgentAction) -> str:
     return f"将删除文件 {action.parameters['path']}"
 
 
-def _needs_confirmation(actions: list[AgentAction]) -> bool:
-    # 只读动作（含只读数组）直接执行；只有写/删/移动才确认。
-    # 批量清单仍由 _confirm_actions 汇总，只要数组里有一个修改动作就只问一次。
-    return any(action.name in CONFIRM_ACTIONS for action in actions)
+def _needs_confirmation(
+    actions: list[AgentAction], confirm_actions: frozenset[str]
+) -> bool:
+    # 审批策略来自 settings.agent；批量里有一个确认动作就只问一次。
+    return any(action.name in confirm_actions for action in actions)
 
 
-def _clip_feedback(text: str) -> str:
-    if len(text) <= MAX_FEEDBACK_CHARS:
+def _clip_feedback(text: str, limit: int) -> str:
+    if len(text) <= limit:
         return text
-    omitted = len(text) - MAX_FEEDBACK_CHARS
-    return text[:MAX_FEEDBACK_CHARS] + f"\n…已截断 {omitted} 字符"
+    omitted = len(text) - limit
+    return text[:limit] + f"\n…已截断 {omitted} 字符"
 
 
 class _AgentAnswerStream:
@@ -598,7 +611,7 @@ class AgentRepl(Repl):
         palette: Palette | None = None,
         verbose: bool = False,
         tools: AgentTools | None = None,
-        max_steps: int = DEFAULT_MAX_STEPS,
+        max_steps: int | None = None,
         confirm: Callable[[str], bool] | None = None,
     ) -> None:
         super().__init__(
@@ -610,7 +623,10 @@ class AgentRepl(Repl):
             verbose=verbose,
         )
         self.agent_tools = tools or AgentTools(config)
-        self.max_steps = max(1, int(max_steps))
+        configured_steps = (
+            config.settings.agent.max_steps if max_steps is None else max_steps
+        )
+        self.max_steps = max(1, int(configured_steps))
         self._confirm = confirm
 
     def _chat(self, text: str) -> None:
@@ -621,7 +637,11 @@ class AgentRepl(Repl):
         steps = 0
         while True:
             try:
-                actions = _parse_actions(result.text)
+                actions = _parse_actions(
+                    result.text,
+                    max_batch_actions=self.config.settings.agent.max_batch_actions,
+                    action_aliases=self.config.settings.agent.action_aliases,
+                )
             except ValueError as exc:
                 print(self.palette.err(str(exc)), file=sys.stderr)
                 return
@@ -635,7 +655,9 @@ class AgentRepl(Repl):
                 print(self.palette.warn(f"已达最大步数 {self.max_steps}"))
                 return
 
-            if _needs_confirmation(actions):
+            if _needs_confirmation(
+                actions, self.config.settings.agent.confirm_actions
+            ):
                 if not self._confirm_actions(actions):
                     print(self.palette.meta("已取消"))
                     return
@@ -705,7 +727,9 @@ class AgentRepl(Repl):
                 lines.append(f"{index}. {status}：{_summary(action)}")
                 lines.append(f"   {detail.rstrip()}")
             body = "\n".join(lines)
-        clipped = _clip_feedback(body)
+        clipped = _clip_feedback(
+            body, self.config.settings.agent.max_feedback_chars
+        )
         return f"<tool_result>\n{clipped}\n</tool_result>"
 
     def _execute(self, action: AgentAction) -> tuple[bool, str]:
@@ -754,7 +778,7 @@ def run_agent(
     system: str | None = None,
     palette: Palette | None = None,
     verbose: bool = False,
-    max_steps: int = DEFAULT_MAX_STEPS,
+    max_steps: int | None = None,
     tools: AgentTools | None = None,
     confirm: Callable[[str], bool] | None = None,
 ) -> int:

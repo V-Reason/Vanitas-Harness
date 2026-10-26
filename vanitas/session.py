@@ -20,15 +20,6 @@ from .metrics import MESSAGE_OVERHEAD, context_budget, estimate_tokens
 # `from vanitas.session import estimate_tokens` 用法。
 __all__ = ["Session", "context_budget", "default_save_path", "estimate_tokens"]
 
-# Agent 的首轮消息已经带入完整 task_agent 契约；后续用户输入只需短提醒，
-# 否则每轮重复 1,450 tokens 的模板会在 4K 档位下很快触发上下文裁剪。
-_AGENT_CONTINUATION = (
-    "【Agent 继续】沿用当前工具契约；需要工具时只输出 "
-    "<tool_call>[...]</tool_call>，普通文本表示完成。\n"
-    "当前工作目录：{cwd}\n任务：\n{input}"
-)
-
-
 @dataclass
 class Session:
     model_id: str = ""
@@ -99,10 +90,10 @@ class Session:
         # bat 会先 cd 到仓库根以保证 python -m vanitas 可导入；原 CWD 由
         # VANITAS_ORIG_CWD 透传，优先于调用方传入值和进程 CWD。
         cwd = os.environ.get("VANITAS_ORIG_CWD") or cwd or os.getcwd()
-        # Agent 首轮使用完整模板；已有历史后只带短提醒。完整契约仍在首轮
-        # 消息与历史里，不需要每轮重复 1,450 tokens。
+        # Agent 首轮使用完整模板；已有历史后只带 prompts/agent_continue.md
+        # 的短提醒。完整契约仍在首轮消息与历史里。
         template = (
-            _AGENT_CONTINUATION
+            prompts.load_template(prompt_dir, "agent_continue")
             if self.task == "agent" and self.messages
             else prompts.load_task(prompt_dir, self.task)
         )

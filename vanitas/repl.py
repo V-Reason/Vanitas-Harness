@@ -295,7 +295,7 @@ class Repl:
         target_port = port if port is not None else self.config.effective_port(model)
         client = LlamaClient.for_model(self.config, model, target_port)
         try:
-            if not client.health(timeout=2.0):
+            if not client.health():
                 return None
             if model.alias not in client.model_ids():
                 return None
@@ -730,7 +730,7 @@ class Repl:
                     f"待生效档位 {self.pending_profile.key} · {self.pending_profile.desc}"
                 )
             )
-        ready = bool(self.client and self.client.health(timeout=2.0))
+        ready = bool(self.client and self.client.health())
         state = self.palette.ok("就绪") if ready else self.palette.err("停止")
         head = self.palette.meta(f"端口 {self.port}")
         print(f"{head}  {state}")

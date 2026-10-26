@@ -6,6 +6,7 @@ import contextlib
 import io
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +66,24 @@ class ChatRunnerTests(unittest.TestCase):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             result = runner.run("hi")
         return result, out.getvalue(), err.getvalue()
+
+    def test_temperature_comes_from_settings(self) -> None:
+        self.config = replace(
+            self.config,
+            settings=replace(
+                self.config.settings,
+                chat=replace(self.config.settings.chat, temperature=0.9),
+            ),
+        )
+        client = FakeClient(
+            [
+                {"type": "delta", "content": "ok"},
+                {"type": "done", "tokens": 1, "tps": 1.0, "finish_reason": "stop"},
+            ]
+        )
+        runner = self.make_runner(client)
+        self.run_turn(runner)
+        self.assertEqual(client.calls[0]["temperature"], 0.9)
 
     def test_usage_metrics_and_history(self) -> None:
         client = FakeClient(

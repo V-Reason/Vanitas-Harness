@@ -97,6 +97,24 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.settings.tools.exec_enabled)
         self.assertTrue(config.settings.tools.exec_require_confirm)
         self.assertFalse(hasattr(config.settings.tools, "exec_whitelist"))
+        self.assertEqual(config.settings.chat.temperature, 0.2)
+        self.assertEqual(config.settings.agent.max_steps, 10)
+        self.assertEqual(config.settings.agent.max_batch_actions, 100)
+        self.assertEqual(config.settings.agent.max_feedback_chars, 8000)
+        self.assertEqual(config.settings.agent.confirm_actions, frozenset(
+            {"write_file", "delete_file", "move_file"}
+        ))
+        self.assertEqual(config.settings.agent.action_aliases["shell"], "run_shell_ro")
+        self.assertEqual(config.settings.tools.max_read_bytes, 262144)
+        self.assertEqual(config.settings.tools.max_list_entries, 200)
+        self.assertEqual(config.settings.tools.move_illegal_chars, '#<>"|?*')
+        self.assertIn("git status", config.settings.tools.manual_exec_prefixes)
+        self.assertIn("del", config.settings.tools.destructive_commands)
+        self.assertEqual(config.settings.batch.max_tokens_limit, 8192)
+        self.assertEqual(config.settings.translate.max_split_depth, 3)
+        self.assertEqual(config.settings.request.progress_interval_ms, 200)
+        self.assertEqual(config.settings.launcher.log_tail_lines, 15)
+        self.assertEqual(config.settings.ui.spinner_interval_ms, 300)
 
     def test_new_budget_fields_are_optional(self) -> None:
         del self.settings["repl"]["context_reserve_tokens"]
@@ -118,6 +136,119 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.settings.translate.output_ratio, 2.5)
         self.assertEqual(config.settings.translate.prompt_safety_tokens, 64)
         self.assertEqual(config.settings.translate.monitor_lines, 5)
+
+    def test_new_operational_fields_are_optional(self) -> None:
+        for section in ("chat", "agent", "batch"):
+            del self.settings[section]
+        for key in (
+            "health_timeout_sec",
+            "status_probe_timeout_sec",
+            "progress_interval_ms",
+        ):
+            del self.settings["request"][key]
+        del self.settings["launcher"]["log_tail_lines"]
+        for key in (
+            "max_read_bytes",
+            "max_list_entries",
+            "move_illegal_chars",
+            "manual_exec_prefixes",
+            "destructive_commands",
+            "readonly_shell_prefixes",
+            "readonly_blocked_flags",
+            "readonly_blocked_prefixes",
+            "git_blocked_options",
+            "git_blocked_prefixes",
+        ):
+            del self.settings["tools"][key]
+        for key in ("temperature", "max_split_depth"):
+            del self.settings["translate"][key]
+        del self.settings["ui"]["spinner_interval_ms"]
+        self.write_settings()
+        with clean_env():
+            config = self.load()
+        self.assertEqual(config.settings.agent.max_steps, 10)
+        self.assertEqual(config.settings.chat.temperature, 0.2)
+        self.assertEqual(config.settings.batch.max_tokens_limit, 8192)
+        self.assertEqual(config.settings.tools.max_read_bytes, 262144)
+        self.assertEqual(config.settings.translate.max_split_depth, 3)
+        self.assertEqual(config.settings.request.health_timeout_sec, 3.0)
+        self.assertEqual(config.settings.launcher.log_tail_lines, 15)
+        self.assertEqual(config.settings.ui.spinner_interval_ms, 300)
+
+    def test_agent_action_policy_must_cover_all_actions(self) -> None:
+        self.settings["agent"]["confirm_actions"].remove("delete_file")
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError) as ctx:
+                self.load()
+        self.assertIn("缺少动作", str(ctx.exception))
+
+    def test_agent_action_policy_rejects_overlap_and_unknown(self) -> None:
+        self.settings["agent"]["auto_actions"].append("write_file")
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError) as ctx:
+                self.load()
+        self.assertIn("重叠", str(ctx.exception))
+
+        self.settings["agent"]["auto_actions"].remove("write_file")
+        self.settings["agent"]["auto_actions"].append("not_an_action")
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError) as ctx:
+                self.load()
+        self.assertIn("未知动作", str(ctx.exception))
+
+    def test_agent_alias_and_limits_are_validated(self) -> None:
+        self.settings["agent"]["max_steps"] = 0
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError):
+                self.load()
+
+        self.settings["agent"]["max_steps"] = 10
+        self.settings["agent"]["action_aliases"]["shell"] = "nope"
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError):
+                self.load()
+
+    def test_batch_and_temperature_limits_are_validated(self) -> None:
+        self.settings["batch"]["default_max_tokens"] = 9000
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError) as ctx:
+                self.load()
+        self.assertIn("不能大于", str(ctx.exception))
+
+        self.settings["batch"]["default_max_tokens"] = 512
+        self.settings["chat"]["temperature"] = 3.0
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError):
+                self.load()
+
+    def test_security_floor_cannot_be_removed(self) -> None:
+        self.settings["tools"]["destructive_commands"].remove("del")
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError) as ctx:
+                self.load()
+        self.assertIn("安全底线", str(ctx.exception))
+
+    def test_tool_list_and_move_chars_validated(self) -> None:
+        self.settings["tools"]["manual_exec_prefixes"] = []
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError):
+                self.load()
+
+        self.settings["tools"]["manual_exec_prefixes"] = ["echo"]
+        self.settings["tools"]["move_illegal_chars"] = 1
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError):
+                self.load()
 
     def test_repeat_penalty_below_one_rejected(self) -> None:
         self.models["models"][0]["repeat_penalty"] = 0.9

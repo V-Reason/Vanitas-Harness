@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .errors import ConfigError
@@ -37,13 +37,38 @@ MODEL_FIELDS = frozenset(
 )
 PROFILE_FIELDS = frozenset({"ctx", "kv_k", "kv_v", "desc"})
 SETTINGS_FIELDS = frozenset(
-    {"version", "host", "request", "launcher", "repl", "tools", "translate", "ui"}
+    {
+        "version",
+        "host",
+        "request",
+        "launcher",
+        "repl",
+        "chat",
+        "agent",
+        "tools",
+        "batch",
+        "translate",
+        "ui",
+    }
 )
 REQUEST_FIELDS = frozenset(
-    {"timeout_sec", "max_retries", "backoff_base_ms", "backoff_jitter_ms"}
+    {
+        "timeout_sec",
+        "max_retries",
+        "backoff_base_ms",
+        "backoff_jitter_ms",
+        "health_timeout_sec",
+        "status_probe_timeout_sec",
+        "progress_interval_ms",
+    }
 )
 LAUNCHER_FIELDS = frozenset(
-    {"health_timeout_sec", "health_poll_interval_ms", "kill_wait_sec"}
+    {
+        "health_timeout_sec",
+        "health_poll_interval_ms",
+        "kill_wait_sec",
+        "log_tail_lines",
+    }
 )
 REPL_FIELDS = frozenset(
     {
@@ -54,7 +79,36 @@ REPL_FIELDS = frozenset(
         "min_output_tokens",
     }
 )
-TOOLS_FIELDS = frozenset({"exec_enabled", "exec_require_confirm"})
+CHAT_FIELDS = frozenset({"temperature"})
+AGENT_FIELDS = frozenset(
+    {
+        "max_steps",
+        "max_batch_actions",
+        "max_feedback_chars",
+        "auto_actions",
+        "confirm_actions",
+        "action_aliases",
+    }
+)
+TOOLS_FIELDS = frozenset(
+    {
+        "exec_enabled",
+        "exec_require_confirm",
+        "max_read_bytes",
+        "max_list_entries",
+        "move_illegal_chars",
+        "manual_exec_prefixes",
+        "destructive_commands",
+        "readonly_shell_prefixes",
+        "readonly_blocked_flags",
+        "readonly_blocked_prefixes",
+        "git_blocked_options",
+        "git_blocked_prefixes",
+    }
+)
+BATCH_FIELDS = frozenset(
+    {"default_max_tokens", "max_tokens_limit", "temperature"}
+)
 TRANSLATE_FIELDS = frozenset(
     {
         "source_suffixes",
@@ -66,9 +120,11 @@ TRANSLATE_FIELDS = frozenset(
         "output_ratio",
         "prompt_safety_tokens",
         "monitor_lines",
+        "temperature",
+        "max_split_depth",
     }
 )
-UI_FIELDS = frozenset({"color", "theme"})
+UI_FIELDS = frozenset({"color", "spinner_interval_ms", "theme"})
 THEME_KEYS = frozenset({"prompt", "success", "error", "warn", "info", "muted", "accent"})
 COLOR_MODES = frozenset({"auto", "always", "never"})
 # 与 vanitas/ui.py::COLOR_NAMES 逐字一致。刻意本地再定义一份：config 是最底层，
@@ -103,6 +159,100 @@ DEFAULT_THEME = {
     "muted": "bright_black",
     "accent": "magenta",
 }
+
+# Agent 动作 schema 是固定协议；settings 只能调整审批策略和别名，不能新增动作。
+AGENT_ACTION_NAMES = frozenset(
+    {"read_file", "list_dir", "run_shell_ro", "write_file", "delete_file", "move_file"}
+)
+DEFAULT_AUTO_ACTIONS = frozenset({"read_file", "list_dir", "run_shell_ro"})
+DEFAULT_CONFIRM_ACTIONS = frozenset({"write_file", "delete_file", "move_file"})
+DEFAULT_ACTION_ALIASES = {"shell": "run_shell_ro"}
+
+DEFAULT_MANUAL_EXEC_PREFIXES = (
+    "echo",
+    "dir",
+    "type",
+    "python --version",
+    "git status",
+    "git log",
+    "git diff",
+    "del",
+    "erase",
+    "ren",
+    "rename",
+    "copy",
+    "move",
+)
+CORE_DESTRUCTIVE_COMMANDS = frozenset(
+    {
+        "del",
+        "erase",
+        "rd",
+        "rmdir",
+        "rm",
+        "mv",
+        "move",
+        "ren",
+        "rename",
+        "copy",
+        "xcopy",
+        "robocopy",
+        "mkdir",
+        "md",
+        "format",
+    }
+)
+DEFAULT_READONLY_SHELL_PREFIXES = frozenset(
+    {
+        "dir",
+        "ls",
+        "type",
+        "cat",
+        "echo",
+        "findstr",
+        "find",
+        "pwd",
+        "where",
+        "head",
+        "tail",
+        "wc",
+        "grep",
+        "git status",
+        "git log",
+        "git diff",
+        "git show",
+        "git rev-parse",
+    }
+)
+CORE_READONLY_BLOCKED_FLAGS = frozenset(
+    {"-o", "-delete", "-fls", "-ok", "-okdir"}
+)
+CORE_READONLY_BLOCKED_PREFIXES = (
+    "-exec",
+    "--output",
+    "-fprint",
+    "-fprintf",
+)
+CORE_GIT_BLOCKED_OPTIONS = frozenset(
+    {
+        "-c",
+        "-C",
+        "--git-dir",
+        "--work-tree",
+        "--exec-path",
+        "--namespace",
+        "--no-index",
+        "--output",
+    }
+)
+CORE_GIT_BLOCKED_PREFIXES = (
+    "-c",
+    "-C",
+    "--git-dir=",
+    "--work-tree=",
+    "--exec-path=",
+)
+DEFAULT_MOVE_ILLEGAL_CHARS = '#<>"|?*'
 
 
 @dataclass(frozen=True)
@@ -139,6 +289,9 @@ class RequestSettings:
     max_retries: int
     backoff_base_ms: int
     backoff_jitter_ms: int
+    health_timeout_sec: float = 3.0
+    status_probe_timeout_sec: float = 0.6
+    progress_interval_ms: int = 200
 
 
 @dataclass(frozen=True)
@@ -146,6 +299,7 @@ class LauncherSettings:
     health_timeout_sec: float
     health_poll_interval_ms: int
     kill_wait_sec: float
+    log_tail_lines: int = 15
 
 
 @dataclass(frozen=True)
@@ -158,11 +312,43 @@ class ReplSettings:
 
 
 @dataclass(frozen=True)
+class ChatSettings:
+    temperature: float = 0.2
+
+
+@dataclass(frozen=True)
+class AgentSettings:
+    max_steps: int = 10
+    max_batch_actions: int = 100
+    max_feedback_chars: int = 8000
+    auto_actions: frozenset[str] = DEFAULT_AUTO_ACTIONS
+    confirm_actions: frozenset[str] = DEFAULT_CONFIRM_ACTIONS
+    action_aliases: dict[str, str] = field(
+        default_factory=lambda: dict(DEFAULT_ACTION_ALIASES)
+    )
+
+
+@dataclass(frozen=True)
+class BatchSettings:
+    default_max_tokens: int = 512
+    max_tokens_limit: int = 8192
+    temperature: float = 0.2
+
+
+@dataclass(frozen=True)
 class ToolsSettings:
-    # `exec_whitelist` 已退役：Agent 的只读权限全部在 tools.py 硬编码，
-    # `/exec` 只保留兼容前缀 + 手动确认。
     exec_enabled: bool
     exec_require_confirm: bool
+    max_read_bytes: int = 256 * 1024
+    max_list_entries: int = 200
+    move_illegal_chars: str = DEFAULT_MOVE_ILLEGAL_CHARS
+    manual_exec_prefixes: tuple[str, ...] = DEFAULT_MANUAL_EXEC_PREFIXES
+    destructive_commands: frozenset[str] = CORE_DESTRUCTIVE_COMMANDS
+    readonly_shell_prefixes: frozenset[str] = DEFAULT_READONLY_SHELL_PREFIXES
+    readonly_blocked_flags: frozenset[str] = CORE_READONLY_BLOCKED_FLAGS
+    readonly_blocked_prefixes: tuple[str, ...] = CORE_READONLY_BLOCKED_PREFIXES
+    git_blocked_options: frozenset[str] = CORE_GIT_BLOCKED_OPTIONS
+    git_blocked_prefixes: tuple[str, ...] = CORE_GIT_BLOCKED_PREFIXES
 
 
 @dataclass(frozen=True)
@@ -176,6 +362,8 @@ class TranslateSettings:
     output_ratio: float = 2.5
     prompt_safety_tokens: int = 64
     monitor_lines: int = 5
+    temperature: float = 0.2
+    max_split_depth: int = 3
 
 
 @dataclass(frozen=True)
@@ -193,10 +381,15 @@ class UiTheme:
 class UiSettings:
     color: str
     theme: UiTheme
+    spinner_interval_ms: int = 300
 
 
 def _default_ui() -> UiSettings:
-    return UiSettings(color="auto", theme=UiTheme(**DEFAULT_THEME))
+    return UiSettings(
+        color="auto",
+        theme=UiTheme(**DEFAULT_THEME),
+        spinner_interval_ms=300,
+    )
 
 
 @dataclass(frozen=True)
@@ -206,7 +399,10 @@ class Settings:
     request: RequestSettings
     launcher: LauncherSettings
     repl: ReplSettings
+    chat: ChatSettings
+    agent: AgentSettings
     tools: ToolsSettings
+    batch: BatchSettings
     translate: TranslateSettings
     ui: UiSettings
 
@@ -288,13 +484,79 @@ def _as_int(mapping: dict, key: str, label: str, minimum: int | None = None,
     return value
 
 
-def _as_number(mapping: dict, key: str, label: str, minimum: float = 0.0) -> float:
+def _as_number(
+    mapping: dict,
+    key: str,
+    label: str,
+    minimum: float = 0.0,
+    maximum: float | None = None,
+) -> float:
     value = mapping.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         _fail(f"{label}.{key}", f"必须是数字，实际为 {value!r}")
     if value < minimum:
         _fail(f"{label}.{key}", f"必须 ≥ {minimum}，实际为 {value}")
+    if maximum is not None and value > maximum:
+        _fail(f"{label}.{key}", f"必须 ≤ {maximum}，实际为 {value}")
     return float(value)
+
+
+def _as_optional_int(
+    mapping: dict,
+    key: str,
+    label: str,
+    default: int,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    if key not in mapping:
+        return default
+    return _as_int(mapping, key, label, minimum=minimum, maximum=maximum)
+
+
+def _as_optional_number(
+    mapping: dict,
+    key: str,
+    label: str,
+    default: float,
+    minimum: float = 0.0,
+    maximum: float | None = None,
+) -> float:
+    if key not in mapping:
+        return default
+    return _as_number(
+        mapping, key, label, minimum=minimum, maximum=maximum
+    )
+
+
+def _as_str_list(
+    mapping: dict,
+    key: str,
+    label: str,
+    default: tuple[str, ...],
+) -> tuple[str, ...]:
+    raw = mapping.get(key, list(default))
+    if not isinstance(raw, list) or not raw:
+        _fail(f"{label}.{key}", "必须是非空字符串数组")
+    cleaned: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            _fail(f"{label}.{key}", f"每项必须是非空字符串，实际为 {item!r}")
+        value = item.strip()
+        if value not in cleaned:
+            cleaned.append(value)
+    return tuple(cleaned)
+
+
+def _as_str_set(
+    mapping: dict,
+    key: str,
+    label: str,
+    default: frozenset[str],
+) -> frozenset[str]:
+    return frozenset(
+        _as_str_list(mapping, key, label, tuple(sorted(default)))
+    )
 
 
 def _as_bool(mapping: dict, key: str, label: str) -> bool:
@@ -302,6 +564,242 @@ def _as_bool(mapping: dict, key: str, label: str) -> bool:
     if not isinstance(value, bool):
         _fail(f"{label}.{key}", f"必须是布尔值，实际为 {value!r}")
     return value
+
+
+def _require_superset(
+    value: frozenset[str], required: frozenset[str], label: str
+) -> None:
+    missing = sorted(required - value)
+    if missing:
+        _fail(label, f"缺少安全底线条目 {missing}，只能追加，不能删除")
+
+
+def _load_agent(entry: object | None) -> "AgentSettings":
+    defaults = AgentSettings()
+    if entry is None:
+        return defaults
+    label = "settings.agent"
+    _as_mapping(entry, label)
+    _reject_unknown(entry, AGENT_FIELDS, label)
+    max_steps = _as_optional_int(
+        entry, "max_steps", label, defaults.max_steps, minimum=1, maximum=100
+    )
+    max_batch_actions = _as_optional_int(
+        entry,
+        "max_batch_actions",
+        label,
+        defaults.max_batch_actions,
+        minimum=1,
+        maximum=1000,
+    )
+    max_feedback_chars = _as_optional_int(
+        entry,
+        "max_feedback_chars",
+        label,
+        defaults.max_feedback_chars,
+        minimum=256,
+    )
+    auto_actions = frozenset(
+        _as_str_list(
+            entry,
+            "auto_actions",
+            label,
+            tuple(sorted(defaults.auto_actions)),
+        )
+    )
+    confirm_actions = frozenset(
+        _as_str_list(
+            entry,
+            "confirm_actions",
+            label,
+            tuple(sorted(defaults.confirm_actions)),
+        )
+    )
+    overlap = auto_actions & confirm_actions
+    if overlap:
+        _fail(label, f"auto_actions 与 confirm_actions 不能重叠：{sorted(overlap)}")
+    unknown = (auto_actions | confirm_actions) - AGENT_ACTION_NAMES
+    missing = AGENT_ACTION_NAMES - (auto_actions | confirm_actions)
+    if unknown:
+        _fail(label, f"包含未知动作：{sorted(unknown)}")
+    if missing:
+        _fail(label, f"审批策略缺少动作：{sorted(missing)}")
+
+    raw_aliases = entry.get("action_aliases", defaults.action_aliases)
+    if not isinstance(raw_aliases, dict):
+        _fail(f"{label}.action_aliases", "必须是 JSON 对象")
+    aliases: dict[str, str] = {}
+    for alias, target in raw_aliases.items():
+        if not isinstance(alias, str) or not alias.strip():
+            _fail(f"{label}.action_aliases", "别名必须是非空字符串")
+        if not isinstance(target, str) or target not in AGENT_ACTION_NAMES:
+            _fail(
+                f"{label}.action_aliases.{alias}",
+                f"目标必须是正式动作，实际为 {target!r}",
+            )
+        alias = alias.strip()
+        if alias in AGENT_ACTION_NAMES:
+            _fail(f"{label}.action_aliases", f"别名不能与正式动作同名：{alias!r}")
+        aliases[alias] = target
+    return AgentSettings(
+        max_steps=max_steps,
+        max_batch_actions=max_batch_actions,
+        max_feedback_chars=max_feedback_chars,
+        auto_actions=auto_actions,
+        confirm_actions=confirm_actions,
+        action_aliases=aliases,
+    )
+
+
+def _load_chat(entry: object | None) -> "ChatSettings":
+    defaults = ChatSettings()
+    if entry is None:
+        return defaults
+    label = "settings.chat"
+    _as_mapping(entry, label)
+    _reject_unknown(entry, CHAT_FIELDS, label)
+    return ChatSettings(
+        temperature=_as_optional_number(
+            entry,
+            "temperature",
+            label,
+            defaults.temperature,
+            minimum=0.0,
+            maximum=2.0,
+        )
+    )
+
+
+def _load_batch(entry: object | None) -> "BatchSettings":
+    defaults = BatchSettings()
+    if entry is None:
+        return defaults
+    label = "settings.batch"
+    _as_mapping(entry, label)
+    _reject_unknown(entry, BATCH_FIELDS, label)
+    default_max_tokens = _as_optional_int(
+        entry,
+        "default_max_tokens",
+        label,
+        defaults.default_max_tokens,
+        minimum=1,
+    )
+    max_tokens_limit = _as_optional_int(
+        entry,
+        "max_tokens_limit",
+        label,
+        defaults.max_tokens_limit,
+        minimum=1,
+    )
+    if default_max_tokens > max_tokens_limit:
+        _fail(
+            label,
+            "default_max_tokens 不能大于 max_tokens_limit",
+        )
+    return BatchSettings(
+        default_max_tokens=default_max_tokens,
+        max_tokens_limit=max_tokens_limit,
+        temperature=_as_optional_number(
+            entry,
+            "temperature",
+            label,
+            defaults.temperature,
+            minimum=0.0,
+            maximum=2.0,
+        ),
+    )
+
+
+def _load_tools(entry: object) -> "ToolsSettings":
+    label = "settings.tools"
+    _as_mapping(entry, label)
+    _reject_unknown(entry, TOOLS_FIELDS, label)
+    defaults = ToolsSettings(
+        exec_enabled=_as_bool(entry, "exec_enabled", label),
+        exec_require_confirm=_as_bool(entry, "exec_require_confirm", label),
+    )
+    max_read_bytes = _as_optional_int(
+        entry, "max_read_bytes", label, defaults.max_read_bytes, minimum=1
+    )
+    max_list_entries = _as_optional_int(
+        entry, "max_list_entries", label, defaults.max_list_entries, minimum=1
+    )
+    move_illegal_chars = entry.get(
+        "move_illegal_chars", defaults.move_illegal_chars
+    )
+    if not isinstance(move_illegal_chars, str):
+        _fail(f"{label}.move_illegal_chars", "必须是字符串")
+    destructive = _as_str_set(
+        entry,
+        "destructive_commands",
+        label,
+        CORE_DESTRUCTIVE_COMMANDS,
+    )
+    _require_superset(destructive, CORE_DESTRUCTIVE_COMMANDS, label)
+    readonly_blocked_flags = _as_str_set(
+        entry,
+        "readonly_blocked_flags",
+        label,
+        CORE_READONLY_BLOCKED_FLAGS,
+    )
+    _require_superset(
+        readonly_blocked_flags, CORE_READONLY_BLOCKED_FLAGS, label
+    )
+    readonly_blocked_prefixes = _as_str_list(
+        entry,
+        "readonly_blocked_prefixes",
+        label,
+        CORE_READONLY_BLOCKED_PREFIXES,
+    )
+    _require_superset(
+        frozenset(readonly_blocked_prefixes),
+        frozenset(CORE_READONLY_BLOCKED_PREFIXES),
+        label,
+    )
+    git_blocked_options = _as_str_set(
+        entry,
+        "git_blocked_options",
+        label,
+        CORE_GIT_BLOCKED_OPTIONS,
+    )
+    _require_superset(
+        git_blocked_options, CORE_GIT_BLOCKED_OPTIONS, label
+    )
+    git_blocked_prefixes = _as_str_list(
+        entry,
+        "git_blocked_prefixes",
+        label,
+        CORE_GIT_BLOCKED_PREFIXES,
+    )
+    _require_superset(
+        frozenset(git_blocked_prefixes),
+        frozenset(CORE_GIT_BLOCKED_PREFIXES),
+        label,
+    )
+    return ToolsSettings(
+        exec_enabled=defaults.exec_enabled,
+        exec_require_confirm=defaults.exec_require_confirm,
+        max_read_bytes=max_read_bytes,
+        max_list_entries=max_list_entries,
+        move_illegal_chars=move_illegal_chars,
+        manual_exec_prefixes=_as_str_list(
+            entry,
+            "manual_exec_prefixes",
+            label,
+            DEFAULT_MANUAL_EXEC_PREFIXES,
+        ),
+        destructive_commands=destructive,
+        readonly_shell_prefixes=_as_str_set(
+            entry,
+            "readonly_shell_prefixes",
+            label,
+            DEFAULT_READONLY_SHELL_PREFIXES,
+        ),
+        readonly_blocked_flags=readonly_blocked_flags,
+        readonly_blocked_prefixes=readonly_blocked_prefixes,
+        git_blocked_options=git_blocked_options,
+        git_blocked_prefixes=git_blocked_prefixes,
+    )
 
 
 def _parse_port(raw: object, label: str) -> int:
@@ -506,7 +1004,19 @@ def _load_ui(entry: object) -> UiSettings:
         if value not in COLOR_NAMES:
             _fail(f"{theme_label}.{key}", f"不支持的颜色名 {value!r}；允许：{sorted(COLOR_NAMES)}")
         values[key] = value
-    return UiSettings(color=color, theme=UiTheme(**values))
+    spinner_interval_ms = _as_optional_int(
+        entry,
+        "spinner_interval_ms",
+        label,
+        300,
+        minimum=50,
+        maximum=5000,
+    )
+    return UiSettings(
+        color=color,
+        theme=UiTheme(**values),
+        spinner_interval_ms=spinner_interval_ms,
+    )
 
 
 def _load_settings(document: dict) -> Settings:
@@ -522,6 +1032,27 @@ def _load_settings(document: dict) -> Settings:
         max_retries=_as_int(request, "max_retries", "settings.request", minimum=0, maximum=10),
         backoff_base_ms=_as_int(request, "backoff_base_ms", "settings.request", minimum=0),
         backoff_jitter_ms=_as_int(request, "backoff_jitter_ms", "settings.request", minimum=0),
+        health_timeout_sec=_as_optional_number(
+            request,
+            "health_timeout_sec",
+            "settings.request",
+            3.0,
+            minimum=0.1,
+        ),
+        status_probe_timeout_sec=_as_optional_number(
+            request,
+            "status_probe_timeout_sec",
+            "settings.request",
+            0.6,
+            minimum=0.05,
+        ),
+        progress_interval_ms=_as_optional_int(
+            request,
+            "progress_interval_ms",
+            "settings.request",
+            200,
+            minimum=0,
+        ),
     )
 
     launcher = _as_mapping(document.get("launcher"), "settings.launcher")
@@ -534,6 +1065,14 @@ def _load_settings(document: dict) -> Settings:
             launcher, "health_poll_interval_ms", "settings.launcher", minimum=50
         ),
         kill_wait_sec=_as_number(launcher, "kill_wait_sec", "settings.launcher", minimum=0.0),
+        log_tail_lines=_as_optional_int(
+            launcher,
+            "log_tail_lines",
+            "settings.launcher",
+            15,
+            minimum=1,
+            maximum=100,
+        ),
     )
 
     repl = _as_mapping(document.get("repl"), "settings.repl")
@@ -559,12 +1098,10 @@ def _load_settings(document: dict) -> Settings:
         min_output_tokens=min_output,
     )
 
-    tools = _as_mapping(document.get("tools"), "settings.tools")
-    _reject_unknown(tools, TOOLS_FIELDS, "settings.tools")
-    tools_settings = ToolsSettings(
-        exec_enabled=_as_bool(tools, "exec_enabled", "settings.tools"),
-        exec_require_confirm=_as_bool(tools, "exec_require_confirm", "settings.tools"),
-    )
+    chat_settings = _load_chat(document.get("chat"))
+    agent_settings = _load_agent(document.get("agent"))
+    tools_settings = _load_tools(document.get("tools"))
+    batch_settings = _load_batch(document.get("batch"))
 
     translate = _as_mapping(document.get("translate"), "settings.translate")
     _reject_unknown(translate, TRANSLATE_FIELDS, "settings.translate")
@@ -618,6 +1155,22 @@ def _load_settings(document: dict) -> Settings:
         if "monitor_lines" in translate
         else 5
     )
+    translate_temperature = _as_optional_number(
+        translate,
+        "temperature",
+        "settings.translate",
+        0.2,
+        minimum=0.0,
+        maximum=2.0,
+    )
+    max_split_depth = _as_optional_int(
+        translate,
+        "max_split_depth",
+        "settings.translate",
+        3,
+        minimum=1,
+        maximum=10,
+    )
     translate_settings = TranslateSettings(
         source_suffixes=tuple(cleaned_suffixes),
         chunk_chars=_as_int(translate, "chunk_chars", "settings.translate", minimum=50),
@@ -628,6 +1181,8 @@ def _load_settings(document: dict) -> Settings:
         output_ratio=output_ratio,
         prompt_safety_tokens=prompt_safety,
         monitor_lines=monitor_lines,
+        temperature=translate_temperature,
+        max_split_depth=max_split_depth,
     )
 
     ui_settings = _load_ui(document["ui"]) if "ui" in document else _default_ui()
@@ -638,7 +1193,10 @@ def _load_settings(document: dict) -> Settings:
         request=request_settings,
         launcher=launcher_settings,
         repl=repl_settings,
+        chat=chat_settings,
+        agent=agent_settings,
         tools=tools_settings,
+        batch=batch_settings,
         translate=translate_settings,
         ui=ui_settings,
     )

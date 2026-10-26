@@ -8,6 +8,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -68,6 +69,17 @@ def quiet_run(fn):
     return value, out.getvalue(), err.getvalue()
 
 
+AGENT_SETTINGS = load_config().settings.agent
+
+
+def parse_actions(text: str):
+    return agent._parse_actions(
+        text,
+        max_batch_actions=AGENT_SETTINGS.max_batch_actions,
+        action_aliases=AGENT_SETTINGS.action_aliases,
+    )
+
+
 def action_payload(name: str, **parameters) -> str:
     return json.dumps({"action": name, "parameters": parameters}, ensure_ascii=False)
 
@@ -85,7 +97,7 @@ class AgentTests(unittest.TestCase):
         self,
         turns: list[str],
         *,
-        max_steps: int = 5,
+        max_steps: int | None = None,
         confirm=None,
         toolbox=None,
     ):
@@ -371,6 +383,67 @@ class AgentTests(unittest.TestCase):
         self.assertIn("已达最大步数 1", out)
         self.assertEqual(len(runner.calls), 2)
 
+    def test_max_steps_comes_from_settings_when_not_overridden(self) -> None:
+        self.config = replace(
+            self.config,
+            settings=replace(
+                self.config.settings,
+                agent=replace(self.config.settings.agent, max_steps=1),
+            ),
+        )
+        repl, runner = self.make_repl(
+            [action_payload("write_file", path="one.txt", content="1"),
+             action_payload("write_file", path="two.txt", content="2")]
+        )
+        _value, out, _err = quiet_run(lambda: repl._chat("连续写"))
+        self.assertTrue((self.root / "one.txt").exists())
+        self.assertFalse((self.root / "two.txt").exists())
+        self.assertIn("已达最大步数 1", out)
+        self.assertEqual(len(runner.calls), 2)
+
+    def test_feedback_limit_comes_from_settings(self) -> None:
+        self.config = replace(
+            self.config,
+            settings=replace(
+                self.config.settings,
+                agent=replace(
+                    self.config.settings.agent, max_feedback_chars=40
+                ),
+            ),
+        )
+        (self.root / "a.txt").write_text("x" * 200, encoding="utf-8")
+        repl, runner = self.make_repl(
+            [action_payload("read_file", path="a.txt"), "完成"]
+        )
+        _value, _out, _err = quiet_run(lambda: repl._chat("读文件"))
+        feedback = runner.calls[1][1]
+        self.assertIn("已截断", feedback)
+        self.assertTrue(feedback.endswith("</tool_result>"))
+
+    def test_confirm_actions_can_be_reconfigured(self) -> None:
+        self.config = replace(
+            self.config,
+            settings=replace(
+                self.config.settings,
+                agent=replace(
+                    self.config.settings.agent,
+                    auto_actions=frozenset(
+                        {"read_file", "list_dir", "run_shell_ro", "write_file"}
+                    ),
+                    confirm_actions=frozenset({"delete_file", "move_file"}),
+                ),
+            ),
+        )
+        plans: list[str] = []
+        repl, runner = self.make_repl(
+            [action_payload("write_file", path="a.txt", content="x"), "完成"],
+            confirm=lambda plan: plans.append(plan) or True,
+        )
+        _value, out, _err = quiet_run(lambda: repl._chat("写文件"))
+        self.assertEqual(plans, [])
+        self.assertIn("自动执行：写入 a.txt", out)
+        self.assertEqual(len(runner.calls), 2)
+
     def test_bad_json_and_unknown_action_do_not_execute(self) -> None:
         for text in (
             '{"action":',
@@ -392,7 +465,7 @@ class AgentTests(unittest.TestCase):
 class ActionParserTests(unittest.TestCase):
     def test_repairs_untranslated_windows_backslashes(self) -> None:
         raw = r'{"action":"list_dir","parameters":{"path":"<WORKSPACE>"}}'
-        actions = agent._parse_actions(raw)
+        actions = parse_actions(raw)
         self.assertIsNotNone(actions)
         self.assertEqual(actions[0].parameters["path"], r"<WORKSPACE>")
 
@@ -401,14 +474,14 @@ class ActionParserTests(unittest.TestCase):
             r'[{"action":"move_file","parameters":'
             r'{"src":"<WORKSPACE>\a.md","dst":"<WORKSPACE>\a.srt"}}]'
         )
-        actions = agent._parse_actions(raw)
+        actions = parse_actions(raw)
         self.assertIsNotNone(actions)
         self.assertEqual(actions[0].parameters["src"], r"<WORKSPACE>\a.md")
         self.assertEqual(actions[0].parameters["dst"], r"<WORKSPACE>\a.srt")
 
     def test_valid_double_backslashes_remain_single_literal(self) -> None:
         raw = '{"action":"list_dir","parameters":{"path":"T:\\\\TMP\\\\test"}}'
-        actions = agent._parse_actions(raw)
+        actions = parse_actions(raw)
         self.assertIsNotNone(actions)
         self.assertEqual(actions[0].parameters["path"], r"<WORKSPACE>")
 
@@ -418,41 +491,45 @@ class ActionParserTests(unittest.TestCase):
             '{"action":"write_file","parameters":'
             '{"path":"README.md","content":"五首诗"}}'
         )
-        actions = agent._parse_actions(raw)
+        actions = parse_actions(raw)
         self.assertIsNotNone(actions)
         self.assertEqual(actions[0].name, "write_file")
         self.assertEqual(actions[0].parameters["content"], "五首诗")
 
     def test_prose_without_action_json_returns_none(self) -> None:
         self.assertIsNone(
-            agent._parse_actions('以下是示例：\n{"result":"ok"}')
+            parse_actions('以下是示例：\n{"result":"ok"}')
         )
 
     def test_parses_single_alias_and_batch(self) -> None:
-        single = agent._parse_actions(action_payload("shell", command="echo hi"))
+        single = parse_actions(action_payload("shell", command="echo hi"))
         self.assertEqual(single[0].name, "run_shell_ro")
-        batch = agent._parse_actions(
+        batch = parse_actions(
             '[{"action":"list_dir","parameters":{}},'
             '{"action":"delete_file","parameters":{"path":"a"}}]'
         )
         self.assertEqual([item.name for item in batch], ["list_dir", "delete_file"])
 
     def test_move_accepts_source_destination_aliases(self) -> None:
-        actions = agent._parse_actions(
+        actions = parse_actions(
             '{"action":"move_file","parameters":'
             '{"source":"a.md","destination":"a.srt"}}'
         )
         self.assertEqual(actions[0].parameters, {"src": "a.md", "dst": "a.srt"})
 
     def test_only_mutating_actions_require_confirmation(self) -> None:
-        read = agent._parse_actions(
+        read = parse_actions(
             '[{"action":"read_file","parameters":{"path":"a.txt"}}]'
         )
-        write = agent._parse_actions(
+        write = parse_actions(
             '[{"action":"write_file","parameters":{"path":"a.txt","content":"x"}}]'
         )
-        self.assertFalse(agent._needs_confirmation(read))
-        self.assertTrue(agent._needs_confirmation(write))
+        self.assertFalse(
+            agent._needs_confirmation(read, AGENT_SETTINGS.confirm_actions)
+        )
+        self.assertTrue(
+            agent._needs_confirmation(write, AGENT_SETTINGS.confirm_actions)
+        )
 
     def test_stream_suppresses_action_json_and_streams_text(self) -> None:
         out = io.StringIO()
@@ -485,13 +562,13 @@ class ActionParserTests(unittest.TestCase):
 
     def test_rejects_empty_or_oversized_batch(self) -> None:
         with self.assertRaises(ValueError):
-            agent._parse_actions("[]")
+            parse_actions("[]")
         oversized = "[" + ",".join(
             '{"action":"list_dir","parameters":{}}'
-            for _ in range(agent.MAX_BATCH_ACTIONS + 1)
+            for _ in range(AGENT_SETTINGS.max_batch_actions + 1)
         ) + "]"
         with self.assertRaises(ValueError):
-            agent._parse_actions(oversized)
+            parse_actions(oversized)
 
 
 if __name__ == "__main__":

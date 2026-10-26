@@ -171,7 +171,9 @@ def _cmd_status(config: AppConfig, args: argparse.Namespace, palette: Palette) -
     for model in config.models:
         port = config.effective_port(model)
         client = LlamaClient.for_model(config, model, port)
-        healthy = client.health(timeout=0.6)
+        healthy = client.health(
+            timeout=config.settings.request.status_probe_timeout_sec
+        )
         record = records.get(model.id)
         if record is not None and launcher.pid_running(record.pid):
             state = palette.ok("运行")
@@ -346,6 +348,8 @@ def _translate_chat(
         min_output_tokens=settings.min_output_tokens,
         output_ratio=settings.output_ratio,
         prompt_safety_tokens=settings.prompt_safety_tokens,
+        temperature=settings.temperature,
+        max_split_depth=settings.max_split_depth,
         on_stat=on_stat,
     )
     return chat, port
@@ -370,7 +374,11 @@ def _cmd_batch(config: AppConfig, args: argparse.Namespace, palette: Palette) ->
             {"role": "user", "content": prompt},
         ]
         return translate.extract_content(
-            client.chat(messages, max_tokens=max_tokens, temperature=0.2)
+            client.chat(
+                messages,
+                max_tokens=max_tokens,
+                temperature=config.settings.batch.temperature,
+            )
         )
 
     result = batch_mod.run_batch(
@@ -378,6 +386,8 @@ def _cmd_batch(config: AppConfig, args: argparse.Namespace, palette: Palette) ->
         chat,
         prompt_dir=config.config_dir / "prompts",
         system_default=system_default,
+        default_max_tokens=config.settings.batch.default_max_tokens,
+        max_tokens_limit=config.settings.batch.max_tokens_limit,
         palette=palette,
     )
     ok = sum(1 for item in result.items if item.ok)

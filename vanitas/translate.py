@@ -32,7 +32,6 @@ BOM = b"\xef\xbb\xbf"
 FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)\n```$", re.DOTALL)
 QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’", "「": "」", "『": "』"}
 QUOTE_CHARS = frozenset(QUOTE_PAIRS) | frozenset(QUOTE_PAIRS.values())
-RETRY_SPLIT_DEPTH = 3
 
 
 @dataclass
@@ -72,14 +71,14 @@ def extract_content(result: dict) -> str:
 
 @dataclass(frozen=True)
 class TranslationOptions:
-    n_ctx: int = 8192
-    context_window: int = 5
-    context_summary_chars: int = 200
-    min_output_tokens: int = 512
-    output_ratio: float = 2.5
-    prompt_safety_tokens: int = 64
-    temperature: float = 0.2
-    max_split_depth: int = RETRY_SPLIT_DEPTH
+    n_ctx: int
+    context_window: int
+    context_summary_chars: int
+    min_output_tokens: int
+    output_ratio: float
+    prompt_safety_tokens: int
+    temperature: float
+    max_split_depth: int
 
 
 def _has_dialogue_quotes(text: str) -> bool:
@@ -130,13 +129,13 @@ class TranslationEngine:
         prompt_dir: Path,
         system_text: str,
         *,
-        options: TranslationOptions | None = None,
+        options: TranslationOptions,
         on_stat: Callable[[SegmentStat], None] | None = None,
     ) -> None:
         self._client = client
         self._template = prompts.load_task(prompt_dir, "translate")
         self._system = system_text
-        self._options = options or TranslationOptions()
+        self._options = options
         window = max(0, int(self._options.context_window))
         self._history: deque[tuple[str, str]] = deque(maxlen=window)
         self._on_stat = on_stat
@@ -265,12 +264,14 @@ def make_engine_chat(
     prompt_dir: Path,
     system_text: str,
     *,
-    n_ctx: int = 8192,
-    context_window: int = 5,
-    context_summary_chars: int = 200,
-    min_output_tokens: int = 512,
-    output_ratio: float = 2.5,
-    prompt_safety_tokens: int = 64,
+    n_ctx: int,
+    context_window: int,
+    context_summary_chars: int,
+    min_output_tokens: int,
+    output_ratio: float,
+    prompt_safety_tokens: int,
+    temperature: float,
+    max_split_depth: int,
     on_stat: Callable[[SegmentStat], None] | None = None,
 ) -> Callable[[str], str]:
     """兼容入口：返回可调用的单段翻译函数。"""
@@ -281,6 +282,8 @@ def make_engine_chat(
         min_output_tokens=min_output_tokens,
         output_ratio=output_ratio,
         prompt_safety_tokens=prompt_safety_tokens,
+        temperature=temperature,
+        max_split_depth=max_split_depth,
     )
     return TranslationEngine(
         client, prompt_dir, system_text, options=options, on_stat=on_stat
@@ -584,5 +587,7 @@ def build_chat_for(
         min_output_tokens=settings.min_output_tokens,
         output_ratio=settings.output_ratio,
         prompt_safety_tokens=settings.prompt_safety_tokens,
+        temperature=settings.temperature,
+        max_split_depth=settings.max_split_depth,
         on_stat=on_stat,
     )

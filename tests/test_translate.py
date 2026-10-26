@@ -32,6 +32,20 @@ SMALL_CHUNKS = TranslateSettings(
     chunk_chars=8,
     output_suffix=".zh",
 )
+OPTION_DEFAULTS = {
+    "n_ctx": 8192,
+    "context_window": 5,
+    "context_summary_chars": 200,
+    "min_output_tokens": 512,
+    "output_ratio": 2.5,
+    "prompt_safety_tokens": 64,
+    "temperature": 0.2,
+    "max_split_depth": 3,
+}
+
+
+def translation_options(**overrides) -> TranslationOptions:
+    return TranslationOptions(**{**OPTION_DEFAULTS, **overrides})
 
 SRT_CRLF = (
     "1\r\n"
@@ -213,7 +227,7 @@ class TranslationEngineTests(unittest.TestCase):
             client,
             self.prompt_dir,
             "系统提示",
-            options=TranslationOptions(**options),
+            options=translation_options(**options),
         )
 
     def test_context_sentinel_and_fifo(self) -> None:
@@ -223,7 +237,7 @@ class TranslationEngineTests(unittest.TestCase):
             client,
             self.prompt_dir,
             "系统提示",
-            options=TranslationOptions(context_window=2),
+            options=translation_options(context_window=2),
             on_stat=stats.append,
         )
         engine.translate("alpha")

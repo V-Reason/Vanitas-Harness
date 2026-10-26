@@ -13,6 +13,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from vanitas import agent  # noqa: E402
+from vanitas.config import load_config  # noqa: E402
+
+AGENT_SETTINGS = load_config().settings.agent
+
+
+def parse_actions(text: str):
+    return agent._parse_actions(
+        text,
+        max_batch_actions=AGENT_SETTINGS.max_batch_actions,
+        action_aliases=AGENT_SETTINGS.action_aliases,
+    )
 
 
 def tagged(payload: str) -> str:
@@ -109,7 +120,7 @@ class ExtractToolCallsTests(unittest.TestCase):
 
 class ParseActionsTests(unittest.TestCase):
     def test_tagged_batch_becomes_actions(self) -> None:
-        actions = agent._parse_actions(
+        actions = parse_actions(
             tagged(
                 '[{"action":"list_dir","parameters":{}},'
                 '{"action":"delete_file","parameters":{"path":"a"}}]'
@@ -120,7 +131,7 @@ class ParseActionsTests(unittest.TestCase):
         )
 
     def test_prose_then_tagged_action(self) -> None:
-        actions = agent._parse_actions(
+        actions = parse_actions(
             "现在开始。\n"
             + tagged('{"action":"read_file","parameters":{"path":"a.txt"}}')
         )
@@ -128,28 +139,45 @@ class ParseActionsTests(unittest.TestCase):
 
     def test_malformed_tag_raises_action_error(self) -> None:
         with self.assertRaises(ValueError) as ctx:
-            agent._parse_actions("<tool_call>{\"action\":</tool_call>")
+            parse_actions("<tool_call>{\"action\":</tool_call>")
         self.assertIn("动作", str(ctx.exception))
 
     def test_plain_json_returns_none(self) -> None:
-        self.assertIsNone(agent._parse_actions('{"result":"ok"}'))
+        self.assertIsNone(parse_actions('{"result":"ok"}'))
 
     def test_empty_and_oversized_arrays_raise(self) -> None:
         with self.assertRaises(ValueError):
-            agent._parse_actions("[]")
+            parse_actions("[]")
         oversized = "[" + ",".join(
             '{"action":"list_dir","parameters":{}}'
-            for _ in range(agent.MAX_BATCH_ACTIONS + 1)
+            for _ in range(AGENT_SETTINGS.max_batch_actions + 1)
         ) + "]"
         with self.assertRaises(ValueError):
-            agent._parse_actions(oversized)
+            parse_actions(oversized)
 
     def test_unknown_action_raises(self) -> None:
         with self.assertRaises(ValueError) as ctx:
-            agent._parse_actions(
+            parse_actions(
                 tagged('{"action":"nope","parameters":{}}')
             )
         self.assertIn("未知动作", str(ctx.exception))
+
+    def test_alias_and_batch_limit_are_injected(self) -> None:
+        actions = agent._parse_actions(
+            tagged('{"action":"sh","parameters":{"path":"a.txt"}}'),
+            max_batch_actions=1,
+            action_aliases={"sh": "read_file"},
+        )
+        self.assertEqual(actions[0].name, "read_file")  # type: ignore[index]
+        with self.assertRaises(ValueError):
+            agent._parse_actions(
+                tagged(
+                    '[{"action":"list_dir","parameters":{}},'
+                    '{"action":"list_dir","parameters":{}}]'
+                ),
+                max_batch_actions=1,
+                action_aliases={},
+            )
 
 
 class TaggedStreamTests(unittest.TestCase):

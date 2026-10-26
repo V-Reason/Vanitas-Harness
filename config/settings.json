@@ -5,12 +5,16 @@
     "timeout_sec": 60,
     "max_retries": 3,
     "backoff_base_ms": 300,
-    "backoff_jitter_ms": 200
+    "backoff_jitter_ms": 200,
+    "health_timeout_sec": 3.0,
+    "status_probe_timeout_sec": 0.6,
+    "progress_interval_ms": 200
   },
   "launcher": {
     "health_timeout_sec": 120,
     "health_poll_interval_ms": 500,
-    "kill_wait_sec": 5
+    "kill_wait_sec": 5,
+    "log_tail_lines": 15
   },
   "repl": {
     "history_file": "~/.vanitas/history",
@@ -19,9 +23,37 @@
     "context_reserve_tokens": 512,
     "min_output_tokens": 256
   },
+  "chat": {
+    "temperature": 0.2
+  },
+  "agent": {
+    "max_steps": 10,
+    "max_batch_actions": 100,
+    "max_feedback_chars": 8000,
+    "auto_actions": ["read_file", "list_dir", "run_shell_ro"],
+    "confirm_actions": ["write_file", "delete_file", "move_file"],
+    "action_aliases": {
+      "shell": "run_shell_ro"
+    }
+  },
   "tools": {
     "exec_enabled": true,
-    "exec_require_confirm": true
+    "exec_require_confirm": true,
+    "max_read_bytes": 262144,
+    "max_list_entries": 200,
+    "move_illegal_chars": "#<>\"|?*",
+    "manual_exec_prefixes": ["echo", "dir", "type", "python --version", "git status", "git log", "git diff", "del", "erase", "ren", "rename", "copy", "move"],
+    "destructive_commands": ["del", "erase", "rd", "rmdir", "rm", "mv", "move", "ren", "rename", "copy", "xcopy", "robocopy", "mkdir", "md", "format"],
+    "readonly_shell_prefixes": ["dir", "ls", "type", "cat", "echo", "findstr", "find", "pwd", "where", "head", "tail", "wc", "grep", "git status", "git log", "git diff", "git show", "git rev-parse"],
+    "readonly_blocked_flags": ["-o", "-delete", "-fls", "-ok", "-okdir"],
+    "readonly_blocked_prefixes": ["-exec", "--output", "-fprint", "-fprintf"],
+    "git_blocked_options": ["-c", "-C", "--git-dir", "--work-tree", "--exec-path", "--namespace", "--no-index", "--output"],
+    "git_blocked_prefixes": ["-c", "-C", "--git-dir=", "--work-tree=", "--exec-path="]
+  },
+  "batch": {
+    "default_max_tokens": 512,
+    "max_tokens_limit": 8192,
+    "temperature": 0.2
   },
   "translate": {
     "source_suffixes": [".txt", ".md", ".srt"],
@@ -32,10 +64,13 @@
     "min_output_tokens": 512,
     "output_ratio": 2.5,
     "prompt_safety_tokens": 64,
-    "monitor_lines": 5
+    "monitor_lines": 5,
+    "temperature": 0.2,
+    "max_split_depth": 3
   },
   "ui": {
     "color": "auto",
+    "spinner_interval_ms": 300,
     "theme": {
       "prompt": "cyan",
       "success": "green",

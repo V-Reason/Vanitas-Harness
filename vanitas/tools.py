@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
-from .config import AppConfig
+from .config import AppConfig, ToolsSettings
 from .errors import ToolDenied
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -46,91 +46,9 @@ WINDOWS_BUILTINS = frozenset(
 )
 # 仅用于 /exec 的 cmd 内置命令；Agent 不经过这里。
 _CMD_CONTROL_CHARS = frozenset("&|<>^%")
-DESTRUCTIVE_COMMANDS = frozenset(
-    {
-        "del",
-        "erase",
-        "rd",
-        "rmdir",
-        "rm",
-        "mv",
-        "move",
-        "ren",
-        "rename",
-        "copy",
-        "xcopy",
-        "robocopy",
-        "mkdir",
-        "md",
-        "format",
-    }
-)
-
-# `/exec` 是历史手动入口，保留一组固定的兼容前缀；Agent 的权限不再来自
-# settings.tools，而来自本文件下面的 READONLY_SHELL_PREFIXES。
-MANUAL_EXEC_PREFIXES = (
-    "echo",
-    "dir",
-    "type",
-    "python --version",
-    "git status",
-    "git log",
-    "git diff",
-    "del",
-    "erase",
-    "ren",
-    "rename",
-    "copy",
-    "move",
-)
-
-READONLY_SHELL_PREFIXES = frozenset(
-    {
-        "dir",
-        "ls",
-        "type",
-        "cat",
-        "echo",
-        "findstr",
-        "find",
-        "pwd",
-        "where",
-        "head",
-        "tail",
-        "wc",
-        "grep",
-        "git status",
-        "git log",
-        "git diff",
-        "git show",
-        "git rev-parse",
-    }
-)
 _READONLY_BUILTINS = frozenset({"echo", "dir", "ls", "type", "cat", "pwd"})
-_READONLY_BLOCKED_EXACT = frozenset({"-o", "-delete", "-fls", "-ok", "-okdir"})
-_READONLY_BLOCKED_PREFIXES = (
-    "-exec",
-    "--output",
-    "-fprint",
-    "-fprintf",
-)
-_GIT_BLOCKED_OPTIONS = frozenset(
-    {
-        "-c",
-        "-C",
-        "--git-dir",
-        "--work-tree",
-        "--exec-path",
-        "--namespace",
-        "--no-index",
-        "--output",
-    }
-)
-_GIT_BLOCKED_PREFIXES = ("-c", "-C", "--git-dir=", "--work-tree=", "--exec-path=")
 CANCEL_MESSAGE = "已取消"
 _CANCEL_MESSAGE = CANCEL_MESSAGE
-MAX_READ_BYTES = 256 * 1024
-MAX_LIST_ENTRIES = 200
 _COMMAND_SUFFIXES = (".exe", ".com", ".bat", ".cmd")
 _HELP_SWITCHES = frozenset({"/?", "-?", "-h", "--help"})
 
@@ -233,7 +151,9 @@ def _unwrap_cmd(argv: list[str]) -> list[str]:
     return list(argv)
 
 
-def _destructive_index(argv: list[str]) -> tuple[int | None, list[str]]:
+def _destructive_index(
+    argv: list[str], destructive_commands: frozenset[str]
+) -> tuple[int | None, list[str]]:
     """返回（破坏性动词下标，展开后的 argv）；非破坏性命令下标为 None。"""
     tokens = _unwrap_cmd(argv)
     if not tokens:
@@ -249,13 +169,15 @@ def _destructive_index(argv: list[str]) -> tuple[int | None, list[str]]:
     if index >= len(tokens):
         return None, tokens
     verb = _command_name(tokens[index])
-    if verb not in DESTRUCTIVE_COMMANDS:
+    if verb not in destructive_commands:
         return None, tokens
     return index, tokens
 
 
-def _destructive_verb(argv: list[str]) -> str | None:
-    index, tokens = _destructive_index(argv)
+def _destructive_verb(
+    argv: list[str], destructive_commands: frozenset[str]
+) -> str | None:
+    index, tokens = _destructive_index(argv, destructive_commands)
     if index is None:
         return None
     return _command_name(tokens[index])
@@ -281,9 +203,11 @@ def _looks_like_switch(token: str) -> bool:
     return False
 
 
-def _is_destructive_command(argv: list[str]) -> list[str]:
+def _is_destructive_command(
+    argv: list[str], destructive_commands: frozenset[str]
+) -> list[str]:
     """返回破坏性/写命令涉及的全部路径参数（引用原样，未解析为绝对路径）。"""
-    index, tokens = _destructive_index(argv)
+    index, tokens = _destructive_index(argv, destructive_commands)
     if index is None:
         return []
     paths: list[str] = []
@@ -438,8 +362,9 @@ def run_exec(
     if not command.strip():
         raise ToolDenied("用法：/exec <命令>")
     tokens = split_command(command)
-    if _destructive_verb(tokens) is not None:
-        targets = _is_destructive_command(tokens)
+    settings = config.settings.tools
+    if _destructive_verb(tokens, settings.destructive_commands) is not None:
+        targets = _is_destructive_command(tokens, settings.destructive_commands)
         if not targets:
             if not any(token in _HELP_SWITCHES for token in tokens):
                 raise ToolDenied("安全限制：破坏性命令必须显式指定目标路径")
@@ -452,16 +377,15 @@ def run_exec(
                     "安全限制：禁止修改或删除工作目录之外的文件/目录；"
                     f"越界路径：{'；'.join(outside)}"
                 )
-    settings = config.settings.tools
     if not settings.exec_enabled:
         raise ToolDenied(
             "本地命令执行已关闭；如需启用，把 config\\settings.json 的 "
             "tools.exec_enabled 改为 true 后重试"
         )
-    if not is_whitelisted(command, MANUAL_EXEC_PREFIXES):
+    if not is_whitelisted(command, settings.manual_exec_prefixes):
         raise ToolDenied(
             f"命令不在兼容白名单内：{command}；"
-            f"允许的前缀：{'；'.join(MANUAL_EXEC_PREFIXES)}"
+            f"允许的前缀：{'；'.join(settings.manual_exec_prefixes)}"
         )
     if settings.exec_require_confirm:
         answer = (confirm or _ask)(f"执行本地命令？\n  {command}\n[y/N] ")
@@ -477,15 +401,17 @@ def run_exec(
 # --------------------------------------------------------------------------- #
 
 
-def read_file(path: str, *, root: Path | str | None = None) -> str:
+def read_file(
+    path: str, *, root: Path | str | None = None, max_bytes: int
+) -> str:
     target = _require_path(path, root)
     try:
         if not target.is_file():
             raise ToolDenied(f"不是可读取的文件：{path}")
         size = target.stat().st_size
-        if size > MAX_READ_BYTES:
+        if size > max_bytes:
             raise ToolDenied(
-                f"文件超过 {MAX_READ_BYTES // 1024} KiB，已拒绝读取：{path}"
+                f"文件超过 {max_bytes // 1024} KiB，已拒绝读取：{path}"
             )
         raw = target.read_bytes()
     except ToolDenied:
@@ -511,25 +437,23 @@ def write_file(path: str, content: str, *, root: Path | str | None = None) -> in
     return len(data)
 
 
-_MOVE_ILLEGAL_CHARS = frozenset('#<>"|?*')
-
-
-def _reject_illegal_move_text(value: str) -> None:
+def _reject_illegal_move_text(value: str, illegal_chars: str) -> None:
     """模型常把 `#`、通配符等路径污染带进 move_file；提前给出可读拒绝。"""
-    if any(
-        char in _MOVE_ILLEGAL_CHARS or ord(char) < 32
-        for char in value
-    ):
+    if any(char in illegal_chars or ord(char) < 32 for char in value):
         raise ToolDenied("源文件不存在或路径非法")
 
 
 def move_file(
-    src: str, dst: str, *, root: Path | str | None = None
+    src: str,
+    dst: str,
+    *,
+    root: Path | str | None = None,
+    illegal_chars: str,
 ) -> str:
     source = _require_path(src, root)
     target = _require_path(dst, root)
-    _reject_illegal_move_text(src)
-    _reject_illegal_move_text(dst)
+    _reject_illegal_move_text(src, illegal_chars)
+    _reject_illegal_move_text(dst, illegal_chars)
     if source == target:
         raise ToolDenied(f"源和目标相同：{src}")
     try:
@@ -559,7 +483,12 @@ def delete_file(path: str, *, root: Path | str | None = None) -> str:
     return f"删除 {path}"
 
 
-def list_dir(path: str = ".", *, root: Path | str | None = None) -> list[str]:
+def list_dir(
+    path: str = ".",
+    *,
+    root: Path | str | None = None,
+    max_entries: int,
+) -> list[str]:
     target = _require_path(path, root)
     if not target.is_dir():
         raise ToolDenied(f"不是目录：{path}")
@@ -568,7 +497,7 @@ def list_dir(path: str = ".", *, root: Path | str | None = None) -> list[str]:
     try:
         with os.scandir(target) as iterator:
             for entry in iterator:
-                if len(entries) >= MAX_LIST_ENTRIES:
+                if len(entries) >= max_entries:
                     truncated = True
                     break
                 suffix = "/" if entry.is_dir(follow_symlinks=False) else ""
@@ -594,19 +523,32 @@ class AgentTools:
         return _require_path(path, self.root)
 
     def read_file(self, path: str) -> str:
-        return read_file(path, root=self.root)
+        return read_file(
+            path,
+            root=self.root,
+            max_bytes=self.config.settings.tools.max_read_bytes,
+        )
 
     def write_file(self, path: str, content: str) -> int:
         return write_file(path, content, root=self.root)
 
     def move_file(self, src: str, dst: str) -> str:
-        return move_file(src, dst, root=self.root)
+        return move_file(
+            src,
+            dst,
+            root=self.root,
+            illegal_chars=self.config.settings.tools.move_illegal_chars,
+        )
 
     def delete_file(self, path: str) -> str:
         return delete_file(path, root=self.root)
 
     def list_dir(self, path: str = ".") -> list[str]:
-        return list_dir(path, root=self.root)
+        return list_dir(
+            path,
+            root=self.root,
+            max_entries=self.config.settings.tools.max_list_entries,
+        )
 
     # ------------------------------------------------------------------ #
     # 只读 Shell
@@ -618,14 +560,19 @@ class AgentTools:
             raise ToolDenied("shell 命令不能为空")
         command = command.strip()
         tokens = split_command(command)
+        settings = self.config.settings.tools
         prefix = self._readonly_prefix(tokens)
-        if prefix not in READONLY_SHELL_PREFIXES:
+        if prefix not in settings.readonly_shell_prefixes:
             raise ToolDenied(
                 f"安全限制：只允许只读命令；收到 {prefix!r}。"
-                f"允许：{'、'.join(sorted(READONLY_SHELL_PREFIXES))}"
+                f"允许：{'、'.join(sorted(settings.readonly_shell_prefixes))}"
             )
-        self._reject_write_flags(tokens)
-        self._check_readonly_paths(tokens, prefix)
+        self._reject_write_flags(
+            tokens,
+            settings.readonly_blocked_flags,
+            settings.readonly_blocked_prefixes,
+        )
+        self._check_readonly_paths(tokens, prefix, settings)
         if prefix in _READONLY_BUILTINS:
             return self._run_builtin(command, prefix, tokens)
         env = os.environ.copy()
@@ -653,19 +600,27 @@ class AgentTools:
         return name
 
     @staticmethod
-    def _reject_write_flags(tokens: list[str]) -> None:
+    def _reject_write_flags(
+        tokens: list[str],
+        blocked_exact: frozenset[str],
+        blocked_prefixes: tuple[str, ...],
+    ) -> None:
         for token in tokens:
             low = token.lower()
-            if low in _READONLY_BLOCKED_EXACT or low.startswith(
-                _READONLY_BLOCKED_PREFIXES
-            ):
+            if low in blocked_exact or low.startswith(blocked_prefixes):
                 raise ToolDenied(
                     f"安全限制：只读 Shell 不允许写操作参数 {token!r}"
                 )
 
-    def _check_readonly_paths(self, tokens: list[str], prefix: str) -> None:
+    def _check_readonly_paths(
+        self, tokens: list[str], prefix: str, settings: ToolsSettings
+    ) -> None:
         if prefix == "git" or prefix.startswith("git "):
-            self._check_git(tokens)
+            self._check_git(
+                tokens,
+                settings.git_blocked_options,
+                settings.git_blocked_prefixes,
+            )
             return
         if prefix == "echo":
             return
@@ -685,10 +640,15 @@ class AgentTools:
         for candidate in candidates:
             is_inside_workspace(candidate, self.root)
 
-    def _check_git(self, tokens: list[str]) -> None:
+    def _check_git(
+        self,
+        tokens: list[str],
+        blocked_options: frozenset[str],
+        blocked_prefixes: tuple[str, ...],
+    ) -> None:
         for token in tokens[1:]:
             low = token.lower()
-            if low in _GIT_BLOCKED_OPTIONS or low.startswith(_GIT_BLOCKED_PREFIXES):
+            if low in blocked_options or low.startswith(blocked_prefixes):
                 raise ToolDenied(
                     f"安全限制：git 只读子命令不允许参数 {token!r}"
                 )
@@ -721,9 +681,10 @@ class AgentTools:
                 target = self._require(path)
                 if not target.is_file():
                     raise ToolDenied(f"不是可读取的文件：{path}")
-                if target.stat().st_size > MAX_READ_BYTES:
+                max_bytes = self.config.settings.tools.max_read_bytes
+                if target.stat().st_size > max_bytes:
                     raise ToolDenied(
-                        f"文件超过 {MAX_READ_BYTES // 1024} KiB，已拒绝读取：{path}"
+                        f"文件超过 {max_bytes // 1024} KiB，已拒绝读取：{path}"
                     )
                 chunks.append(_decode(target.read_bytes()))
             return ExecResult(command, 0, "".join(chunks), "")

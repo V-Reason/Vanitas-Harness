@@ -32,7 +32,7 @@
 
 - 观察：`src/types/permissions.ts` 定义 `PermissionBehavior = 'allow' | 'deny' | 'ask'` 与 `default / acceptEdits / plan / dontAsk / bypassPermissions` 模式，规则来源区分 `userSettings / projectSettings / localSettings / policySettings / cliArg / session`。
 - 可移植性：**默认拒绝、显式放行、副作用可见** 是安全模型，不是产品特性；只读操作可以自动，有副作用的操作必须留下确认点。
-- 本项目映射：`vanitas/tools.py` 的手动 `/exec` 保留固定兼容前缀与逐次确认；`vanitas/agent.py` 对单动作与只读数组的 `read_file/list_dir/run_shell_ro` 自动执行，对 `write_file/delete_file/move_file` 确认，含修改的数组只弹一次 `[y/N]`。动作优先用 `<tool_call>` 标签隔离，解析失败用 `raw_decode` + 栈平衡兜底；结果统一为 `<tool_result>`。`AgentTools` 以原 CWD 为沙盒根、最多 5 轮；`shell=False` + `shlex.split`，`& | >` 不能串联。最终自然语言增量上屏，标签与动作 JSON 不落屏。
+- 本项目映射：`vanitas/tools.py` 的手动 `/exec` 保留固定兼容前缀与逐次确认；`vanitas/agent.py` 对单动作与只读数组的 `read_file/list_dir/run_shell_ro` 自动执行，对 `write_file/delete_file/move_file` 确认，含修改的数组只弹一次 `[y/N]`。动作优先用 `<tool_call>` 标签隔离，解析失败用 `raw_decode` + 栈平衡兜底；结果统一为 `<tool_result>`。`AgentTools` 以原 CWD 为沙盒根、步数由 `settings.agent.max_steps` 控制；`shell=False` + `shlex.split`，`& | >` 不能串联。最终自然语言增量上屏，标签与动作 JSON 不落屏。
 
 ### D5 会话边界清晰：清空、存档、恢复、预算
 
@@ -55,7 +55,7 @@
 | Ink + React 虚拟 DOM 全屏重绘（`replLauncher.tsx` 注入 React `Root`；`REPL.tsx` 用 `useStdin`、`useInput`、React compiler runtime） | 需要 React 渲染器与终端布局引擎；`claude-code-haha/package.json` 有 62 个运行时依赖（`@anthropic-ai/sdk`、`@opentelemetry/*`、`react` 生态等）。本项目红线只允许 `prompt_toolkit`，引入即违约。 |
 | bun 打包 + `feature()` 编译期开关（`feature('KAIROS')`、`feature('DAEMON')` 等） | 属于「同一份源码编出不同产品形态」的构建体系，不是运行期可复制的交互设计。 |
 | OAuth/登录、遥测、GrowthBook、MCP、插件、Skills、远程会话（`/bridge`、`/teleport`、`/remote-setup`） | 对应云端产品面与多端协同；本机是单机离线推理套件，没有账号、没有远端。 |
-| 无人值守自动工具循环、auto-compact、prompt caching、多 Agent 协作 | 依赖大上下文、token 预算与更强的权限模型；本项目只实现“按副作用分级、CWD 沙盒、最多 5 轮”的受控闭环，不做后台队列或无人值守执行。 |
+| 无人值守自动工具循环、auto-compact、prompt caching、多 Agent 协作 | 依赖大上下文、token 预算与更强的权限模型；本项目只实现“按副作用分级、CWD 沙盒、`settings.agent.max_steps` 步数上限”的受控闭环，不做后台队列或无人值守执行。 |
 | Vim 模式、键位自定义、剪贴板图片粘贴、语音、主题 | 交互增强层，对「能稳定跑通一轮对话 + 批量翻译」不构成瓶颈，属于过度设计。 |
 
 ---
@@ -65,7 +65,7 @@
 1. **纯文本增量渲染，不做全屏重绘**：流式 token 直接写 stdout 并 flush；代码围栏内缩进 4 空格表示等宽块；着色只在 `vanitas/ui.py` 做（16 色 ANSI，`color: auto|always|never`），重定向即自动降级为纯文本，保证 `| tee`、CI 抓取可读（D3）。
 2. **12 个 `/` 命令，一张表**：`/help /model /profile /system /task /clear /save /load /exec /stop /status /quit`（`/exit` 为 `/quit` 别名），全部在 `repl.py` 的 `COMMANDS` 中声明 `name/description/aliases/arg_hint`，`/help` 自动生成（D1）。提示符固定为 `<id>@<档位> › `，与 `/model`、`/status` 显示的模型/档位始终同一来源。TTY 下 Tab 补全命令/别名、`/model ` 的模型 id 与 `/profile ` 的档位。
 3. **单引擎、单模型、单档位**：一次只服务一个 llama-server；`/model` 切换前用 pidfile + `/health` 验运行态，已运行直连，没有运行则在单实例守卫下停旧启新（D6）。8 GB 显存仍禁不起双实例；失败时保留可读错误，不假装切换成功。
-4. **`/exec` 手动、逐次确认；Agent 闭环按副作用分级**：手动 `/exec` 继续「固定兼容前缀 + 逐次确认」的最小安全面；`vanitas agent` 自动执行单动作与只读数组，写/删/移动必须确认，含修改的数组一次确认，`AgentTools` 以 CWD 为沙盒根、最多 5 轮，不提供后台队列或绕过修改确认的钩子（D4）。动作以 `<tool_call>` 隔离，结果以 `<tool_result>` 回填；最终回答流式上屏，标签与动作 JSON 不上屏（D3）。
+4. **`/exec` 手动、逐次确认；Agent 闭环按副作用分级**：手动 `/exec` 继续「固定兼容前缀 + 逐次确认」的最小安全面；`vanitas agent` 自动执行单动作与只读数组，写/删/移动必须确认，含修改的数组一次确认，`AgentTools` 以 CWD 为沙盒根、步数由 `settings.agent.max_steps` 控制，不提供后台队列或绕过修改确认的钩子（D4）。动作以 `<tool_call>` 隔离，结果以 `<tool_result>` 回填；最终回答流式上屏，标签与动作 JSON 不上屏（D3）。
 5. **会话与历史分离**：`/save` 存业务消息（可跨进程恢复），输入历史交给 `prompt_toolkit`；`/clear` 保留系统提示（D2、D5）。
 6. **上下文预算按档位算，不猜**：历史预算 `min(profile.ctx, repl.max_context_tokens) - context_reserve_tokens`；单轮输出预算 `max(min_output_tokens, profile.ctx - 历史 tokens - reserve)`。超预算丢最早轮次并提示裁剪数量；不实现自动摘要（那属于 auto-compact，明确不做）。
 7. **翻译保留“可见的上下文”**：`TranslationEngine` 携带最近 N 段原文/译文摘要；`monitor.py` 用 ANSI 局部重绘最近 5 段（按终端宽高裁剪），让用户能肉眼核对跨段人称与术语；每个文件 reset/finish 独立结算。业务层只发 `SegmentStat`，不直接画终端。`finish_reason=length` 时按句末/中点拆分重译，避免半句静默输出。
@@ -77,7 +77,7 @@
 | D1 命令注册表 | `vanitas/repl.py` → `COMMANDS`、`_cmd_help` |
 | D2 输入历史 | `vanitas/repl.py` → `_get_prompt_session` |
 | D3 流式渲染 | `vanitas/render.py` → `StreamRenderer` |
-| D4 分级审批 / CWD 沙盒 | `vanitas/tools.py` → `run_exec`、`AgentTools`、`is_inside_workspace`、`run_shell_ro`；`vanitas/agent.py` → `AgentRepl`、`extract_tool_calls`、`_parse_actions`、`_AgentAnswerStream` |
+| D4 分级审批 / CWD 沙盒 | `config/settings.json` → `agent` / `tools`；`vanitas/tools.py` → `run_exec`、`AgentTools`、`is_inside_workspace`、`run_shell_ro`；`vanitas/agent.py` → `AgentRepl`、`extract_tool_calls`、`_parse_actions`、`_AgentAnswerStream` |
 | D5 会话边界 | `vanitas/session.py` + `/save` `/load` `/clear` |
 | D6 端点可见性 | `vanitas/launcher.py` → `running()`；`vanitas/repl.py` → `/model` `/status` |
 | D7 翻译上下文与看板 | `vanitas/translate.py` → `TranslationEngine`；`vanitas/monitor.py` → `TranslationMonitor` |

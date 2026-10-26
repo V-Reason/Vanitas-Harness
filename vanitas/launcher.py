@@ -154,7 +154,7 @@ def build_args(
     ]
 
 
-def read_log_tail(path: str | Path, limit: int = 15) -> str:
+def read_log_tail(path: str | Path, limit: int) -> str:
     try:
         lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:
@@ -286,15 +286,21 @@ def wait_ready(
     deadline = time.monotonic() + config.settings.launcher.health_timeout_sec
     interval = config.settings.launcher.health_poll_interval_ms / 1000.0
     started = time.monotonic()
-    with Spinner("正在加载模型", paint, enabled=None if progress else False) as spin:
+    log_tail_lines = config.settings.launcher.log_tail_lines
+    with Spinner(
+        "正在加载模型",
+        paint,
+        enabled=None if progress else False,
+        interval_ms=config.settings.ui.spinner_interval_ms,
+    ) as spin:
         while time.monotonic() < deadline:
             if not pid_running(record.pid):
-                tail = read_log_tail(record.log_path)
+                tail = read_log_tail(record.log_path, log_tail_lines)
                 clear_record(record.model_id)
                 raise LaunchError(
                     f"llama-server PID {record.pid} 在就绪前退出。日志尾部：\n{tail}"
                 )
-            if client.health(timeout=3.0):
+            if client.health():
                 ids = client.model_ids()
                 if record.alias not in ids:
                     raise LaunchError(
@@ -306,7 +312,7 @@ def wait_ready(
                 return elapsed
             spin.update()
             time.sleep(interval)
-        tail = read_log_tail(record.log_path)
+        tail = read_log_tail(record.log_path, log_tail_lines)
         raise LaunchError(
             f"等待 {config.settings.launcher.health_timeout_sec:.0f}s 后服务仍未响应；"
             f"PID {record.pid}，端口 {record.port}。日志尾部：\n{tail}"
@@ -383,6 +389,6 @@ def inspect(config: AppConfig) -> list[RunStatus]:
                 record.port,
                 template_kwargs={},
             )
-            healthy = client.health(timeout=2.0)
+            healthy = client.health()
         statuses.append(RunStatus(record=record, alive=alive, healthy=healthy))
     return statuses

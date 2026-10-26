@@ -32,7 +32,9 @@ class ClientFacadeTests(unittest.TestCase):
         with mock.patch.object(client, "chat_stream", return_value=iter(events)) as prop:
             result = list(
                 client.stream_chat(
-                    [{"role": "user", "content": "hi"}], max_tokens=8
+                    [{"role": "user", "content": "hi"}],
+                    max_tokens=8,
+                    temperature=0.2,
                 )
             )
         self.assertEqual(result, events)
@@ -45,7 +47,10 @@ class ClientFacadeTests(unittest.TestCase):
         with mock.patch.object(client, "chat_stream", return_value=iter([])) as prop:
             list(
                 client.stream_completion(
-                    "hello", system="be nice", max_tokens=16
+                    "hello",
+                    system="be nice",
+                    max_tokens=16,
+                    temperature=0.2,
                 )
             )
         messages = prop.call_args.args[0]

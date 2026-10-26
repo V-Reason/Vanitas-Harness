@@ -128,6 +128,34 @@ class FileToolTests(unittest.TestCase):
                 self.assertEqual(str(ctx.exception), "源文件不存在或路径非法")
         self.assertTrue((self.root / "a.md").exists())
 
+    def test_limits_and_move_chars_come_from_settings(self) -> None:
+        tool_settings = replace(
+            self.config.settings.tools,
+            max_read_bytes=4,
+            max_list_entries=1,
+            move_illegal_chars="@",
+        )
+        config = replace(
+            self.config,
+            settings=replace(self.config.settings, tools=tool_settings),
+        )
+        toolbox = tools.AgentTools(config, self.root)
+        toolbox.write_file("a.txt", "abcdef")
+        with self.assertRaises(ToolDenied) as ctx:
+            toolbox.read_file("a.txt")
+        self.assertIn("超过", str(ctx.exception))
+
+        for name in ("b.txt", "c.txt"):
+            toolbox.write_file(name, "x")
+        self.assertEqual(toolbox.list_dir("."), ["a.txt", "…"])
+
+        toolbox.write_file("d@.md", "x")
+        with self.assertRaises(ToolDenied) as ctx:
+            toolbox.move_file("d@.md", "d.srt")
+        self.assertEqual(str(ctx.exception), "源文件不存在或路径非法")
+        toolbox.write_file("e.md", "x")
+        self.assertIn("e.md -> e.srt", toolbox.move_file("e.md", "e.srt"))
+
     def test_delete_rejects_directory(self) -> None:
         (self.root / "sub").mkdir()
         with self.assertRaises(ToolDenied):
@@ -241,6 +269,21 @@ class ReadonlyShellTests(unittest.TestCase):
             self.toolbox.run_shell_ro("git diff --no-index a.txt C:\\Windows\\x")
         with self.assertRaises(ToolDenied):
             self.toolbox.run_shell_ro("git branch -D main")
+
+    def test_readonly_prefixes_come_from_settings(self) -> None:
+        tool_settings = replace(
+            self.config.settings.tools,
+            readonly_shell_prefixes=frozenset({"echo"}),
+        )
+        config = replace(
+            self.config,
+            settings=replace(self.config.settings, tools=tool_settings),
+        )
+        toolbox = tools.AgentTools(config, self.root)
+        self.assertEqual(toolbox.run_shell_ro("echo hi").stdout, "hi\n")
+        with self.assertRaises(ToolDenied) as ctx:
+            toolbox.run_shell_ro("type a.txt")
+        self.assertIn("只允许只读命令", str(ctx.exception))
 
     def test_readonly_shell_does_not_depend_on_manual_exec_toggle(self) -> None:
         disabled = make_config(enabled=False)

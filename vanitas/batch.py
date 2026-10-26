@@ -47,7 +47,8 @@ def run_batch(
     *,
     prompt_dir: Path,
     system_default: str,
-    default_max_tokens: int = 512,
+    default_max_tokens: int,
+    max_tokens_limit: int,
     echo: Callable[[str], None] = print,
     palette: Palette | None = None,
 ) -> BatchResult:
@@ -104,9 +105,20 @@ def run_batch(
                 echo(paint.err(f"{position}/{total} {item_id} 失败：模板"))
                 continue
         max_tokens = record.get("max_tokens", default_max_tokens)
-        if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or not 1 <= max_tokens <= 8192:
+        if (
+            not isinstance(max_tokens, int)
+            or isinstance(max_tokens, bool)
+            or not 1 <= max_tokens <= max_tokens_limit
+        ):
             result.items.append(
-                BatchItem(id=item_id, ok=False, error=f"max_tokens 必须是 1–8192 的整数，实际 {max_tokens!r}")
+                BatchItem(
+                    id=item_id,
+                    ok=False,
+                    error=(
+                        f"max_tokens 必须是 1–{max_tokens_limit} 的整数，"
+                        f"实际 {max_tokens!r}"
+                    ),
+                )
             )
             echo(paint.err(f"{position}/{total} {item_id} 失败：max_tokens"))
             continue

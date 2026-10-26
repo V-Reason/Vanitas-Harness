@@ -18,6 +18,9 @@ from vanitas.config import load_config  # noqa: E402
 from vanitas.errors import ToolDenied  # noqa: E402
 
 
+DESTRUCTIVE = load_config().settings.tools.destructive_commands
+
+
 def make_config(enabled=True, confirm=True):
     base = load_config()
     tool_settings = replace(
@@ -39,6 +42,20 @@ class ToolsTests(unittest.TestCase):
         config = make_config()
         with self.assertRaises(ToolDenied) as ctx:
             tools.run_exec(config, "python -c pass", confirm=lambda _: "y")
+        self.assertIn("兼容白名单", str(ctx.exception))
+
+    def test_manual_prefix_whitelist_comes_from_settings(self) -> None:
+        tools_settings = replace(
+            make_config().settings.tools,
+            manual_exec_prefixes=("echo",),
+        )
+        base = make_config()
+        config = replace(
+            base,
+            settings=replace(base.settings, tools=tools_settings),
+        )
+        with self.assertRaises(ToolDenied) as ctx:
+            tools.run_exec(config, "dir", confirm=lambda _: "y")
         self.assertIn("兼容白名单", str(ctx.exception))
 
     def test_confirm_no_does_not_execute(self) -> None:
@@ -101,30 +118,35 @@ class ToolsTests(unittest.TestCase):
 
     def test_destructive_command_extracts_paths(self) -> None:
         paths = tools._is_destructive_command(
-            ["del", "/f", "/s", r"C:\Windows\System32\xxx"]
+            ["del", "/f", "/s", r"C:\Windows\System32\xxx"],
+            DESTRUCTIVE,
         )
         self.assertEqual(paths, [r"C:\Windows\System32\xxx"])
 
     def test_destructive_command_skips_switches_and_keeps_relative_path(self) -> None:
         self.assertEqual(
-            tools._is_destructive_command(["del", "/q", r".\test.txt"]),
+            tools._is_destructive_command(
+                ["del", "/q", r".\test.txt"], DESTRUCTIVE
+            ),
             [r".\test.txt"],
         )
 
     def test_non_destructive_command_has_no_targets(self) -> None:
-        self.assertEqual(tools._is_destructive_command(["echo", "del", "x"]), [])
+        self.assertEqual(
+            tools._is_destructive_command(["echo", "del", "x"], DESTRUCTIVE), []
+        )
 
     def test_cmd_wrapper_detects_quoted_del(self) -> None:
         argv = tools.split_command(r'cmd /c "del C:\Windows\System32\xxx"')
         self.assertEqual(
-            tools._is_destructive_command(argv),
+            tools._is_destructive_command(argv, DESTRUCTIVE),
             [r"C:\Windows\System32\xxx"],
         )
 
     def test_cmd_wrapper_detects_raw_quoted_argv(self) -> None:
         argv = ["cmd", "/c", r'"del C:\Windows\System32\xxx"']
         self.assertEqual(
-            tools._is_destructive_command(argv),
+            tools._is_destructive_command(argv, DESTRUCTIVE),
             [r"C:\Windows\System32\xxx"],
         )
 

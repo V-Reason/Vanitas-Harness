@@ -215,13 +215,19 @@ class ChatRunner:
 
     def _stream_events(self, messages: list[dict], max_tokens: int):
         """首字前显示覆盖式进度，首字到达立刻擦除，避免等待行与 stdout 混屏。"""
-        spin = Spinner("正在生成", self.palette)
+        spin = Spinner(
+            "正在生成",
+            self.palette,
+            interval_ms=self.config.settings.ui.spinner_interval_ms,
+        )
         spin.__enter__()
         first = True
         generator = None
         try:
             generator = self.client.stream_chat(
-                messages, max_tokens=max_tokens, temperature=0.2
+                messages,
+                max_tokens=max_tokens,
+                temperature=self.config.settings.chat.temperature,
             )
             for event in generator:
                 if first and event["type"] == "delta":

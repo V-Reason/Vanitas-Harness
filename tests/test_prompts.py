@@ -102,6 +102,12 @@ class PromptTests(unittest.TestCase):
         self.assertIn("【截断防御】", text)
         self.assertIn("如果写入内容过长", text)
 
+    def test_agent_continue_template_loads(self) -> None:
+        text = prompts.load_template(self.prompt_dir, "agent_continue")
+        self.assertIn("<tool_call>", text)
+        self.assertIn("{cwd}", text)
+        self.assertIn("{input}", text)
+
     def test_unknown_placeholder_in_template_rejected(self) -> None:
         (self.temp_dir / "bad.md").write_text("hi {unknown}\n", encoding="utf-8")
         with self.assertRaises(ConfigError) as ctx:
