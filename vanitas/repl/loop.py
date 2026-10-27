@@ -1,155 +1,28 @@
-"""REPL：命令注册表（范式笔记 D1）+ 交互循环。
+"""REPL 交互循环：读行、分派命令、驱动对话。
 
-只有「以 / 开头且第 2 个字符不是空格」的行才当命令；其余整行都是用户输入，
-这样用户想问 "/model 是什么意思" 时仍能正常发问。
-
-所有用户可见文本都经 Palette 上色/加符号，本模块不拼接 ANSI 转义。
+命令表数据与 /help 渲染在 commands；状态栏渲染在 status；
+模型/档位/重启等生命周期在 lifecycle；本模块只做 Repl 类与转发。
 """
-
 from __future__ import annotations
 
 import os
 import sys
 import threading
 import time
-from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from . import guard, launcher, prompts, tools
-from .chat import ChatRunner, TurnResult
-from .client import LlamaClient
-from .config import AppConfig, ModelSpec, ProfileSpec
-from .errors import ConfigError, EngineError, GuardError, LaunchError, ToolDenied
-from .context import Session, default_save_path
-from .ui import SYMBOLS, Palette, strip_ansi
-
-
-@dataclass(frozen=True)
-class Command:
-    name: str
-    description: str
-    aliases: tuple = ()
-    arg_hint: str = ""
-
-
-# D1：命令是数据，不是散落的 if 分支；/help 由本表生成。
-COMMANDS: tuple[Command, ...] = (
-    Command("help", "列出内置命令"),
-    Command("model", "列出模型或切换模型（更新记忆）", (), "[id]"),
-    Command("profile", "查看或切换档位（立即落盘记忆）", (), "[N]"),
-    Command("restart", "重启服务以应用待生效档位", ("reload",)),
-    Command("system", "设置系统提示", (), "[text|file]"),
-    Command("task", "应用任务模板 config\\prompts\\task_<name>.md", (), "[name]"),
-    Command("clear", "清空对话历史"),
-    Command("undo", "回滚最近一轮对话", ("pop", "rollback")),
-    Command("save", "保存当前会话 JSON", (), "[path]"),
-    Command("load", "加载会话 JSON", (), "<path>"),
-    Command("exec", "在用户原生 shell 中执行命令（无白名单）", (), "<cmd>"),
-    Command("stop", "停止所有 llama-server", ("kill",)),
-    Command("shutdown", "保存会话、停止服务并退出", ("halt",)),
-    Command("status", "显示服务端 / 显存 / 当前模型 / 空闲倒计时"),
-    Command("quit", "退出 REPL（后台服务保留）", ("exit",)),
-)
-
-COMMAND_MAP: dict[str, Command] = {}
-for _command in COMMANDS:
-    COMMAND_MAP[_command.name] = _command
-    for _alias in _command.aliases:
-        COMMAND_MAP[_alias] = _command
-
-
-def _context_bar(pct: float, width: int = 20) -> str:
-    filled = max(0, min(width, int(round(pct / 100 * width))))
-    return "█" * filled + "░" * (width - filled)
-
-
-def _format_uptime(started_at: str) -> str:
-    try:
-        started = datetime.fromisoformat(started_at)
-    except ValueError:
-        return "-"
-    seconds = max(0, int((datetime.now() - started).total_seconds()))
-    return f"{seconds // 60}分{seconds % 60:02d}秒"
-
-
-class IdleWatchdog:
-    """单守护线程：空闲超时后回调一次；pause/resume 供重启与长命令使用。"""
-
-    def __init__(
-        self,
-        timeout_sec: float,
-        interval_sec: float,
-        on_idle: Callable[[], None],
-        *,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self.timeout_sec = max(0.0, float(timeout_sec))
-        self.interval_sec = max(0.01, float(interval_sec))
-        self._on_idle = on_idle
-        self._clock = clock
-        self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._last_active = clock()
-        self._paused = False
-        self._fired = False
-
-    def start(self) -> None:
-        if self.timeout_sec <= 0 or self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=self._loop, name="vanitas-idle-watchdog", daemon=True
-        )
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-        thread = self._thread
-        self._thread = None
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
-
-    def touch(self) -> None:
-        with self._lock:
-            self._last_active = self._clock()
-            self._fired = False
-
-    def pause(self) -> None:
-        with self._lock:
-            self._paused = True
-            self._last_active = self._clock()
-
-    def resume(self) -> None:
-        with self._lock:
-            self._paused = False
-            self._last_active = self._clock()
-            self._fired = False
-
-    def remaining(self) -> float | None:
-        with self._lock:
-            if self.timeout_sec <= 0:
-                return None
-            if self._fired:
-                return 0.0
-            return max(0.0, self.timeout_sec - (self._clock() - self._last_active))
-
-    def _loop(self) -> None:
-        while not self._stop.wait(self.interval_sec):
-            with self._lock:
-                if self._paused or self._fired or self.timeout_sec <= 0:
-                    continue
-                if self._clock() - self._last_active < self.timeout_sec:
-                    continue
-                self._fired = True
-            try:
-                self._on_idle()
-            except Exception as exc:  # 守护线程不能因回调异常静默退出
-                print(
-                    Palette({}, enabled=False).err(f"空闲看门狗异常：{exc}"),
-                    file=sys.stderr,
-                )
+from .. import guard, launcher, prompts, tools
+from ..chat import ChatRunner, TurnResult
+from ..client import LlamaClient
+from ..config import AppConfig, ModelSpec, ProfileSpec
+from ..context import Session, default_save_path
+from ..errors import ConfigError, EngineError, GuardError, LaunchError, ToolDenied
+from ..ui import SYMBOLS, Palette, strip_ansi
+from . import lifecycle
+from .commands import COMMANDS, COMMAND_MAP, Command
+from .status import format_prompt, format_status_compact, format_status_verbose
+from .watchdog import IdleWatchdog
 
 
 class Repl:
@@ -288,21 +161,17 @@ class Repl:
         return len(text) > 1 and text.startswith("/") and text[1] != " "
 
     def _prompt_text(self) -> str:
-        used = self.session.message_tokens()
-        total = self.profile.ctx
-        pct = int((used / total) * 100) if total > 0 else 0
-        tag = f"ctx: {pct}% | {used / 1000:.1f}k/{total / 1000:.1f}k"
         repl_settings = self.config.settings.repl
-        if pct >= repl_settings.ctx_danger_pct:
-            colored_tag = self.palette.error(f"[{tag}]")
-        elif pct >= repl_settings.ctx_warn_pct:
-            colored_tag = self.palette.warning(f"[{tag}]")
-        else:
-            colored_tag = self.palette.muted(f"[{tag}]")
-        head = self.palette.accent(f"{self.model.id}@{self.profile.key}")
-        if self._sleeping:
-            head += " " + self.palette.muted("[休眠]")
-        return f"{head} {colored_tag} {SYMBOLS['prompt']} "
+        return format_prompt(
+            model_id=self.model.id,
+            profile_key=self.profile.key,
+            used_tokens=self.session.message_tokens(),
+            total_ctx=self.profile.ctx,
+            sleeping=self._sleeping,
+            palette=self.palette,
+            warn_pct=repl_settings.ctx_warn_pct,
+            danger_pct=repl_settings.ctx_danger_pct,
+        )
 
     def confirm_plan(self, plan: str) -> bool:
         """展示动作清单并做一次 [y/N] 确认；无 TTY 的测试可注入 confirm。"""
@@ -641,10 +510,8 @@ class Repl:
         return handler(rest.strip())
 
     def _cmd_help(self, rest: str) -> bool:
-        print(self.palette.accent("内置命令："))
-        for command in COMMANDS:
-            head = f"/{command.name}" + (f" {command.arg_hint}" if command.arg_hint else "")
-            print(f"  {head:<24}{command.description}")
+        from .commands import render_help
+        render_help(self.palette)
         return True
 
     def _print_guard_error(self, exc: GuardError) -> None:
@@ -655,205 +522,13 @@ class Repl:
             print(message, file=sys.stderr)
 
     def _cmd_model(self, rest: str) -> bool:
-        if not rest:
-            records = {record.model_id: record for record in launcher.read_records()}
-            for item in self.config.models:
-                port = self.config.effective_port(item)
-                marker = self.palette.accent("*") if item.id == self.model.id else " "
-                record = records.get(item.id)
-                if record is not None and launcher.pid_running(record.pid):
-                    state = self.palette.ok("运行")
-                elif record is not None:
-                    state = self.palette.warn("残留")
-                else:
-                    state = self.palette.err("停止")
-                model_cell = self.palette.bold(
-                    self.palette.accent(f"{item.id:<10}")
-                )
-                port_cell = self.palette.info(f"port {port:<5}")
-                print(
-                    f" {marker} {model_cell} {item.display:<26} "
-                    f"{port_cell} {state}"
-                )
-            print(
-                self.palette.hint(
-                    "带 id 切换模型；目标没有运行时会自动停旧启新"
-                )
-            )
-            return True
-        try:
-            model = self.config.model(rest)
-        except ConfigError as exc:
-            print(self.palette.err(str(exc)), file=sys.stderr)
-            return True
-        if model.id == self.model.id:
-            print(self.palette.meta(f"已经是当前模型 {model.id}"))
-            return True
-        probed = self._probe(model)
-        if probed is not None:
-            client, port = probed
-            record = next(
-                (item for item in launcher.read_records() if item.model_id == model.id),
-                None,
-            )
-            try:
-                profile = self.config.resolve_profile(
-                    model, record.profile if record else None
-                )
-            except ConfigError as exc:
-                print(self.palette.err(str(exc)), file=sys.stderr)
-                return True
-            self._activate(model, profile, client, port)
-            self._remember_model(model, profile)
-            print(
-                self.palette.ok(
-                    f"已切换到 {model.display} · 档位 {profile.key}"
-                )
-            )
-            return True
-
-        pending = self.pending_profile
-        try:
-            profile = (
-                self.config.resolve_profile(model, pending.key)
-                if pending is not None and pending.key in model.profiles
-                else self.config.resolve_profile(model)
-            )
-        except ConfigError as exc:
-            print(self.palette.err(str(exc)), file=sys.stderr)
-            return True
-
-        print(self.palette.spin("正在切换模型"))
-        try:
-            launcher.stop_all(self.config)
-        except LaunchError as exc:
-            print(self.palette.err(str(exc)), file=sys.stderr)
-            return True
-        self.client = None
-        self.chat_runner = None
-        try:
-            record = launcher.start(
-                self.config,
-                model,
-                profile,
-                palette=self.palette,
-                verbose=self.verbose,
-            )
-            launcher.wait_ready(self.config, record, self.palette)
-        except GuardError as exc:
-            self._print_guard_error(exc)
-            return True
-        except LaunchError as exc:
-            print(self.palette.err(str(exc)), file=sys.stderr)
-            return True
-        self._activate(
-            model,
-            profile,
-            LlamaClient.for_model(self.config, model, record.port),
-            record.port,
-        )
-        self._remember_model(model, profile)
-        print(self.palette.ok("已切换"))
-        return True
+        return lifecycle.switch_model(self, rest)
 
     def _cmd_profile(self, rest: str) -> bool:
-        if not rest:
-            print(
-                self.palette.meta(
-                    f"当前档位 {self.profile.key}：{self.profile.desc}"
-                )
-            )
-            if self.pending_profile is not None:
-                print(
-                    self.palette.meta(
-                        f"待生效档位 {self.pending_profile.key}："
-                        f"{self.pending_profile.desc}"
-                    )
-                )
-            for key in self.model.profile_keys:
-                profile = self.model.profiles[key]
-                print(
-                    f"  [{key}] ctx {profile.ctx:<6}"
-                    f" KV {profile.kv_k}/{profile.kv_v}  {profile.desc}"
-                )
-            print(self.palette.hint("修改档位只影响下次 serve/切换"))
-            return True
-        try:
-            profile = self.config.resolve_profile(self.model, rest)
-        except ConfigError as exc:
-            print(self.palette.err(str(exc)), file=sys.stderr)
-            return True
-        # 只改“待生效”档位：当前服务端的 ctx 不能凭命令幻觉改变。
-        self.pending_profile = profile
-        try:
-            self.config.preferences.set_profile(self.model.id, profile.key)
-        except ConfigError as exc:
-            print(self.palette.err(str(exc)), file=sys.stderr)
-            return True
-        print(
-            self.palette.meta(
-                f"档位 {profile.key} 已暂存，重启生效；偏好已写入"
-            )
-        )
-        print(self.palette.hint("执行 /restart 立即应用该档位"))
-        return True
+        return lifecycle.switch_profile(self, rest)
 
     def _cmd_restart(self, rest: str) -> bool:
-        if not self._confirm_unsaved("重启"):
-            return True
-        target = self.pending_profile or self.profile
-        with self._state_lock:
-            self._chat_active = True
-        self._watchdog.pause()
-        started = time.monotonic()
-        try:
-            try:
-                self.config.preferences.set_profile(self.model.id, target.key)
-            except ConfigError as exc:
-                print(self.palette.err(str(exc)), file=sys.stderr)
-                return True
-            print(self.palette.spin("正在切换档位并重启服务"))
-            try:
-                launcher.stop_all(self.config)
-            except LaunchError as exc:
-                print(self.palette.err(str(exc)), file=sys.stderr)
-                return True
-            self.client = None
-            self.chat_runner = None
-            try:
-                record = launcher.start(
-                    self.config,
-                    self.model,
-                    target,
-                    palette=self.palette,
-                    verbose=self.verbose,
-                )
-                launcher.wait_ready(self.config, record, self.palette)
-            except GuardError as exc:
-                self._print_guard_error(exc)
-                return True
-            except LaunchError as exc:
-                print(self.palette.err(str(exc)), file=sys.stderr)
-                return True
-            self._activate(
-                self.model,
-                target,
-                LlamaClient.for_model(self.config, self.model, record.port),
-                record.port,
-            )
-            elapsed = time.monotonic() - started
-            print(
-                self.palette.ok(
-                    f"✓ 服务端已重启 · 档位 {target.key} "
-                    f"({target.ctx} ctx + {target.kv_k}/{target.kv_v} KV) "
-                    f"· 耗时 {elapsed:.1f}s"
-                )
-            )
-            return True
-        finally:
-            with self._state_lock:
-                self._chat_active = False
-            self._watchdog.resume()
+        return lifecycle.restart_service(self, rest)
 
     def _cmd_system(self, rest: str) -> bool:
         if not rest:
@@ -955,44 +630,7 @@ class Repl:
         return True
 
     def _cmd_load(self, rest: str) -> bool:
-        if not rest:
-            print(self.palette.hint("用法：/load <path>"), file=sys.stderr)
-            return True
-        try:
-            loaded = Session.load(rest)
-        except ConfigError as exc:
-            print(self.palette.err(str(exc)), file=sys.stderr)
-            return True
-        self.session = loaded
-        if loaded.system == "":
-            self.session.system = prompts.system_prompt(self.prompt_dir)
-
-        model = self.model
-        if loaded.model_id:
-            try:
-                model = self.config.model(loaded.model_id)
-            except ConfigError as exc:
-                print(self.palette.warn(str(exc)), file=sys.stderr)
-
-        profile = self.profile
-        if loaded.profile:
-            try:
-                profile = self.config.resolve_profile(model, loaded.profile)
-            except ConfigError as exc:
-                print(self.palette.warn(str(exc)), file=sys.stderr)
-
-        probed = self._probe(model)
-        if probed is not None:
-            client, port = probed
-        else:
-            client, port = None, self.config.effective_port(model)
-        self._activate(model, profile, client, port)
-        print(
-            self.palette.ok(
-                f"已载入 {len(self.session.messages)} 条消息 · 模型 {model.id}"
-            )
-        )
-        return True
+        return lifecycle.load_session(self, rest)
 
     def _cmd_exec(self, rest: str) -> bool:
         if not rest:
@@ -1029,196 +667,24 @@ class Repl:
             self._watchdog.resume()
 
     def _cmd_stop(self, rest: str) -> bool:
-        try:
-            pids = launcher.stop_all(self.config)
-        except LaunchError as exc:
-            print(self.palette.err(str(exc)), file=sys.stderr)
-            return True
-        self.client = None
-        self.chat_runner = None
-        self._sleeping = False
-        self._watchdog.touch()
-        if pids:
-            print(self.palette.ok(f"已停止 {len(pids)} 个服务"))
-            if self.verbose:
-                print(
-                    self.palette.meta("PID " + "、".join(str(pid) for pid in pids))
-                )
-        else:
-            print(self.palette.meta("没有服务在运行"))
-        return True
+        return lifecycle.stop_services(self, rest)
 
     def _cmd_status(self, rest: str) -> bool:
         detail = self.verbose or rest.strip() == "-v"
-        print(self.palette.meta(f"模型 {self.model.id} · {self.model.display}"))
-        print(
-            self.palette.meta(
-                f"档位 {self.profile.key} · {self.profile.desc}"
-                f" · ctx {self.profile.ctx} · KV "
-                f"{self.profile.kv_k}/{self.profile.kv_v}"
-            )
-        )
-        if self.pending_profile is not None:
-            print(
-                self.palette.meta(
-                    f"待生效档位 {self.pending_profile.key} · "
-                    f"{self.pending_profile.desc}"
-                )
-            )
-        ready = bool(self.client and self.client.health())
-        state = self.palette.ok("就绪") if ready else self.palette.err("停止")
-        head = self.palette.meta(f"端口 {self.port}")
-        print(f"{head}  {state}")
-
-        used = self.session.message_tokens()
-        total = self.profile.ctx
-        pct = (used / total * 100) if total > 0 else 0.0
-        repl_settings = self.config.settings.repl
-        bar = _context_bar(pct, repl_settings.status_bar_width)
-        if pct >= repl_settings.ctx_danger_pct:
-            bar_text = self.palette.error(bar)
-        elif pct >= repl_settings.ctx_warn_pct:
-            bar_text = self.palette.warning(bar)
-        else:
-            bar_text = self.palette.muted(bar)
-        print(
-            self.palette.meta(
-                f"视窗监控 {bar_text} {pct:.1f}% · 已用 {used:,} / "
-                f"上限 {total:,} tokens · 剩余 {max(0, total - used):,}"
-            )
-        )
-        if self._sleeping:
-            print(self.palette.meta("空闲休眠中；输入任意内容自动唤醒"))
-        else:
-            remaining = self._watchdog.remaining()
-            if remaining is not None and self.client is not None:
-                print(self.palette.meta(f"空闲倒计时 {remaining:.0f}s"))
-
-        memory = guard.gpu_memory()
-        if memory is not None:
-            gpu_used, gpu_total = memory
-            free = max(0, gpu_total - gpu_used)
-            print(
-                self.palette.meta(
-                    f"显存物理 GPU 已用 {gpu_used:,} MiB / "
-                    f"总量 {gpu_total:,} MiB · 余量 {free:,} MiB"
-                )
-            )
-        else:
-            gpu = guard.gpu_status()
-            print(
-                self.palette.meta(gpu)
-                if gpu
-                else self.palette.meta("GPU 信息不可用，nvidia-smi 未找到")
-            )
-
-        records = launcher.read_records()
-        current = next(
-            (
-                record
-                for record in records
-                if record.model_id == self.model.id
-                and launcher.pid_running(record.pid)
-            ),
-            None,
-        )
-        if current is not None:
-            rss = guard.process_memory_kb(current.pid)
-            rss_text = f"{rss / 1024:.0f} MiB" if rss is not None else "-"
-            print(
-                self.palette.meta(
-                    f"系统进程 PID {current.pid} · RSS {rss_text} · "
-                    f"存活 {_format_uptime(current.started_at)}"
-                )
-            )
-        else:
-            print(self.palette.meta("系统进程 - · 无当前模型运行记录"))
         if detail:
-            for record in records:
-                alive = launcher.pid_running(record.pid)
-                print(
-                    self.palette.meta(
-                        f"{record.model_id} PID {record.pid} 端口 {record.port}"
-                        f" 档位 {record.profile} {'运行' if alive else '停止'}"
-                    )
-                )
-
-        if self.last_turn is not None:
-            ttft = (
-                f"{self.last_turn.ttft_ms:.0f} ms"
-                if self.last_turn.ttft_ms is not None
-                else "-"
-            )
-            print(
-                self.palette.meta(
-                    f"最近推理 TTFT {ttft} · 生成 {self.last_turn.tps:.1f} t/s"
-                )
-            )
+            for line in format_status_verbose(self):
+                print(line)
         else:
-            print(self.palette.meta("最近推理 TTFT - · 生成 -"))
-
-        loop = getattr(self, "loop", None)
-        if loop is not None:
-            print(
-                self.palette.meta(
-                    f"Agent 步数配额 {loop.steps}/{loop.max_steps}"
-                    f" · 熔断停滞计数 {loop.stagnation_count}/{loop.stagnation_limit}"
-                )
-            )
-        else:
-            print(
-                self.palette.meta(
-                    f"Agent 步数配额 -/{self.config.settings.agent.max_steps}"
-                    " · 熔断停滞计数 -/3"
-                )
-            )
-        rounds = sum(
-            1 for item in self.session.messages if item.get("role") == "assistant"
-        )
-        print(
-            self.palette.meta(
-                f"会话 {len(self.session.messages)} 条消息 "
-                f"({rounds} 轮交互) · 约 {used} tokens"
-            )
-        )
+            for line in format_status_compact(self):
+                print(line)
         return True
 
     def _cmd_shutdown(self, rest: str) -> bool:
-        with self._state_lock:
-            if self.session.is_dirty and self.session.messages:
-                try:
-                    saved = self.session.save(default_save_path())
-                except ConfigError as exc:
-                    print(self.palette.err(str(exc)), file=sys.stderr)
-                    return True
-                print(
-                    self.palette.meta(
-                        f"· 会话已自动保存至 {saved}"
-                    )
-                )
-            try:
-                pids = launcher.stop_all(self.config)
-            except LaunchError as exc:
-                print(self.palette.err(str(exc)), file=sys.stderr)
-                return True
-            self.client = None
-            self.chat_runner = None
-            self._sleeping = False
-        if pids:
-            print(
-                self.palette.ok(
-                    f"✓ 已停止后台推理服务 (PID "
-                    f"{'、'.join(str(pid) for pid in pids)}) · 显存通道已完全释放"
-                )
-            )
-        else:
-            print(self.palette.meta("没有服务在运行"))
-        self._watchdog.stop()
-        return False
+        return lifecycle.shutdown(self, rest)
 
     def _cmd_quit(self, rest: str) -> bool:
         if rest.strip().lower() == "all":
-            return self._cmd_shutdown("")
+            return lifecycle.shutdown(self, "")
         if self.client is not None:
             print(
                 self.palette.hint(

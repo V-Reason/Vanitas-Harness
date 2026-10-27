@@ -175,7 +175,8 @@ class AdvancedPromptTests(unittest.TestCase):
                     text = self.repl._prompt_text()
                 self.assertIn("[ctx:", text)
                 self.assertIn(color, text)
-                self.assertIn("/8.2k]", text)
+                self.assertIn("%]", text)
+                self.assertNotIn("/8.2k]", text)
 
     def test_context_tag_percentage(self) -> None:
         with mock.patch.object(
@@ -183,7 +184,8 @@ class AdvancedPromptTests(unittest.TestCase):
         ):
             text = self.repl._prompt_text()
         self.assertIn("ctx: 23%", text)
-        self.assertIn("2.0k/8.2k", text)
+        self.assertIn("[ctx: 23%]", text)
+        self.assertNotIn("2.0k/8.2k", text)
 
     def test_sleeping_tag_visible(self) -> None:
         self.repl._sleeping = True
@@ -301,7 +303,7 @@ class StatusDashboardTests(unittest.TestCase):
                 return_value=True,
             ),
         ):
-            _value, out, _err = quiet_run(lambda: self.repl._cmd_status(""))
+            _value, out, _err = quiet_run(lambda: self.repl._cmd_status("-v"))
         self.assertIn("视窗监控", out)
         self.assertIn("已用 7,000 MiB / 总量 8,188 MiB", out)
         self.assertIn("PID 12480", out)
