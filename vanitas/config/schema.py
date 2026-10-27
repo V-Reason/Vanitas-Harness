@@ -144,7 +144,17 @@ TRANSLATE_FIELDS = frozenset(
         "presets",
     }
 )
-PRESET_FIELDS = frozenset({"task_template", "window_size", "max_window_chars"})
+PRESET_FIELDS = frozenset(
+    {
+        "task_template",
+        "window_size",
+        "max_window_chars",
+        "profile",
+        "context_window",
+        "context_summary_chars",
+        "chunk_chars",
+    }
+)
 DEFAULTS_FIELDS = frozenset({"agent", "chat", "translate", "batch"})
 DEFAULTS_ROLE_FALLBACK = {
     "agent": "general",

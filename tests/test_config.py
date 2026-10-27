@@ -219,7 +219,7 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("del", config.settings.tools.destructive_commands)
         self.assertEqual(config.settings.batch.max_tokens_limit, 8192)
         self.assertEqual(config.settings.translate.max_split_depth, 3)
-        self.assertEqual(config.settings.translate.default_preset, "general")
+        self.assertEqual(config.settings.translate.default_preset, "subtitle")
         self.assertEqual(
             config.settings.translate.presets["general"]["task_template"],
             "translate",
@@ -227,6 +227,21 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(
             config.settings.translate.presets["asmr"]["task_template"],
             "translate_asmr",
+        )
+        self.assertEqual(
+            config.settings.translate.presets["subtitle"]["profile"], "2"
+        )
+        self.assertEqual(
+            config.settings.translate.presets["subtitle"]["context_window"], 12
+        )
+        self.assertEqual(
+            config.settings.translate.presets["subtitle"]["chunk_chars"], 800
+        )
+        self.assertEqual(
+            config.settings.translate.presets["prose"]["context_window"], 10
+        )
+        self.assertEqual(
+            config.settings.translate.presets["general"]["context_window"], 5
         )
         self.assertEqual(config.settings.request.progress_interval_ms, 200)
         self.assertEqual(config.settings.launcher.log_tail_lines, 15)
@@ -333,6 +348,46 @@ class ConfigTests(unittest.TestCase):
         with clean_env():
             with self.assertRaises(ConfigError):
                 self.load()
+
+    def test_translate_scene_presets_and_limits(self) -> None:
+        with clean_env():
+            config = self.load()
+        presets = config.settings.translate.presets
+        self.assertEqual(presets["subtitle"]["profile"], "2")
+        self.assertEqual(presets["subtitle"]["context_window"], 12)
+        self.assertEqual(presets["subtitle"]["chunk_chars"], 800)
+        self.assertEqual(presets["prose"]["profile"], "2")
+        self.assertEqual(presets["prose"]["context_window"], 10)
+        self.assertEqual(presets["asmr"]["window_size"], 6)
+        self.assertEqual(presets["general"]["profile"], "1")
+        self.assertEqual(presets["general"]["context_window"], 5)
+        self.assertEqual(presets["general"]["chunk_chars"], 1500)
+
+        for key, value in (
+            ("context_window", 65),
+            ("context_window", -1),
+            ("context_summary_chars", 39),
+            ("chunk_chars", 49),
+            ("profile", 2),
+            ("profile", ""),
+        ):
+            with self.subTest(key=key, value=value):
+                with clean_env():
+                    config = self.load()
+                broken = json.loads(
+                    (self.config_dir / "settings.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                broken["translate"]["presets"]["subtitle"][key] = value
+                (self.config_dir / "settings.json").write_text(
+                    json.dumps(broken, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                with clean_env():
+                    with self.assertRaises(ConfigError):
+                        self.load()
+                self.write_settings()
 
     def test_agent_action_policy_must_cover_all_actions(self) -> None:
         self.settings["agent"]["confirm_actions"].remove("delete_file")

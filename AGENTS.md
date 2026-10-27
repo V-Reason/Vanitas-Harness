@@ -125,7 +125,7 @@ vanitas\
 # 1) 语法
 Get-ChildItem vanitas\*.py, tests\test_*.py | ForEach-Object { python -m py_compile $_.FullName }
 
-# 2) 单测（当前 353 例）
+# 2) 单测（当前 358 例）
 python -m unittest discover -s tests
 python -m unittest tests.test_agent_parser
 
@@ -161,6 +161,7 @@ python -m vanitas stop
 ## 9. 当前边界
 
 - 默认分工由 `settings.defaults` 配置：Agent=`qwen_coder`、chat=`qwen7b`（非 Coder）、translate=`hymt`、batch=`qwen7b`；`serve <id>` 必须显式模型。`qwen7b` 在 4063，minicpm 仍为 `role=light`。`~/.vanitas/preferences.json` 记忆档位，优先级 CLI > 环境变量 > 偏好 > `default_profile`。
+- 翻译预设：`translate.default_preset=subtitle`；`subtitle/prose/asmr` 使用 HY-MT2 profile 2（8K Q4）、context 12/10/12、chunk 800；`general` 保留 4K Q8 / context 5 / chunk 1500。显式 `--model`/`--profile` 优先；档位不一致时 `translate` 自动停旧启新。
 - 人类 `/exec`/`!` 使用原生 `shell=True`，不再受 `manual_exec_prefixes`/目录限制；`AgentTools.run_shell_ro` 的只读白名单与 `is_inside_workspace` 边界完全不变。
 - AgentTools 新增 `patch_file`、`read_file_range`、`grep_workspace`；全部走 `_require_path`。`patch_file` 需确认，另两项只读自动放行；大文件优先 `read_file_range`/`grep_workspace`，小改优先 `patch_file`，多文件必须单轮动作数组。
 - `delete_path` 递归删除文件/目录，`delete_file` 为兼容别名；工作区根目录、父级与越界路径硬拒绝，符号链接只删链接本身。`/undo`/`/pop`/`/rollback` 回滚最近一轮并释放 tokens。

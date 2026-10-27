@@ -171,6 +171,129 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(code, 4)
         self.assertIn("未知翻译预设", err)
         self.assertIn("general", err)
+        self.assertIn("prose", err)
+        self.assertIn("subtitle", err)
+        self.assertIn("asmr", err)
+
+    def test_translate_scene_presets_choose_effective_settings(self) -> None:
+        cases = (
+            ([], "subtitle", "2", 12, 800, 1),
+            (["--preset", "prose"], "prose", "2", 10, 800, 1),
+            (["--preset", "asmr"], "asmr", "2", 12, 800, 6),
+            (["--preset", "general"], "general", "1", 5, 1500, 1),
+        )
+        for extra, name, profile_key, context, chunk, window in cases:
+            with self.subTest(preset=name):
+                outcome = mock.Mock()
+                outcome.source = Path("a.srt")
+                outcome.output = Path("a.zh.srt")
+                outcome.segments = 1
+                outcome.failures = []
+                with clean_env():
+                    with (
+                        mock.patch.object(
+                            cli,
+                            "_ensure_engine",
+                            return_value=(FakeClient(), 4060),
+                        ) as engine,
+                        mock.patch.object(
+                            cli.translate,
+                            "translate_file",
+                            return_value=outcome,
+                        ) as translate_file,
+                    ):
+                        code, _out, err = run(
+                            ["translate", "a.srt", *extra]
+                        )
+                self.assertEqual(code, 0, err)
+                self.assertEqual(engine.call_args.args[2].key, profile_key)
+                passed = translate_file.call_args.args[2]
+                self.assertEqual(passed.context_window, context)
+                self.assertEqual(passed.chunk_chars, chunk)
+                self.assertEqual(
+                    translate_file.call_args.kwargs["window_size"], window
+                )
+                self.assertEqual(
+                    translate_file.call_args.kwargs["max_window_chars"], 250
+                )
+
+    def test_translate_explicit_profile_overrides_preset(self) -> None:
+        outcome = mock.Mock()
+        outcome.source = Path("a.srt")
+        outcome.output = Path("a.zh.srt")
+        outcome.segments = 1
+        outcome.failures = []
+        with clean_env():
+            with (
+                mock.patch.object(
+                    cli, "_ensure_engine", return_value=(FakeClient(), 4060)
+                ) as engine,
+                mock.patch.object(
+                    cli.translate, "translate_file", return_value=outcome
+                ),
+            ):
+                code, _out, err = run(
+                    [
+                        "translate",
+                        "a.srt",
+                        "--preset",
+                        "subtitle",
+                        "--profile",
+                        "1",
+                    ]
+                )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(engine.call_args.args[2].key, "1")
+
+    def test_ensure_engine_restarts_when_profile_differs(self) -> None:
+        config = load_config()
+        model = config.model("hymt")
+        profile = config.resolve_profile(model, "2")
+        client = mock.Mock()
+        client.health.return_value = True
+        record = mock.Mock(model_id="hymt", pid=123, profile="1")
+        started = mock.Mock(port=4062)
+        with (
+            mock.patch.object(cli.LlamaClient, "for_model", return_value=client),
+            mock.patch.object(
+                cli.launcher, "read_records", return_value=[record]
+            ),
+            mock.patch.object(cli.launcher, "pid_running", return_value=True),
+            mock.patch.object(cli.launcher, "stop_all") as stop,
+            mock.patch.object(
+                cli.launcher, "start", return_value=started
+            ) as start,
+            mock.patch.object(cli.launcher, "wait_ready"),
+        ):
+            _client, port = cli._ensure_engine(
+                config, model, profile, Palette({}, enabled=False)
+            )
+        stop.assert_called_once()
+        start.assert_called_once()
+        self.assertEqual(port, 4062)
+
+    def test_ensure_engine_reuses_matching_profile(self) -> None:
+        config = load_config()
+        model = config.model("hymt")
+        profile = config.resolve_profile(model, "2")
+        client = mock.Mock()
+        client.health.return_value = True
+        record = mock.Mock(model_id="hymt", pid=123, profile="2")
+        with (
+            mock.patch.object(cli.LlamaClient, "for_model", return_value=client),
+            mock.patch.object(
+                cli.launcher, "read_records", return_value=[record]
+            ),
+            mock.patch.object(cli.launcher, "pid_running", return_value=True),
+            mock.patch.object(cli.launcher, "stop_all") as stop,
+            mock.patch.object(cli.launcher, "start") as start,
+        ):
+            _client, port = cli._ensure_engine(
+                config, model, profile, Palette({}, enabled=False)
+            )
+        stop.assert_not_called()
+        start.assert_not_called()
+        self.assertEqual(port, 4062)
 
     def test_palette_disabled_in_pipe(self) -> None:
         # redirect_stdout 之后 sys.stdout 不是 TTY，auto 必须降级为纯文本

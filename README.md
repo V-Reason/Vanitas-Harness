@@ -35,7 +35,9 @@ vanitas.bat models       :: 看模型/端口/档位/别名/路径
 vanitas.bat status       :: 看进程/端口/显存
 vanitas.bat serve qwen7b :: 后台启动并等待 /health
 vanitas.bat agent        :: Agent 闭环；只读自动放行，修改动作确认，步数由 settings.agent.max_steps 控制
-vanitas.bat translate a.srt :: 翻译并显示 5 段实况看板 + 终态统计
+vanitas.bat translate a.srt --preset subtitle :: 普通字幕（默认 8K Q4 / 12 条上下文）
+vanitas.bat translate novel.md --preset prose :: 小说/散文（8K Q4 / 10 条上下文 / 800 字符 chunk）
+vanitas.bat translate asmr.srt --preset asmr :: ASMR 字幕（8K Q4 / 6 行合流）
 vanitas.bat stop         :: 停止所有 llama-server
 ```
 
@@ -113,7 +115,7 @@ Vanitas-Harness\
 │   │   └── bench_stream.py
 │   ├── multi_model_benchmark.py
 │   ├── smoke_cli.py
-│   ├── test_*.py               # 353 个单元测试
+│   ├── test_*.py               # 358 个单元测试
 │   └── reports\                # 评测与冒烟产物（不入库）
 └── docs\                       # 总设计方案 / 项目现状 / 使用手册 / 范式笔记
 ```

@@ -840,7 +840,7 @@ def _load_settings(document: dict) -> Settings:
     if not output_suffix.startswith("."):
         _fail("settings.translate.output_suffix", "必须以 . 开头，例如 .zh")
     context_window = (
-        _as_int(translate, "context_window", "settings.translate", minimum=0, maximum=10)
+        _as_int(translate, "context_window", "settings.translate", minimum=0, maximum=64)
         if "context_window" in translate
         else 5
     )
@@ -915,11 +915,38 @@ def _load_settings(document: dict) -> Settings:
         max_window_chars = _as_optional_int(
             entry, "max_window_chars", label, 250, minimum=50
         )
+        profile = entry.get("profile")
+        if profile is not None:
+            if not isinstance(profile, str) or not profile.strip():
+                _fail(f"{label}.profile", "必须是非空字符串")
+            profile = profile.strip()
+        context_window = _as_optional_int(
+            entry, "context_window", label, 0, minimum=0, maximum=64
+        )
+        context_summary_chars = _as_optional_int(
+            entry,
+            "context_summary_chars",
+            label,
+            200,
+            minimum=40,
+            maximum=2000,
+        )
+        chunk_chars = _as_optional_int(
+            entry, "chunk_chars", label, 1500, minimum=50
+        )
         normalized = {"task_template": template.strip()}
         if "window_size" in entry:
             normalized["window_size"] = window_size
         if "max_window_chars" in entry:
             normalized["max_window_chars"] = max_window_chars
+        if profile is not None:
+            normalized["profile"] = profile
+        if "context_window" in entry:
+            normalized["context_window"] = context_window
+        if "context_summary_chars" in entry:
+            normalized["context_summary_chars"] = context_summary_chars
+        if "chunk_chars" in entry:
+            normalized["chunk_chars"] = chunk_chars
         presets[preset_name.strip()] = normalized
 
     translate_settings = TranslateSettings(

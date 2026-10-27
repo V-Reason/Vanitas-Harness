@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from . import __version__, agent as agent_mod, batch as batch_mod, guard, launcher, prompts, translate
@@ -128,7 +128,10 @@ def _build_parser() -> argparse.ArgumentParser:
     translate_cmd.add_argument(
         "--preset",
         default=None,
-        help="翻译预设（如 general / asmr），对应 config/settings.json 中的 presets",
+        help=(
+            "翻译场景预设：prose（小说/散文）| subtitle（普通字幕，默认）"
+            " | asmr（ASMR）| general（旧版 4K/5）"
+        ),
     )
 
     batch_cmd = sub.add_parser("batch", help="按 JSONL 批量执行任务")
@@ -174,7 +177,23 @@ def _ensure_engine(
 ) -> tuple[LlamaClient, int]:
     port = config.effective_port(model)
     client = LlamaClient.for_model(config, model, port)
-    if client.health():
+    record = next(
+        (
+            item
+            for item in launcher.read_records()
+            if item.model_id == model.id and launcher.pid_running(item.pid)
+        ),
+        None,
+    )
+    if record is not None and record.profile != profile.key:
+        print(
+            palette.meta(
+                f"预设要求档位 {profile.key}，当前为 {record.profile}；重启服务"
+            )
+        )
+        launcher.stop_all(config)
+        client = None
+    elif client.health():
         return client, port
     record = launcher.start(config, model, profile, background=True, palette=palette)
     launcher.wait_ready(config, record, palette)
@@ -311,8 +330,8 @@ def _resolve_translate_preset(
     settings: TranslateSettings,
     requested: str | None,
     prompt_dir: Path,
-) -> tuple[str, str]:
-    """把 --preset 解析为 (预设名, 任务模板名)，并提前校验模板存在。"""
+) -> tuple[str, dict, str]:
+    """把 --preset 解析为 (预设名, 预设配置, 任务模板名)。"""
     presets = settings.presets or {}
     if requested is None:
         name = (settings.default_preset or "general").strip()
@@ -323,6 +342,7 @@ def _resolve_translate_preset(
         if requested is not None:
             available = "、".join(sorted(presets)) or "无"
             raise ConfigError(f"未知翻译预设 {name!r}；可用：{available}")
+        entry = {}
         template = "translate"
     else:
         template = str(entry.get("task_template") or "translate").strip()
@@ -332,7 +352,7 @@ def _resolve_translate_preset(
         raise ConfigError(
             f"翻译预设 {name!r} 的模板 {template!r} 不可用：{exc}"
         ) from exc
-    return name, template
+    return name, entry, template
 
 
 def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette) -> int:
@@ -346,7 +366,7 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
         )
     settings = config.settings.translate
     try:
-        _preset_name, task_template = _resolve_translate_preset(
+        preset_name, preset_info, task_template = _resolve_translate_preset(
             settings,
             getattr(args, "preset", None),
             config.config_dir / "prompts",
@@ -354,16 +374,28 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
     except ConfigError as exc:
         print(palette.err(str(exc)), file=sys.stderr)
         return 4
-    preset_info = settings.presets.get(_preset_name, {})
+    effective = replace(
+        settings,
+        context_window=int(
+            preset_info.get("context_window", settings.context_window)
+        ),
+        context_summary_chars=int(
+            preset_info.get(
+                "context_summary_chars", settings.context_summary_chars
+            )
+        ),
+        chunk_chars=int(preset_info.get("chunk_chars", settings.chunk_chars)),
+    )
     window_size = int(preset_info.get("window_size", 1))
     max_window_chars = int(preset_info.get("max_window_chars", 250))
     model = _resolve_model(config, args.model, "translate")
-    profile = config.resolve_profile(model, args.profile)
+    profile_key = args.profile or preset_info.get("profile")
+    profile = config.resolve_profile(model, profile_key)
     out_dir = _resolve_cli_path(args.out_dir) if args.out_dir else None
     monitor = TranslationMonitor(
         stream=sys.stderr,
         enabled=palette.enabled,
-        capacity=settings.monitor_lines,
+        capacity=effective.monitor_lines,
         palette=palette,
     )
     chat, _port = _translate_chat(
@@ -373,8 +405,13 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
         palette,
         on_stat=monitor.record,
         task_template=task_template,
+        translate_settings=effective,
     )
-    print(palette.meta(f"{model.display} · 档位 {profile.key}"))
+    print(
+        palette.meta(
+            f"{model.display} · 档位 {profile.key} · 预设 {preset_name}"
+        )
+    )
     failures = 0
     for raw in args.inputs:
         source = _resolve_cli_path(raw)
@@ -384,7 +421,7 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
             outcome = translate.translate_file(
                 chat,
                 source,
-                settings,
+                effective,
                 out_dir=out_dir,
                 window_size=window_size,
                 max_window_chars=max_window_chars,
@@ -428,9 +465,10 @@ def _translate_chat(
     *,
     on_stat=None,
     task_template: str = "translate",
+    translate_settings: TranslateSettings | None = None,
 ):
     client, port = _ensure_engine(config, model, profile, palette)
-    settings = config.settings.translate
+    settings = translate_settings or config.settings.translate
     chat = translate.make_engine_chat(
         client,
         config.config_dir / "prompts",

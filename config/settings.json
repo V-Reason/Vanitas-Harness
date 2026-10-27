@@ -92,14 +92,42 @@
     "monitor_lines": 5,
     "temperature": 0.2,
     "max_split_depth": 3,
-    "default_preset": "general",
+    "default_preset": "subtitle",
     "presets": {
-      "general": {
-        "task_template": "translate"
+      "subtitle": {
+        "task_template": "translate",
+        "profile": "2",
+        "context_window": 12,
+        "context_summary_chars": 200,
+        "chunk_chars": 800,
+        "window_size": 1,
+        "max_window_chars": 250
+      },
+      "prose": {
+        "task_template": "translate",
+        "profile": "2",
+        "context_window": 10,
+        "context_summary_chars": 200,
+        "chunk_chars": 800,
+        "window_size": 1,
+        "max_window_chars": 250
       },
       "asmr": {
         "task_template": "translate_asmr",
+        "profile": "2",
+        "context_window": 12,
+        "context_summary_chars": 200,
+        "chunk_chars": 800,
         "window_size": 6,
+        "max_window_chars": 250
+      },
+      "general": {
+        "task_template": "translate",
+        "profile": "1",
+        "context_window": 5,
+        "context_summary_chars": 200,
+        "chunk_chars": 1500,
+        "window_size": 1,
         "max_window_chars": 250
       }
     }
