@@ -916,8 +916,12 @@ def _run_actions(
         except (TypeError, ValueError) as exc:
             ok, detail = False, f"工具参数无效：{exc}"
             print(palette.err(detail), file=sys.stderr)
-        if not ok and failed_sink is not None:
-            failed_sink[_action_signature(action)] = detail
+        if failed_sink is not None:
+            signature = _action_signature(action)
+            if ok:
+                failed_sink.pop(signature, None)
+            else:
+                failed_sink[signature] = detail
         results.append((action, ok, detail))
 
     if len(results) == 1:
@@ -988,7 +992,8 @@ class AgentLoop:
         self.parse_retries = 0
         self.stagnation_hits = 0
         self._stagnation_reason = ""
-        self._last_failed_signatures: dict[tuple[str, str], str] = {}
+        self._failed_signatures: dict[tuple[str, str], str] = {}
+        self._rounds: deque[tuple[str, ...]] = deque(maxlen=6)
 
     @property
     def recent_count(self) -> int:
@@ -1011,7 +1016,7 @@ class AgentLoop:
             self.execute_action,
             max_feedback_chars=self.config.settings.agent.max_feedback_chars,
             palette=self.palette,
-            failed_sink=self._last_failed_signatures,
+            failed_sink=self._failed_signatures,
             head_lines=self.config.settings.agent.feedback_head_lines,
             tail_lines=self.config.settings.agent.feedback_tail_lines,
         )
@@ -1034,13 +1039,14 @@ class AgentLoop:
     ) -> None:
         execute_actions = execute or self.execute_actions
         self._recent.clear()
+        self._rounds.clear()
         steps = 0
         parse_retries = 0
         self.steps = 0
         self.parse_retries = 0
         self.stagnation_hits = 0
         self._stagnation_reason = ""
-        self._last_failed_signatures.clear()
+        self._failed_signatures.clear()
         stream = _AgentAnswerStream()
         result = converse(text, None, stream)
         if result is None or result.interrupted:
@@ -1102,10 +1108,10 @@ class AgentLoop:
             blocked = [
                 (
                     action,
-                    self._last_failed_signatures[_action_signature(action)],
+                    self._failed_signatures[_action_signature(action)],
                 )
                 for action in actions
-                if _action_signature(action) in self._last_failed_signatures
+                if _action_signature(action) in self._failed_signatures
             ]
             if blocked:
                 summary = "；".join(
@@ -1114,14 +1120,14 @@ class AgentLoop:
                 )
                 print(
                     self.palette.warn(
-                        f"拦截上一步已失败动作，不再二次确认：{summary}"
+                        f"拦截此前已失败动作，不再二次确认：{summary}"
                     )
                 )
                 steps += 1
                 self.steps = steps
                 feedback = (
                     "<tool_result>\n"
-                    f"执行失败：该动作在上一步已失败（{summary}）。"
+                    f"执行失败：该动作此前已失败（{summary}）。"
                     "严禁以相同参数重复提交；请修改参数、改用其他策略或直接收尾。\n"
                     "</tool_result>"
                 )
@@ -1140,7 +1146,6 @@ class AgentLoop:
             else:
                 announce(actions)
 
-            self._last_failed_signatures.clear()
             feedback = execute_actions(actions)
             steps += 1
             self.steps = steps
@@ -1150,8 +1155,11 @@ class AgentLoop:
                 return
 
     def _stagnates(self, actions: list[AgentAction]) -> bool:
-        for action in actions:
-            self._recent.append(_action_signature(action))
+        signatures = [_action_signature(action) for action in actions]
+        for signature in signatures:
+            self._recent.append(signature)
+        self._rounds.append(tuple(sorted(signatures)))
+        rounds = list(self._rounds)
 
         recent = list(self._recent)
         if (
@@ -1180,6 +1188,25 @@ class AgentLoop:
         if window:
             if max(Counter(window).values()) >= 3:
                 self._stagnation_reason = "重复"
+                return True
+        if len(rounds) >= 3 and len(set(rounds[-3:])) == 1:
+            self._stagnation_reason = "批次重复"
+            return True
+        if len(rounds) >= 4:
+            if (
+                rounds[-1] == rounds[-3]
+                and rounds[-2] == rounds[-4]
+                and rounds[-1] != rounds[-2]
+            ):
+                self._stagnation_reason = "批次震荡"
+                return True
+        if len(rounds) >= 6:
+            if (
+                rounds[-1] == rounds[-4]
+                and rounds[-2] == rounds[-5]
+                and rounds[-3] == rounds[-6]
+            ):
+                self._stagnation_reason = "批次震荡"
                 return True
         return False
 
@@ -1274,7 +1301,7 @@ class AgentRepl(Repl):
             self._execute,
             max_feedback_chars=self.config.settings.agent.max_feedback_chars,
             palette=self.palette,
-            failed_sink=self.loop._last_failed_signatures,
+            failed_sink=self.loop._failed_signatures,
             head_lines=self.config.settings.agent.feedback_head_lines,
             tail_lines=self.config.settings.agent.feedback_tail_lines,
         )
