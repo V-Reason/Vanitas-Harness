@@ -125,7 +125,7 @@ vanitas\
 # 1) 语法
 Get-ChildItem vanitas\*.py, tests\test_*.py | ForEach-Object { python -m py_compile $_.FullName }
 
-# 2) 单测（当前 406 例）
+# 2) 单测（当前 412 例）
 python -m unittest discover -s tests
 python -m unittest tests.test_agent_parser
 
@@ -165,7 +165,7 @@ python -m vanitas stop
 - 提示词：`system_default` 全静态；`task_chat/task_code/task_agent/task_translate_asmr` 使用 XML，`task_translate`/`agent_continue` 保持紧凑纯文本；仅 6 个占位符。`task_agent` 的批量是逐项执行而非事务，`patch_file` 只要求唯一片段、不强制固定上下行数；不提供 `_reason` 参数。
 - 翻译上下文：`TranslationEngine._history` 是文档级状态；CLI 在每个输入文件前调用 `reset_history()`，多文件不得继承上一文件的标题、摘要或人名。`sanitize_translation_output` 会去掉 `……。`/`——。` 的重复句号。
 - 翻译目录：`translate` 的 `inputs` 接受文件、目录或混用；目录用 `os.walk(followlinks=False)` 递归，只收 `settings.translate.source_suffixes`，跳过目录内已有 `<原名><output_suffix>.<扩展名>` 产物，按真实路径去重。`--out-dir` 下目录输入保留相对层级，直接文件平铺；写出前拒绝目标冲突与覆盖输入。空目录/不可遍历目录在启动模型前返回 `5`；显式文件的存在性仍由 `translate_file()` 判定。
-- 文件名翻译：`--translate-filename`/`--translate-name` 同时翻译正文与文件名，输出 suffix 覆盖为空串（不加 `.zh`），正文仍只接受 `source_suffixes`；`--translate-filename-only`/`--translate-name-only` 只原地改名、不读内容、支持任意扩展名、拒绝 `--out-dir`。两者都用 `translate_filename()`/`translate_dirname()` 与独立 `FILENAME_SYSTEM_PROMPT`（中文原样、编号/专名/缩写/型号/符号/`_临时` 等刻意前后缀原样、不扩写）；`sanitize_filename_stem()` 保留 `_`/`[]`/`【】`/`《》` 等符号、去引号/前缀/扩展名、替换 Windows 非法字符、限长 80。CLI 用 `Spinner` 显示 `文件名/目录名 i/N` 逐项进度。正文模式重名由 `plan_translation_outputs()` 拦截，仅改名模式由 `plan_name_renames()` 拦截，`apply_name_renames()` 按深度从深到浅、每层两阶段重命名。受保护编号/专名/符号丢失时回退原名；截断/空结果直接失败。
+- 文件名翻译：`--translate-filename`/`--translate-name` 同时翻译正文与文件名，输出 suffix 覆盖为空串（不加 `.zh`），正文仍只接受 `source_suffixes`；`--translate-filename-only`/`--translate-name-only` 只原地改名、不读内容、支持任意扩展名、拒绝 `--out-dir`。两者都用短正向 `FILENAME_SYSTEM_PROMPT`（普通英文/日文词照常翻译，已有中文保持，编号/专名/刻意标记保留）；硬保护只覆盖高置信编号、全大写/内部大写、版本号、`_临时`/方括号中文标记，不保护独立数字和普通下划线。`NameTranslation` 携带回退原因，缺失保护片段或未翻译时最多重试一次，仍失败才保留原名并告警；单文件回退不中止批处理。CLI 用 `Spinner` 显示 `文件名/目录名 i/N` 进度。正文模式回退且无 `--out-dir` 时跳过该文件避免覆盖源文件。
 - 人类 `/exec`/`!` 使用原生 `shell=True`，不再受 `manual_exec_prefixes`/目录限制；`AgentTools.run_shell_ro` 的只读白名单与 `is_inside_workspace` 边界完全不变。
 - AgentTools 新增 `patch_file`、`read_file_range`、`grep_workspace`；全部走 `_require_path`。`patch_file` 需确认，另两项只读自动放行；大文件优先 `read_file_range`/`grep_workspace`，小改优先 `patch_file`，多文件优先单轮动作数组；批量逐项执行，失败不回滚已成功项，不是事务。
 - `delete_path` 递归删除文件/目录，`delete_file` 为兼容别名；工作区根目录、父级与越界路径硬拒绝，符号链接只删链接本身。`/undo`/`/pop`/`/rollback` 回滚最近一轮并释放 tokens。

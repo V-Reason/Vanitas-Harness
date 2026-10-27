@@ -40,34 +40,43 @@ FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)\n```$", re.DOTALL)
 QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’", "「": "」", "『": "』"}
 QUOTE_CHARS = frozenset(QUOTE_PAIRS) | frozenset(QUOTE_PAIRS.values())
 FILENAME_PROMPT = (
-    "翻译下面的文件名主体。只翻译普通英文/日文词；中文、专有名词、缩写、"
-    "型号和符号原样保留。不要解释、不要加引号、不要保留扩展名、不要换行。"
-    "只输出结果。\n文件名：{name}"
+    "翻译下面的文件名主体。只输出结果，不要解释、不要加引号。\n"
+    "文件名：{name}"
 )
 FILENAME_SYSTEM_PROMPT = (
-    "你是文件名翻译器，只输出译名主体。"
-    "中文文件名必须原样照搬，不润色、不改写、不扩写；"
-    "编号/编码（如 RJ401457、A-12、2024-001）必须逐字符保留，"
-    "不拆解、不改大小写、不改分隔符；"
-    "英文专有名词、缩写、型号、符号（如 AI、PDF、v2、NYC、C++、&、+、#、[]、【】）"
-    "必须原样保留，不翻译、不展开、不音译；"
-    "刻意放置的前后缀/符号（如 _临时、_final、[草稿]、【保留】）必须原样保留，"
-    "不得删除、改写或替换；"
-    "只翻译确实需要翻译的英文/日文普通词，禁止添加原文没有的词语或解释。"
-    "示例：AI简报_v2 → AI简报_v2；NYC_2024 → NYC_2024；"
+    "你是文件名翻译器。只翻译文件名中的普通英文/日文词，已有中文保持原样。"
+    "编号/编码、缩写、版本号、下划线和刻意标记（如 _临时、[草稿]）原样保留。"
+    "示例：Hello_World → 你好_世界；Chapter_01 → 第01章；"
+    "photos_2024 → 照片_2024；report_临时 → 报告_临时；"
     "RJ401457_临时 → RJ401457_临时；The Clock → 时钟。"
-    "宁可保留原文，也不要改写编号、专名或刻意符号。"
+    "只输出文件名主体，不解释、不加引号。"
 )
-FILENAME_PROTECTED_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9+#&._-]*")
-FILENAME_PROTECTED_MARKER = re.compile(
-    r"(?:[_#\-]+[\u4e00-\u9fff]{1,8}|"
-    r"[\[\【\(（《][^\]\】\)）《》]{1,12}[\]\】\)）《》])"
-)
-FILENAME_KEEP_SYMBOLS = "_-[]【】()（）《》+#&."
 FILENAME_MAX_TOKENS = 96
+FILENAME_MAX_RETRIES = 1
 FILENAME_MAX_CHARS = 80
 FILENAME_INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-FILENAME_PREFIX = re.compile(r"^(?:文件名|译名|翻译结果)\s*[:：]\s*")
+FILENAME_PREFIX = re.compile(
+    r"^(?:(?:文件名|file name|翻译结果|翻译|译文|译名)\s*[:：]\s*)",
+    re.IGNORECASE,
+)
+FILENAME_EXPLANATION = re.compile(
+    r"(?:翻译|译文|译名|file name)\s*[:：]\s*", re.IGNORECASE
+)
+FILENAME_TOKEN = re.compile(r"[A-Za-z0-9+#&]+")
+FILENAME_CODE_ID = re.compile(
+    r"(?<![A-Za-z0-9])[A-Za-z]{1,4}\d{2,}(?![A-Za-z0-9])"
+)
+FILENAME_CODE_VERSION = re.compile(
+    r"(?<![A-Za-z0-9])[vV]\d+(?![A-Za-z0-9])"
+)
+FILENAME_CODE_HYPHEN = re.compile(
+    r"(?<![A-Za-z0-9])[A-Za-z]{1,4}[-_]\d+(?![A-Za-z0-9])"
+)
+FILENAME_CODE_NUMERIC = re.compile(r"(?<!\d)\d{2,}(?:[-_/.]\d{2,})+(?!\d)")
+FILENAME_PROTECTED_MARKER = re.compile(
+    r"(?:[_#\-]+[\u4e00-\u9fff]{1,8}|"
+    r"[\[\【\(（《][\u4e00-\u9fff]{1,8}[\]\】\)）《》])"
+)
 
 
 @dataclass
@@ -106,6 +115,12 @@ class TranslationPlan:
         if parent in (Path(), Path(".")):
             return self.source.path.name
         return (parent / self.source.path.name).as_posix()
+
+
+@dataclass(frozen=True)
+class NameTranslation:
+    name: str
+    fallback_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -187,37 +202,66 @@ def sanitize_translation_output(raw_text: str, source_text: str) -> str:
     return text
 
 
-def _protected_name_tokens(stem: str) -> list[str]:
-    """找出必须逐字保留的缩写/型号/符号片段，供模型不听话时兜底。"""
-    protected: list[str] = []
-    for token in FILENAME_PROTECTED_TOKEN.findall(stem):
+def _protected_name_fragments(stem: str) -> list[str]:
+    fragments: list[str] = []
+
+    def add(fragment: str) -> None:
+        if fragment and fragment not in fragments:
+            fragments.append(fragment)
+
+    for pattern in (
+        FILENAME_CODE_ID,
+        FILENAME_CODE_VERSION,
+        FILENAME_CODE_HYPHEN,
+        FILENAME_CODE_NUMERIC,
+    ):
+        for match in pattern.finditer(stem):
+            add(match.group(0))
+    for token in FILENAME_TOKEN.findall(stem):
         letters = [char for char in token if char.isalpha()]
         uppercase = sum(1 for char in letters if char.isupper())
         has_internal_upper = any(char.isupper() for char in token[1:])
-        if (
-            any(char.isdigit() for char in token)
-            or any(char in "+#&" for char in token)
-            or uppercase >= 2
-            or has_internal_upper
+        if uppercase >= 2 or has_internal_upper or any(
+            char in "+#&" for char in token
         ):
-            protected.append(token)
-    return protected
-
-
-def _protected_name_fragments(stem: str) -> list[str]:
-    fragments = _protected_name_tokens(stem)
+            add(token)
     for match in FILENAME_PROTECTED_MARKER.finditer(stem):
-        fragment = match.group(0)
-        if fragment not in fragments:
-            fragments.append(fragment)
+        add(match.group(0))
     return fragments
 
 
-def _has_lost_symbols(source: str, translated: str) -> bool:
-    return any(
-        source.count(symbol) != translated.count(symbol)
-        for symbol in FILENAME_KEEP_SYMBOLS
-    )
+def _remainder_after_protection(stem: str, fragments: list[str]) -> str:
+    remainder = stem
+    for fragment in sorted(fragments, key=len, reverse=True):
+        remainder = remainder.replace(fragment, " ")
+    return remainder
+
+
+def _has_translatable_text(stem: str, fragments: list[str]) -> bool:
+    remainder = _remainder_after_protection(stem, fragments)
+    return bool(re.search(r"[A-Za-z]{2,}|[\u3040-\u30ff]", remainder))
+
+
+def _strip_filename_explanation(raw: str) -> str:
+    text = raw.strip()
+    match = FILENAME_EXPLANATION.search(text)
+    if match:
+        after = text[match.end() :].strip()
+        if after:
+            return after
+    return text
+
+
+def _name_failure(stem: str, translated: str) -> str | None:
+    if not translated:
+        return "结果为空"
+    fragments = _protected_name_fragments(stem)
+    missing = [fragment for fragment in fragments if fragment not in translated]
+    if missing:
+        return "缺少受保护片段：" + "、".join(missing)
+    if translated == stem and _has_translatable_text(stem, fragments):
+        return "模型未翻译普通词"
+    return None
 
 
 def sanitize_filename_stem(raw: str, source_suffix: str = "") -> str:
@@ -226,7 +270,8 @@ def sanitize_filename_stem(raw: str, source_suffix: str = "") -> str:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return ""
-    text = FILENAME_PREFIX.sub("", lines[0])
+    text = _strip_filename_explanation(lines[0])
+    text = FILENAME_PREFIX.sub("", text)
     text = text.strip(" \t\"'“”‘’「」『』")
     if source_suffix and text.lower().endswith(source_suffix.lower()):
         text = text[: -len(source_suffix)]
@@ -281,52 +326,65 @@ class TranslationEngine:
 
     def translate_filename(self, filename: str) -> str:
         """用翻译模型把文件名主体译成中文；不写入正文上下文。"""
+        return self.translate_filename_result(filename).name
+
+    def translate_filename_result(self, filename: str) -> NameTranslation:
         path = Path(filename)
-        return self._translate_name(path.stem, path.suffix, filename)
+        return self._translate_name_result(path.stem, path.suffix, filename)
 
     def translate_dirname(self, dirname: str) -> str:
         """翻译目录名整体，不把点号当扩展名剥离。"""
-        return self._translate_name(dirname, "", dirname)
+        return self.translate_dirname_result(dirname).name
 
-    def _translate_name(self, name: str, source_suffix: str, label: str) -> str:
+    def translate_dirname_result(self, dirname: str) -> NameTranslation:
+        return self._translate_name_result(dirname, "", dirname)
+
+    def _translate_name_result(
+        self, name: str, source_suffix: str, label: str
+    ) -> NameTranslation:
         stem = name.strip()
         if not stem:
             raise TranslateError(f"名称为空，无法翻译：{label!r}")
+        fragments = _protected_name_fragments(stem)
+        if not _has_translatable_text(stem, fragments):
+            return NameTranslation(stem)
+
+        reason = ""
+        for attempt in range(FILENAME_MAX_RETRIES + 1):
+            result = self._call_name(stem, reason if attempt else "")
+            choices = result.get("choices") or []
+            finish_reason = ""
+            if choices and isinstance(choices[0], dict):
+                finish_reason = str(choices[0].get("finish_reason") or "")
+            if finish_reason == "length":
+                reason = "输出被截断"
+                continue
+            raw = extract_content(result)
+            translated = sanitize_filename_stem(
+                _strip_filename_explanation(raw), source_suffix
+            )
+            reason = _name_failure(stem, translated) or ""
+            if not reason:
+                return NameTranslation(translated)
+        return NameTranslation(stem, reason or "模型输出不可用")
+
+    def _call_name(self, stem: str, correction: str) -> dict:
+        user_content = FILENAME_PROMPT.format(name=stem)
+        if correction:
+            user_content += (
+                f"\n上一次结果不可用：{correction}。"
+                "请重新翻译，完整保留编号/专名/刻意标记，"
+                "只输出文件名主体。"
+            )
         messages: list[dict] = [
-            {"role": "system", "content": FILENAME_SYSTEM_PROMPT}
+            {"role": "system", "content": FILENAME_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
         ]
-        messages.append(
-            {
-                "role": "user",
-                "content": FILENAME_PROMPT.format(name=stem),
-            }
-        )
-        result = self._client.chat(
+        return self._client.chat(
             messages,
             max_tokens=FILENAME_MAX_TOKENS,
             temperature=self._options.temperature,
         )
-        choices = result.get("choices") or []
-        finish_reason = ""
-        if choices and isinstance(choices[0], dict):
-            finish_reason = str(choices[0].get("finish_reason") or "")
-        if finish_reason == "length":
-            raise TranslateError(f"名称翻译输出被截断：{label}")
-        translated = sanitize_filename_stem(
-            extract_content(result), source_suffix
-        )
-        missing = [
-            fragment
-            for fragment in _protected_name_fragments(stem)
-            if fragment not in translated
-        ]
-        if missing or _has_lost_symbols(stem, translated):
-            # 模型常把 NYC 音译成“纽约市”、把编号拆开或删掉 _临时；
-            # 宁可不改，也不能产出错误编号/专名/刻意符号。
-            translated = stem
-        if not translated:
-            raise TranslateError(f"名称翻译结果为空：{label}")
-        return translated
 
     # ------------------------------------------------------------------ #
     # 内部

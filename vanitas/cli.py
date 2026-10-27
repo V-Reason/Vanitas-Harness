@@ -466,8 +466,9 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
         task_template=task_template,
         translate_settings=effective,
     )
+    name_failures = 0
     if args.translate_name:
-        translate_filename = getattr(chat, "translate_filename", None)
+        translate_filename = getattr(chat, "translate_filename_result", None)
         if not callable(translate_filename):
             print(
                 palette.err("当前翻译引擎不支持文件名翻译"),
@@ -477,8 +478,9 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
         translated: list[translate.TranslationSource] = []
         total = len(sources)
         for index, source in enumerate(sources, start=1):
+            label = f"文件名 {index}/{total} {source.path.name}"
             try:
-                stem = _translate_one_name(
+                result = _translate_one_name(
                     translate_filename,
                     source.path.name,
                     source.path.suffix,
@@ -491,8 +493,28 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                     palette.err(f"{source.path.name}：文件名翻译失败：{exc}"),
                     file=sys.stderr,
                 )
-                return 5
-            translated.append(replace(source, translated_stem=stem))
+                name_failures += 1
+                continue
+            if result.fallback_reason:
+                print(
+                    palette.warn(
+                        f"保留原名：{label}（{result.fallback_reason}）"
+                    ),
+                    file=sys.stderr,
+                )
+                if out_dir is None:
+                    print(
+                        palette.err(
+                            f"{label}：回退原名会覆盖源文件，已跳过；"
+                            "请改用 --out-dir"
+                        ),
+                        file=sys.stderr,
+                    )
+                    name_failures += 1
+                    continue
+            translated.append(
+                replace(source, translated_stem=result.name)
+            )
         sources = translated
         try:
             plans = translate.plan_translation_outputs(
@@ -507,7 +529,7 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
             f" · {len(plans)} 个文件"
         )
     )
-    failures = 0
+    failures = name_failures
     for plan in plans:
         source = plan.source.path
         # 每个文件独立计时/计量；reset 也负责清掉上一文件的看板。
@@ -571,17 +593,17 @@ def _translate_one_name(
     label: str,
     palette: Palette,
     interval_ms: int,
-) -> str:
+) -> translate.NameTranslation:
     """逐项翻译名称并即时显示进度；非 TTY 只输出完成行。"""
     with Spinner(
         f"{label} {old_name}",
         palette,
         interval_ms=interval_ms,
     ) as spinner:
-        translated = translate_name(old_name)
-        final_name = f"{translated}{suffix}"
+        result = translate_name(old_name)
+        final_name = f"{result.name}{suffix}"
         spinner.done(f"{label} {old_name} → {final_name}")
-    return translated
+    return result
 
 
 def _cmd_translate_names(
@@ -609,8 +631,8 @@ def _cmd_translate_names(
         task_template=task_template,
         translate_settings=settings,
     )
-    translate_filename = getattr(chat, "translate_filename", None)
-    translate_dirname = getattr(chat, "translate_dirname", None)
+    translate_filename = getattr(chat, "translate_filename_result", None)
+    translate_dirname = getattr(chat, "translate_dirname_result", None)
     if not callable(translate_filename) or not callable(translate_dirname):
         print(
             palette.err("当前翻译引擎不支持文件名/目录名翻译"),
@@ -625,33 +647,37 @@ def _cmd_translate_names(
     )
     translated: list[translate.NameTarget] = []
     total = len(targets)
+    name_errors = 0
     for index, target in enumerate(targets, start=1):
+        kind = "目录名" if target.is_dir else "文件名"
+        label = f"{kind} {index}/{total} {target.path.name}"
         try:
-            if target.is_dir:
-                name = _translate_one_name(
-                    translate_dirname,
-                    target.path.name,
-                    "",
-                    f"目录名 {index}/{total}",
-                    palette,
-                    config.settings.ui.spinner_interval_ms,
-                )
-            else:
-                name = _translate_one_name(
-                    translate_filename,
-                    target.path.name,
-                    target.path.suffix,
-                    f"文件名 {index}/{total}",
-                    palette,
-                    config.settings.ui.spinner_interval_ms,
-                )
+            result = _translate_one_name(
+                translate_dirname if target.is_dir else translate_filename,
+                target.path.name,
+                "" if target.is_dir else target.path.suffix,
+                f"{kind} {index}/{total}",
+                palette,
+                config.settings.ui.spinner_interval_ms,
+            )
         except (EngineError, TranslateError) as exc:
             print(
                 palette.err(f"{target.path.name}：名称翻译失败：{exc}"),
                 file=sys.stderr,
             )
-            return 5
-        translated.append(replace(target, translated_name=name))
+            name_errors += 1
+            translated.append(
+                replace(target, translated_name=target.path.name)
+            )
+            continue
+        if result.fallback_reason:
+            print(
+                palette.warn(
+                    f"保留原名：{label}（{result.fallback_reason}）"
+                ),
+                file=sys.stderr,
+            )
+        translated.append(replace(target, translated_name=result.name))
     try:
         renames = translate.plan_name_renames(translated)
         translate.apply_name_renames(renames)
@@ -660,9 +686,9 @@ def _cmd_translate_names(
         return 5
     if not renames:
         print(palette.ok("没有需要重命名的名称"))
-        return 0
-    print(palette.ok(f"完成，重命名 {len(renames)} 项"))
-    return 0
+    else:
+        print(palette.ok(f"完成，重命名 {len(renames)} 项"))
+    return 5 if name_errors else 0
 
 
 def _translate_chat(

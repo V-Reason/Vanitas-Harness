@@ -70,9 +70,25 @@ class NamingClient(FakeClient):
                 content = "片段"
             elif "cover" in name:
                 content = "封面"
+            elif "Hello" in name:
+                content = "你好"
             else:
                 content = "译名"
             return {"choices": [{"message": {"content": content}}]}
+        return super().chat(
+            messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format=response_format,
+            timeout=timeout,
+        )
+
+
+class PartialNamingClient(NamingClient):
+    def chat(self, messages, *, max_tokens, temperature=0.2, response_format=None, timeout=None):
+        prompt = str(messages[-1]["content"])
+        if "文件名：" in prompt and "NYC_notes" in prompt:
+            return {"choices": [{"message": {"content": "文件名：纽约市_笔记"}}]}
         return super().chat(
             messages,
             max_tokens=max_tokens,
@@ -262,6 +278,59 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("文件名 2/3", err)
         self.assertIn("文件名 3/3", err)
         self.assertIn("完成，重命名 3 项", out)
+
+    def test_translate_filename_only_continues_after_fallback(self) -> None:
+        root = self.dir / "media"
+        root.mkdir()
+        (root / "NYC_notes.mp4").write_bytes(b"\x00")
+        (root / "Hello.mp4").write_bytes(b"\x01")
+        with clean_env():
+            with mock.patch.object(
+                cli, "_ensure_engine", return_value=(PartialNamingClient(), 4060)
+            ):
+                code, _out, err = run(
+                    ["translate", str(root), "--translate-name-only"]
+                )
+        self.assertEqual(code, 0, err)
+        self.assertTrue((root / "你好.mp4").is_file())
+        self.assertTrue((root / "NYC_notes.mp4").is_file())
+        self.assertIn("保留原名", err)
+
+    def test_translate_filename_content_fallback_without_out_dir_skips(self) -> None:
+        source = self.dir / "NYC_notes.md"
+        source.write_text("Body\n", encoding="utf-8")
+        with clean_env():
+            with mock.patch.object(
+                cli, "_ensure_engine", return_value=(PartialNamingClient(), 4060)
+            ):
+                code, _out, err = run(
+                    ["translate", str(source), "--translate-filename"]
+                )
+        self.assertEqual(code, 5)
+        self.assertIn("回退原名会覆盖源文件", err)
+        self.assertTrue(source.is_file())
+        self.assertFalse((self.dir / "NYC_notes.zh.md").exists())
+
+    def test_translate_filename_content_fallback_with_out_dir_keeps_name(self) -> None:
+        source = self.dir / "NYC_notes.md"
+        source.write_text("Body\n", encoding="utf-8")
+        out_dir = self.dir / "out"
+        with clean_env():
+            with mock.patch.object(
+                cli, "_ensure_engine", return_value=(PartialNamingClient(), 4060)
+            ):
+                code, _out, err = run(
+                    [
+                        "translate",
+                        str(source),
+                        "--translate-filename",
+                        "--out-dir",
+                        str(out_dir),
+                    ]
+                )
+        self.assertEqual(code, 0, err)
+        self.assertTrue((out_dir / "NYC_notes.md").is_file())
+        self.assertIn("保留原名", err)
 
     def test_translate_filename_only_rejects_out_dir(self) -> None:
         source = self.dir / "clip.mp3"

@@ -674,9 +674,15 @@ class FakeTranslationClient:
 
 
 class FilenameTranslationClient:
-    def __init__(self, content: str = "文件名：“时钟.md”", finish: str = "stop") -> None:
+    def __init__(
+        self,
+        content: str = "文件名：“时钟.md”",
+        finish: str = "stop",
+        responses: list[tuple[str, str]] | None = None,
+    ) -> None:
         self.content = content
         self.finish = finish
+        self.responses = list(responses or [])
         self.calls: list[dict] = []
 
     def chat(self, messages, *, max_tokens, temperature=0.2):
@@ -687,11 +693,19 @@ class FilenameTranslationClient:
                 "temperature": temperature,
             }
         )
+        if self.responses:
+            content, finish = (
+                self.responses.pop(0)
+                if len(self.responses) > 1
+                else self.responses[0]
+            )
+        else:
+            content, finish = self.content, self.finish
         return {
             "choices": [
                 {
-                    "message": {"content": self.content},
-                    "finish_reason": self.finish,
+                    "message": {"content": content},
+                    "finish_reason": finish,
                 }
             ]
         }
@@ -759,51 +773,96 @@ class TranslationEngineTests(unittest.TestCase):
         self.assertIn("The Clock", prompt)
         self.assertGreater(client.calls[-1]["max_tokens"], 0)
         system = client.calls[-1]["messages"][0]["content"]
-        self.assertIn("原样照搬", system)
-        self.assertIn("AI、PDF、v2", system)
-        self.assertIn("不翻译、不展开", system)
+        self.assertIn("Hello_World", system)
+        self.assertIn("Chapter_01", system)
+        self.assertIn("_临时", system)
+        self.assertNotIn("宁可保留原文", system)
 
-    def test_translate_filename_rejects_truncated_output(self) -> None:
-        engine = self.make_engine(FilenameTranslationClient(finish="length"))
-        with self.assertRaisesRegex(TranslateError, "被截断"):
-            engine.translate_filename("The Clock.md")
-
-    def test_translate_filename_rejects_empty_result(self) -> None:
-        engine = self.make_engine(FilenameTranslationClient(content="..."))
-        with self.assertRaisesRegex(TranslateError, "结果为空"):
-            engine.translate_filename("The Clock.md")
-
-    def test_translate_filename_falls_back_when_abbreviation_is_lost(self) -> None:
+    def test_translate_filename_translates_underscored_words(self) -> None:
         engine = self.make_engine(
-            FilenameTranslationClient(content="纽约市_2024")
+            FilenameTranslationClient(content="文件名：你好_世界")
         )
-        self.assertEqual(engine.translate_filename("NYC_2024.md"), "NYC_2024")
+        result = engine.translate_filename_result("Hello_World.md")
+        self.assertEqual(result.name, "你好_世界")
+        self.assertIsNone(result.fallback_reason)
 
-    def test_translate_filename_keeps_chinese_and_abbreviation(self) -> None:
-        engine = self.make_engine(
-            FilenameTranslationClient(content="AI简报_v2")
+    def test_translate_filename_translates_chapter_and_year(self) -> None:
+        cases = (
+            ("Chapter_01.md", "文件名：第01章", "第01章"),
+            ("photos_2024.zip", "文件名：照片_2024", "照片_2024"),
         )
-        self.assertEqual(
-            engine.translate_filename("AI简报_v2.md"), "AI简报_v2"
-        )
+        for filename, response, expected in cases:
+            with self.subTest(filename=filename):
+                engine = self.make_engine(
+                    FilenameTranslationClient(content=response)
+                )
+                result = engine.translate_filename_result(filename)
+                self.assertEqual(result.name, expected)
+                self.assertIsNone(result.fallback_reason)
 
-    def test_translate_filename_falls_back_when_code_or_marker_is_lost(self) -> None:
+    def test_translate_filename_preserves_marker_without_stalling(self) -> None:
         engine = self.make_engine(
-            FilenameTranslationClient(content="RJ401457_temporary")
+            FilenameTranslationClient(content="文件名：报告_临时")
         )
-        self.assertEqual(
-            engine.translate_filename("RJ401457_临时.md"),
-            "RJ401457_临时",
-        )
+        result = engine.translate_filename_result("report_临时.md")
+        self.assertEqual(result.name, "报告_临时")
+        self.assertIsNone(result.fallback_reason)
 
-    def test_translate_filename_keeps_code_and_marker(self) -> None:
-        engine = self.make_engine(
-            FilenameTranslationClient(content="RJ401457_临时")
+    def test_translate_filename_all_protected_skips_model(self) -> None:
+        for filename, expected in (
+            ("NYC_2024.mp4", "NYC_2024"),
+            ("RJ401457_临时.mp4", "RJ401457_临时"),
+            ("AI简报_v2.md", "AI简报_v2"),
+        ):
+            with self.subTest(filename=filename):
+                client = FilenameTranslationClient(content="不应调用")
+                engine = self.make_engine(client)
+                result = engine.translate_filename_result(filename)
+                self.assertEqual(result.name, expected)
+                self.assertIsNone(result.fallback_reason)
+                self.assertEqual(client.calls, [])
+
+    def test_translate_filename_retries_when_code_is_lost(self) -> None:
+        client = FilenameTranslationClient(
+            responses=[
+                ("文件名：纽约市_笔记", "stop"),
+                ("文件名：NYC_笔记", "stop"),
+            ]
         )
-        self.assertEqual(
-            engine.translate_filename("RJ401457_临时.md"),
-            "RJ401457_临时",
+        engine = self.make_engine(client)
+        result = engine.translate_filename_result("NYC_notes.md")
+        self.assertEqual(result.name, "NYC_笔记")
+        self.assertIsNone(result.fallback_reason)
+        self.assertEqual(len(client.calls), 2)
+
+    def test_translate_filename_falls_back_after_retry(self) -> None:
+        client = FilenameTranslationClient(
+            responses=[
+                ("文件名：纽约市_笔记", "stop"),
+                ("文件名：纽约市_笔记", "stop"),
+            ]
         )
+        engine = self.make_engine(client)
+        result = engine.translate_filename_result("NYC_notes.md")
+        self.assertEqual(result.name, "NYC_notes")
+        self.assertIn("NYC", result.fallback_reason or "")
+        self.assertEqual(len(client.calls), 2)
+
+    def test_translate_filename_falls_back_on_truncation(self) -> None:
+        client = FilenameTranslationClient(finish="length")
+        engine = self.make_engine(client)
+        result = engine.translate_filename_result("The Clock.md")
+        self.assertEqual(result.name, "The Clock")
+        self.assertIn("截断", result.fallback_reason or "")
+        self.assertEqual(len(client.calls), 2)
+
+    def test_translate_filename_falls_back_on_empty_result(self) -> None:
+        client = FilenameTranslationClient(content="...")
+        engine = self.make_engine(client)
+        result = engine.translate_filename_result("The Clock.md")
+        self.assertEqual(result.name, "The Clock")
+        self.assertIn("结果为空", result.fallback_reason or "")
+        self.assertEqual(len(client.calls), 2)
 
     def test_context_sentinel_and_fifo(self) -> None:
         client = FakeTranslationClient()
@@ -893,6 +952,12 @@ class TranslationEngineTests(unittest.TestCase):
     def test_sanitize_filename_stem_preserves_markers(self) -> None:
         self.assertEqual(sanitize_filename_stem("_临时", ".md"), "_临时")
         self.assertEqual(sanitize_filename_stem("【临时】", ".md"), "【临时】")
+
+    def test_sanitize_filename_stem_takes_explanation_payload(self) -> None:
+        self.assertEqual(
+            sanitize_filename_stem("Hello_World翻译：你好_世界", ".md"),
+            "你好_世界",
+        )
 
     def test_sanitize_filename_stem_limits_length(self) -> None:
         cleaned = sanitize_filename_stem("长" * 120, ".md")
