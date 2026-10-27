@@ -55,23 +55,32 @@ class Session:
         self.is_dirty = False
 
     def pop_last_turn(self) -> tuple[int, int]:
-        """删除最后一条 user 及其后 assistant/tool_result，返回条数与释放 tokens。"""
+        """原子回退整轮人类交互。
+
+        持续弹出末尾消息，跳过中间 assistant 动作与 <tool_result>/[系统反馈]
+        工具回显，直到弹出该轮最初的人类真实输入。返回 (条数, 释放 tokens)。
+        """
         if not self.messages:
             return 0, 0
-        last_user = None
-        for index in range(len(self.messages) - 1, -1, -1):
-            if self.messages[index].get("role") == "user":
-                last_user = index
-                break
-        if last_user is None:
-            return 0, 0
-        before = self.message_tokens()
-        removed = len(self.messages) - last_user
-        del self.messages[last_user:]
-        released = max(0, before - self.message_tokens())
-        if removed:
+        initial_tokens = self.message_tokens()
+        popped = 0
+        while self.messages:
+            message = self.messages.pop()
+            popped += 1
+            role = message.get("role")
+            content = str(message.get("content", "")).strip()
+            if role == "user":
+                is_tool_feedback = (
+                    content.startswith("<tool_result")
+                    or content.startswith("[系统反馈")
+                    or content.startswith("【系统反馈")
+                )
+                if not is_tool_feedback:
+                    break
+        released = max(0, initial_tokens - self.message_tokens())
+        if popped:
             self.is_dirty = True
-        return removed, released
+        return popped, released
 
     def api_messages(self) -> list[dict]:
         if self.system.strip():
