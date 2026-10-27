@@ -907,9 +907,12 @@ class Repl:
         return True
 
     def _cmd_undo(self, rest: str) -> bool:
+        if not self.session.messages:
+            print(self.palette.warn("当前没有任何对话历史可供回溯"))
+            return True
         removed, released = self.session.pop_last_turn()
         if removed == 0:
-            print(self.palette.warn("当前没有可回溯的对话轮次"))
+            print(self.palette.warn("没有可回溯的完整轮次"))
             return True
         self.last_turn = None
         loop = getattr(self, "loop", None)
@@ -923,10 +926,12 @@ class Repl:
         used = self.session.message_tokens()
         total = self.profile.ctx
         pct = int((used / total) * 100) if total > 0 else 0
+        # palette.ok 自动加单个 "✓ "，这里传纯文本，避免 "✓ ✓"。
         print(
             self.palette.ok(
-                f"✓ 已回溯上一轮对话（移除 {removed} 条记录，"
-                f"释放 {released} tokens）· 视窗已用降至 {pct}%"
+                f"已回溯上一轮完整对话（移除 {removed} 条记录，"
+                f"释放 {released} tokens）· 当前视窗已用降至 {pct}% "
+                f"({used}/{total} tokens)"
             )
         )
         return True

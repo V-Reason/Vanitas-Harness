@@ -191,7 +191,9 @@ class UndoTests(unittest.TestCase):
             {"role": "assistant", "content": "hi"},
         ]
         _value, out, _err = quiet_run(lambda: self.repl._cmd_undo(""))
-        self.assertIn("已回溯上一轮对话", out)
+        self.assertIn("已回溯上一轮完整对话", out)
+        self.assertEqual(out.count("✓"), 1)
+        self.assertNotIn("✓ ✓", out)
         self.assertEqual(self.repl.session.messages, [])
         self.assertIn("undo", __import__("vanitas.repl", fromlist=["COMMAND_MAP"]).COMMAND_MAP)
         self.assertIn("pop", __import__("vanitas.repl", fromlist=["COMMAND_MAP"]).COMMAND_MAP)
@@ -199,7 +201,23 @@ class UndoTests(unittest.TestCase):
 
     def test_undo_without_history_warns(self) -> None:
         _value, out, _err = quiet_run(lambda: self.repl._cmd_undo(""))
-        self.assertIn("没有可回溯", out)
+        self.assertIn("可供回溯", out)
+
+    def test_undo_rolls_back_full_agent_turn_in_one_shot(self) -> None:
+        self.repl.session.messages = [
+            {"role": "user", "content": "human request"},
+            {
+                "role": "assistant",
+                "content": '<tool_call>[{"action":"list_dir"}]</tool_call>',
+            },
+            {"role": "user", "content": "<tool_result>ok</tool_result>"},
+            {"role": "assistant", "content": "final answer"},
+        ]
+        _value, out, _err = quiet_run(lambda: self.repl._cmd_undo(""))
+        self.assertEqual(self.repl.session.messages, [])
+        self.assertIn("移除 4 条记录", out)
+        self.assertEqual(out.count("✓"), 1)
+        self.assertNotIn("✓ ✓", out)
 
 
 class ActionParserTests(unittest.TestCase):
