@@ -125,6 +125,21 @@ class ToolsTests(unittest.TestCase):
         self.assertIn("底层标准输出超出", result.stdout)
         self.assertIn("标准输出", result.stdout)
 
+    def test_capture_limit_is_configurable(self) -> None:
+        base = make_config(confirm=False)
+        tools_settings = replace(
+            base.settings.tools,
+            max_capture_bytes=1024,
+        )
+        config = replace(
+            base,
+            settings=replace(base.settings, tools=tools_settings),
+        )
+        fake = mock.Mock(return_value=completed(b"A" * 4096))
+        with mock.patch("vanitas.tools.subprocess.run", fake):
+            result = tools.run_exec(config, "echo big")
+        self.assertIn("底层标准输出超出 1 KiB", result.stdout)
+
     def test_split_command_keeps_quoted_argument(self) -> None:
         self.assertEqual(tools.split_command('type "a b"'), ["type", "a b"])
 
