@@ -521,17 +521,41 @@ def move_file(
     return f"重命名 {src} -> {dst}"
 
 
-def delete_file(path: str, *, root: Path | str | None = None) -> str:
-    target = _require_path(path, root)
+def delete_path(path: str, *, root: Path | str | None = None) -> str:
+    """删除文件或递归删除目录；严禁删除工作区根目录自身。
+
+    候选路径故意不先 resolve：符号链接必须按“链接本身”处理，不能跟随到
+    链接目标后再删除；边界检查仍通过 is_inside_workspace 解析复核。
+    """
+    raw = _path_text(path)
+    base_root = _workspace_root(root)
+    expanded = os.path.expandvars(os.path.expanduser(raw))
+    candidate = Path(expanded)
+    if not candidate.is_absolute():
+        candidate = base_root / candidate
+    candidate = Path(os.path.abspath(candidate))
+    is_inside_workspace(candidate, base_root)
+    if candidate.resolve() == base_root:
+        raise ToolDenied("安全限制：禁止删除工作区根目录自身")
     try:
-        if not target.is_file():
-            raise ToolDenied(f"不是可删除的文件：{path}")
-        target.unlink()
+        if candidate.is_symlink():
+            candidate.unlink()
+            return f"删除链接 {path}"
+        if candidate.is_dir():
+            shutil.rmtree(candidate)
+            return f"递归删除目录 {path}"
+        if candidate.is_file():
+            candidate.unlink()
+            return f"删除文件 {path}"
+        raise ToolDenied(f"路径不存在或不是可删除的文件/目录：{path}")
     except ToolDenied:
         raise
     except OSError as exc:
         raise ToolDenied(f"删除失败：{path}；{exc.strerror or exc}") from exc
-    return f"删除 {path}"
+
+
+# 向后兼容旧名称；动作层同时保留 delete_file 别名。
+delete_file = delete_path
 
 
 def list_dir(
@@ -769,8 +793,11 @@ class AgentTools:
             illegal_chars=self.config.settings.tools.move_illegal_chars,
         )
 
+    def delete_path(self, path: str) -> str:
+        return delete_path(path, root=self.root)
+
     def delete_file(self, path: str) -> str:
-        return delete_file(path, root=self.root)
+        return self.delete_path(path)
 
     def list_dir(self, path: str = ".") -> list[str]:
         return list_dir(

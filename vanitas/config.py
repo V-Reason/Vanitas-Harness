@@ -185,6 +185,7 @@ AGENT_ACTION_NAMES = frozenset(
         "write_file",
         "patch_file",
         "delete_file",
+        "delete_path",
         "move_file",
     }
 )
@@ -192,7 +193,7 @@ DEFAULT_AUTO_ACTIONS = frozenset(
     {"read_file", "read_file_range", "grep_workspace", "list_dir", "run_shell_ro"}
 )
 DEFAULT_CONFIRM_ACTIONS = frozenset(
-    {"write_file", "patch_file", "delete_file", "move_file"}
+    {"write_file", "patch_file", "delete_file", "delete_path", "move_file"}
 )
 DEFAULT_ACTION_ALIASES = {"shell": "run_shell_ro"}
 

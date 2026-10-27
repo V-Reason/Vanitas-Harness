@@ -156,10 +156,16 @@ class FileToolTests(unittest.TestCase):
         toolbox.write_file("e.md", "x")
         self.assertIn("e.md -> e.srt", toolbox.move_file("e.md", "e.srt"))
 
-    def test_delete_rejects_directory(self) -> None:
-        (self.root / "sub").mkdir()
-        with self.assertRaises(ToolDenied):
-            self.toolbox.delete_file("sub")
+    def test_delete_recursively_removes_directory_and_protects_root(self) -> None:
+        (self.root / "sub" / "__pycache__").mkdir(parents=True)
+        (self.root / "sub" / "a.py").write_text("x", encoding="utf-8")
+        (self.root / "sub" / "__pycache__" / "a.pyc").write_bytes(b"x")
+        self.assertIn("递归删除目录", self.toolbox.delete_file("sub"))
+        self.assertFalse((self.root / "sub").exists())
+        with self.assertRaises(ToolDenied) as ctx:
+            self.toolbox.delete_path(".")
+        self.assertIn("禁止删除工作区根目录自身", str(ctx.exception))
+        self.assertTrue(self.root.is_dir())
 
     def test_all_file_tools_reject_outside_paths(self) -> None:
         operations = (
