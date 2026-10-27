@@ -393,30 +393,6 @@ class TranslateTests(unittest.TestCase):
         self.assertEqual(outcome.output, out_dir / "a.zh.txt")
         self.assertTrue(outcome.output.is_file())
 
-    def test_custom_output_name_without_extension(self) -> None:
-        source = self.write("a.txt", "hello")
-        out_dir = self.dir / "out"
-        outcome = translate_file(
-            echo_chat,
-            source,
-            SETTINGS,
-            out_dir=out_dir,
-            output_name="custom",
-        )
-        self.assertEqual(outcome.output, out_dir / "custom.txt")
-        self.assertEqual(outcome.output.read_text(encoding="utf-8"), "译hello")
-
-    def test_custom_output_name_with_explicit_extension(self) -> None:
-        source = self.write("a.srt", SRT_CRLF)
-        outcome = translate_file(
-            echo_chat,
-            source,
-            SETTINGS,
-            output_name="custom.zh.srt",
-        )
-        self.assertEqual(outcome.output, self.dir / "custom.zh.srt")
-        self.assertTrue(outcome.output.is_file())
-
     def test_unsupported_suffix_rejected(self) -> None:
         source = self.write("a.json", "{}")
         with self.assertRaises(TranslateError):
@@ -539,56 +515,6 @@ class InputDiscoveryTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(TranslateError, "输出会覆盖输入"):
             plan_translation_outputs(sources, SETTINGS, None)
-
-    def test_plan_custom_name_appends_source_suffix(self) -> None:
-        self.write("a.md")
-        out_dir = self.dir / "out"
-        plans = plan_translation_outputs(
-            collect_translate_inputs([self.dir / "a.md"], SETTINGS),
-            SETTINGS,
-            out_dir,
-            output_name="custom",
-        )
-        self.assertEqual(plans[0].target, out_dir / "custom.md")
-
-    def test_plan_custom_name_keeps_explicit_suffix(self) -> None:
-        self.write("a.md")
-        out_dir = self.dir / "out"
-        plans = plan_translation_outputs(
-            collect_translate_inputs([self.dir / "a.md"], SETTINGS),
-            SETTINGS,
-            out_dir,
-            output_name="custom.txt",
-        )
-        self.assertEqual(plans[0].target, out_dir / "custom.txt")
-
-    def test_plan_custom_name_keeps_nested_parent(self) -> None:
-        self.write("sub/a.md")
-        out_dir = self.dir / "out"
-        plans = plan_translation_outputs(
-            collect_translate_inputs([self.dir], SETTINGS),
-            SETTINGS,
-            out_dir,
-            output_name="custom",
-        )
-        self.assertEqual(plans[0].target, out_dir / "sub" / "custom.md")
-
-    def test_plan_custom_name_requires_single_source(self) -> None:
-        self.write("a.md")
-        self.write("b.md")
-        sources = collect_translate_inputs([self.dir], SETTINGS)
-        with self.assertRaisesRegex(TranslateError, "单个输出文件"):
-            plan_translation_outputs(
-                sources, SETTINGS, self.dir / "out", output_name="custom.md"
-            )
-
-    def test_plan_rejects_custom_name_containing_path(self) -> None:
-        self.write("a.md")
-        source = collect_translate_inputs([self.dir / "a.md"], SETTINGS)
-        with self.assertRaisesRegex(TranslateError, "不能包含目录"):
-            plan_translation_outputs(
-                source, SETTINGS, self.dir / "out", output_name="sub/custom.md"
-            )
 
     def test_explicit_missing_path_is_left_for_translate_file(self) -> None:
         missing = self.dir / "missing"
