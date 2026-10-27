@@ -41,6 +41,7 @@ SETTINGS_FIELDS = frozenset(
     {
         "version",
         "host",
+        "defaults",
         "request",
         "launcher",
         "repl",
@@ -83,6 +84,9 @@ REPL_FIELDS = frozenset(
         "context_collapse_ratio",
         "context_collapse_keep_rounds",
         "context_collapse_min_chars",
+        "ctx_warn_pct",
+        "ctx_danger_pct",
+        "status_bar_width",
     }
 )
 CHAT_FIELDS = frozenset({"temperature"})
@@ -91,6 +95,10 @@ AGENT_FIELDS = frozenset(
         "max_steps",
         "max_batch_actions",
         "max_feedback_chars",
+        "max_parse_retries",
+        "stagnation_limit",
+        "feedback_head_lines",
+        "feedback_tail_lines",
         "auto_actions",
         "confirm_actions",
         "action_aliases",
@@ -107,6 +115,7 @@ TOOLS_FIELDS = frozenset(
         "max_grep_results",
         "max_grep_file_bytes",
         "grep_ignore_dirs",
+        "max_capture_bytes",
         "move_illegal_chars",
         "manual_exec_prefixes",
         "destructive_commands",
@@ -138,6 +147,13 @@ TRANSLATE_FIELDS = frozenset(
     }
 )
 PRESET_FIELDS = frozenset({"task_template", "window_size", "max_window_chars"})
+DEFAULTS_FIELDS = frozenset({"agent", "chat", "translate", "batch"})
+DEFAULTS_ROLE_FALLBACK = {
+    "agent": "general",
+    "chat": "general",
+    "translate": "translate",
+    "batch": "general",
+}
 UI_FIELDS = frozenset({"color", "spinner_interval_ms", "theme"})
 THEME_KEYS = frozenset({"prompt", "success", "error", "warn", "info", "muted", "accent"})
 COLOR_MODES = frozenset({"auto", "always", "never"})
@@ -345,6 +361,9 @@ class ReplSettings:
     context_collapse_ratio: float = 0.65
     context_collapse_keep_rounds: int = 2
     context_collapse_min_chars: int = 1000
+    ctx_warn_pct: int = 60
+    ctx_danger_pct: int = 80
+    status_bar_width: int = 20
 
 
 @dataclass(frozen=True)
@@ -357,6 +376,10 @@ class AgentSettings:
     max_steps: int = 10
     max_batch_actions: int = 100
     max_feedback_chars: int = 8000
+    max_parse_retries: int = 2
+    stagnation_limit: int = 3
+    feedback_head_lines: int = 20
+    feedback_tail_lines: int = 40
     auto_actions: frozenset[str] = DEFAULT_AUTO_ACTIONS
     confirm_actions: frozenset[str] = DEFAULT_CONFIRM_ACTIONS
     action_aliases: dict[str, str] = field(
@@ -381,6 +404,7 @@ class ToolsSettings:
     max_range_lines: int = 400
     max_grep_results: int = 50
     max_grep_file_bytes: int = 1024 * 1024
+    max_capture_bytes: int = 512 * 1024
     grep_ignore_dirs: tuple[str, ...] = (
         ".git",
         "__pycache__",
@@ -441,6 +465,14 @@ def _default_ui() -> UiSettings:
 
 
 @dataclass(frozen=True)
+class DefaultsSettings:
+    agent: str = ""
+    chat: str = ""
+    translate: str = ""
+    batch: str = ""
+
+
+@dataclass(frozen=True)
 class Settings:
     version: int
     host: str
@@ -453,6 +485,7 @@ class Settings:
     batch: BatchSettings
     translate: TranslateSettings
     ui: UiSettings
+    defaults: DefaultsSettings = DefaultsSettings()
 
 
 PREFERENCES_VERSION = 1
@@ -567,6 +600,18 @@ class AppConfig:
             if item.role == role:
                 return item
         raise ConfigError(f"config\\models.json 中没有 role={role!r} 的模型")
+
+    def default_model(self, mode: str) -> ModelSpec:
+        """按模式返回配置的默认模型；缺省时回落 role 以兼容旧配置。"""
+        if mode not in DEFAULTS_ROLE_FALLBACK:
+            raise ConfigError(
+                f"未知默认模型模式 {mode!r}；可用："
+                f"{'、'.join(sorted(DEFAULTS_ROLE_FALLBACK))}"
+            )
+        model_id = getattr(self.settings.defaults, mode, "").strip()
+        if model_id:
+            return self.model(model_id)
+        return self.model_by_role(DEFAULTS_ROLE_FALLBACK[mode])
 
     def effective_port(self, model: ModelSpec) -> int:
         override = os.environ.get("VANITAS_PORT")
@@ -745,6 +790,38 @@ def _load_agent(entry: object | None) -> "AgentSettings":
         defaults.max_feedback_chars,
         minimum=256,
     )
+    max_parse_retries = _as_optional_int(
+        entry,
+        "max_parse_retries",
+        label,
+        defaults.max_parse_retries,
+        minimum=0,
+        maximum=10,
+    )
+    stagnation_limit = _as_optional_int(
+        entry,
+        "stagnation_limit",
+        label,
+        defaults.stagnation_limit,
+        minimum=2,
+        maximum=10,
+    )
+    feedback_head_lines = _as_optional_int(
+        entry,
+        "feedback_head_lines",
+        label,
+        defaults.feedback_head_lines,
+        minimum=1,
+        maximum=200,
+    )
+    feedback_tail_lines = _as_optional_int(
+        entry,
+        "feedback_tail_lines",
+        label,
+        defaults.feedback_tail_lines,
+        minimum=1,
+        maximum=400,
+    )
     auto_actions = frozenset(
         _as_str_list(
             entry,
@@ -791,10 +868,29 @@ def _load_agent(entry: object | None) -> "AgentSettings":
         max_steps=max_steps,
         max_batch_actions=max_batch_actions,
         max_feedback_chars=max_feedback_chars,
+        max_parse_retries=max_parse_retries,
+        stagnation_limit=stagnation_limit,
+        feedback_head_lines=feedback_head_lines,
+        feedback_tail_lines=feedback_tail_lines,
         auto_actions=auto_actions,
         confirm_actions=confirm_actions,
         action_aliases=aliases,
     )
+
+
+def _load_defaults(entry: object | None) -> "DefaultsSettings":
+    if entry is None:
+        return DefaultsSettings()
+    label = "settings.defaults"
+    _as_mapping(entry, label)
+    _reject_unknown(entry, DEFAULTS_FIELDS, label)
+    values: dict[str, str] = {}
+    for mode in DEFAULTS_FIELDS:
+        raw = entry.get(mode, "")
+        if not isinstance(raw, str):
+            _fail(f"{label}.{mode}", "必须是模型 id 字符串")
+        values[mode] = raw.strip()
+    return DefaultsSettings(**values)
 
 
 def _load_chat(entry: object | None) -> "ChatSettings":
@@ -886,6 +982,13 @@ def _load_tools(entry: object) -> "ToolsSettings":
         defaults.max_grep_file_bytes,
         minimum=1,
     )
+    max_capture_bytes = _as_optional_int(
+        entry,
+        "max_capture_bytes",
+        label,
+        defaults.max_capture_bytes,
+        minimum=1024,
+    )
     grep_ignore_dirs = _as_str_list(
         entry, "grep_ignore_dirs", label, defaults.grep_ignore_dirs
     )
@@ -950,6 +1053,7 @@ def _load_tools(entry: object) -> "ToolsSettings":
         max_range_lines=max_range_lines,
         max_grep_results=max_grep_results,
         max_grep_file_bytes=max_grep_file_bytes,
+        max_capture_bytes=max_capture_bytes,
         grep_ignore_dirs=tuple(grep_ignore_dirs),
         move_illegal_chars=move_illegal_chars,
         manual_exec_prefixes=_as_str_list(
@@ -1194,6 +1298,7 @@ def _load_settings(document: dict) -> Settings:
     if document.get("version") != 1:
         _fail("config\\settings.json.version", "只支持 version=1")
     host = _as_str(document, "host", "settings")
+    defaults = _load_defaults(document.get("defaults"))
 
     request = _as_mapping(document.get("request"), "settings.request")
     _reject_unknown(request, REQUEST_FIELDS, "settings.request")
@@ -1293,6 +1398,20 @@ def _load_settings(document: dict) -> Settings:
         if "context_collapse_min_chars" in repl
         else 1000
     )
+    ctx_warn_pct = _as_optional_int(
+        repl, "ctx_warn_pct", "settings.repl", 60, minimum=1, maximum=99
+    )
+    ctx_danger_pct = _as_optional_int(
+        repl, "ctx_danger_pct", "settings.repl", 80, minimum=2, maximum=100
+    )
+    if ctx_warn_pct >= ctx_danger_pct:
+        _fail(
+            "settings.repl",
+            "ctx_warn_pct 必须小于 ctx_danger_pct",
+        )
+    status_bar_width = _as_optional_int(
+        repl, "status_bar_width", "settings.repl", 20, minimum=5, maximum=80
+    )
     repl_settings = ReplSettings(
         history_file=Path(os.path.expanduser(history_raw)),
         max_context_tokens=_as_int(
@@ -1306,6 +1425,9 @@ def _load_settings(document: dict) -> Settings:
         context_collapse_ratio=collapse_ratio,
         context_collapse_keep_rounds=collapse_keep_rounds,
         context_collapse_min_chars=collapse_min_chars,
+        ctx_warn_pct=ctx_warn_pct,
+        ctx_danger_pct=ctx_danger_pct,
+        status_bar_width=status_bar_width,
     )
 
     chat_settings = _load_chat(document.get("chat"))
@@ -1442,7 +1564,21 @@ def _load_settings(document: dict) -> Settings:
         batch=batch_settings,
         translate=translate_settings,
         ui=ui_settings,
+        defaults=defaults,
     )
+
+
+def _validate_default_models(
+    defaults: DefaultsSettings, models: tuple
+) -> None:
+    known = {model.id for model in models}
+    for mode in ("agent", "chat", "translate", "batch"):
+        value = getattr(defaults, mode)
+        if value and value not in known:
+            raise ConfigError(
+                f"settings.defaults.{mode}: 未知模型 id {value!r}；"
+                f"可用：{'、'.join(sorted(known))}"
+            )
 
 
 def load_config(
@@ -1472,6 +1608,7 @@ def load_config(
     settings_doc = _read_json(directory / "settings.json", "config\\settings.json")
     models = _load_models(models_doc, root)
     settings = _load_settings(settings_doc)
+    _validate_default_models(settings.defaults, models)
     return AppConfig(
         base_dir=root,
         config_dir=directory,

@@ -7,6 +7,7 @@ import io
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -97,6 +98,29 @@ class ReplPromptTests(unittest.TestCase):
         self.assertIn("\x1b[35m", prompt)
         fragments = ANSI(prompt).__pt_formatted_text__()
         self.assertTrue(any(style == "ansimagenta" for style, _text in fragments))
+
+    def test_prompt_context_thresholds_are_configurable(self) -> None:
+        repl_settings = replace(
+            self.config.settings.repl,
+            ctx_warn_pct=50,
+            ctx_danger_pct=70,
+        )
+        config = replace(
+            self.config,
+            settings=replace(self.config.settings, repl=repl_settings),
+        )
+        repl = Repl(
+            config,
+            palette=Palette(DEFAULT_THEME, enabled=True),
+        )
+        with mock.patch.object(
+            repl.session,
+            "message_tokens",
+            return_value=int(repl.profile.ctx * 0.56),
+        ):
+            prompt = repl._prompt_text()
+        self.assertIn("\x1b[33m", prompt)
+        self.assertIn("ctx: 55%", prompt)
 
     def test_prompt_session_receives_ansi_object(self) -> None:
         from prompt_toolkit.formatted_text import ANSI

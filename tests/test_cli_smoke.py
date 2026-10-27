@@ -192,6 +192,24 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(args[1].id, "qwen_coder")
         self.assertIsNone(kwargs["system"])
 
+    def test_chat_uses_configured_non_coder_default(self) -> None:
+        with clean_env():
+            with mock.patch.object(cli, "Repl") as repl_cls:
+                repl_cls.return_value.run.return_value = 0
+                code, _out, err = run(["chat"])
+        self.assertEqual(code, 0, err)
+        repl_cls.assert_called_once()
+        self.assertEqual(repl_cls.call_args.args[1].id, "qwen7b")
+
+    def test_models_command_shows_default_routes(self) -> None:
+        with clean_env():
+            code, out, err = run(["models"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("默认 agent=qwen_coder", out)
+        self.assertIn("chat=qwen7b", out)
+        self.assertIn("translate=hymt", out)
+        self.assertIn("batch=qwen7b", out)
+
     def test_translate_two_files_get_independent_compact_stats(self) -> None:
         first = self.dir / "a.srt"
         first.write_text(

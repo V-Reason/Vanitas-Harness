@@ -292,9 +292,10 @@ class Repl:
         total = self.profile.ctx
         pct = int((used / total) * 100) if total > 0 else 0
         tag = f"ctx: {pct}% | {used / 1000:.1f}k/{total / 1000:.1f}k"
-        if pct >= 80:
+        repl_settings = self.config.settings.repl
+        if pct >= repl_settings.ctx_danger_pct:
             colored_tag = self.palette.error(f"[{tag}]")
-        elif pct >= 60:
+        elif pct >= repl_settings.ctx_warn_pct:
             colored_tag = self.palette.warning(f"[{tag}]")
         else:
             colored_tag = self.palette.muted(f"[{tag}]")
@@ -1072,10 +1073,11 @@ class Repl:
         used = self.session.message_tokens()
         total = self.profile.ctx
         pct = (used / total * 100) if total > 0 else 0.0
-        bar = _context_bar(pct)
-        if pct >= 80:
+        repl_settings = self.config.settings.repl
+        bar = _context_bar(pct, repl_settings.status_bar_width)
+        if pct >= repl_settings.ctx_danger_pct:
             bar_text = self.palette.error(bar)
-        elif pct >= 60:
+        elif pct >= repl_settings.ctx_warn_pct:
             bar_text = self.palette.warning(bar)
         else:
             bar_text = self.palette.muted(bar)

@@ -86,9 +86,14 @@ def _truncate_bytes(
     return folded, True, omitted
 
 
-def _append_capture_warning(text: str, label: str, omitted: int) -> str:
+def _append_capture_warning(
+    text: str,
+    label: str,
+    omitted: int,
+    max_bytes: int = MAX_CAPTURE_BYTES,
+) -> str:
     note = (
-        f"[... 底层{label}超出 {MAX_CAPTURE_BYTES // 1024} KiB，"
+        f"[... 底层{label}超出 {max_bytes // 1024} KiB，"
         f"已在字节流阶段硬截断，丢弃 {omitted} 字节 ...]"
     )
     return f"{text}\n{note}" if text else note
@@ -370,14 +375,23 @@ def _execute(
         raise ToolDenied(f"命令启动失败：{exc.strerror or exc}") from exc
     raw_stdout = completed.stdout or b""
     raw_stderr = completed.stderr or b""
-    stdout_bytes, stdout_truncated, stdout_omitted = _truncate_bytes(raw_stdout)
-    stderr_bytes, stderr_truncated, stderr_omitted = _truncate_bytes(raw_stderr)
+    capture_limit = config.settings.tools.max_capture_bytes
+    stdout_bytes, stdout_truncated, stdout_omitted = _truncate_bytes(
+        raw_stdout, capture_limit
+    )
+    stderr_bytes, stderr_truncated, stderr_omitted = _truncate_bytes(
+        raw_stderr, capture_limit
+    )
     stdout = _decode(stdout_bytes)
     stderr = _decode(stderr_bytes)
     if stdout_truncated:
-        stdout = _append_capture_warning(stdout, "标准输出", stdout_omitted)
+        stdout = _append_capture_warning(
+            stdout, "标准输出", stdout_omitted, capture_limit
+        )
     if stderr_truncated:
-        stderr = _append_capture_warning(stderr, "标准错误", stderr_omitted)
+        stderr = _append_capture_warning(
+            stderr, "标准错误", stderr_omitted, capture_limit
+        )
     return ExecResult(
         command=command,
         exit_code=completed.returncode,
@@ -404,14 +418,23 @@ def _execute_shell(config: AppConfig, command: str, cwd: Path) -> ExecResult:
         raise ToolDenied(f"命令启动失败：{exc.strerror or exc}") from exc
     raw_stdout = completed.stdout or b""
     raw_stderr = completed.stderr or b""
-    stdout_bytes, stdout_truncated, stdout_omitted = _truncate_bytes(raw_stdout)
-    stderr_bytes, stderr_truncated, stderr_omitted = _truncate_bytes(raw_stderr)
+    capture_limit = config.settings.tools.max_capture_bytes
+    stdout_bytes, stdout_truncated, stdout_omitted = _truncate_bytes(
+        raw_stdout, capture_limit
+    )
+    stderr_bytes, stderr_truncated, stderr_omitted = _truncate_bytes(
+        raw_stderr, capture_limit
+    )
     stdout = _decode(stdout_bytes)
     stderr = _decode(stderr_bytes)
     if stdout_truncated:
-        stdout = _append_capture_warning(stdout, "标准输出", stdout_omitted)
+        stdout = _append_capture_warning(
+            stdout, "标准输出", stdout_omitted, capture_limit
+        )
     if stderr_truncated:
-        stderr = _append_capture_warning(stderr, "标准错误", stderr_omitted)
+        stderr = _append_capture_warning(
+            stderr, "标准错误", stderr_omitted, capture_limit
+        )
     return ExecResult(
         command=command,
         exit_code=completed.returncode,

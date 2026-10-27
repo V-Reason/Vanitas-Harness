@@ -92,6 +92,60 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.models[0].template_kwargs["enable_thinking"] is False)
         self.assertEqual(qwen.repeat_penalty, 1.1)
 
+    def test_default_model_routes_and_custom_values(self) -> None:
+        with clean_env():
+            config = self.load()
+        self.assertEqual(config.default_model("agent").id, "qwen_coder")
+        self.assertEqual(config.default_model("chat").id, "qwen7b")
+        self.assertEqual(config.default_model("translate").id, "hymt")
+        self.assertEqual(config.default_model("batch").id, "qwen7b")
+
+        self.settings["defaults"]["chat"] = "qwen_coder"
+        self.settings["defaults"]["agent"] = "qwen7b"
+        self.write_settings()
+        with clean_env():
+            config = self.load()
+        self.assertEqual(config.default_model("agent").id, "qwen7b")
+        self.assertEqual(config.default_model("chat").id, "qwen_coder")
+
+    def test_unknown_default_model_is_rejected(self) -> None:
+        self.settings["defaults"]["chat"] = "missing-model"
+        self.write_settings()
+        with self.assertRaises(ConfigError) as ctx:
+            self.load()
+        self.assertIn("settings.defaults.chat", str(ctx.exception))
+        self.assertIn("missing-model", str(ctx.exception))
+
+    def test_missing_defaults_falls_back_to_roles(self) -> None:
+        self.settings.pop("defaults")
+        self.write_settings()
+        with clean_env():
+            config = self.load()
+        self.assertEqual(config.default_model("agent").id, "qwen_coder")
+        self.assertEqual(config.default_model("chat").id, "qwen_coder")
+        self.assertEqual(config.default_model("translate").id, "hymt")
+        self.assertEqual(config.default_model("batch").id, "qwen_coder")
+
+    def test_new_operational_settings_are_validated(self) -> None:
+        self.settings["agent"]["stagnation_limit"] = 1
+        self.write_settings()
+        with self.assertRaises(ConfigError):
+            self.load()
+
+        self.settings["agent"]["stagnation_limit"] = 3
+        self.settings["repl"]["ctx_warn_pct"] = 80
+        self.settings["repl"]["ctx_danger_pct"] = 60
+        self.write_settings()
+        with self.assertRaises(ConfigError):
+            self.load()
+
+        self.settings["repl"]["ctx_warn_pct"] = 60
+        self.settings["repl"]["ctx_danger_pct"] = 80
+        self.settings["tools"]["max_capture_bytes"] = 512
+        self.write_settings()
+        with self.assertRaises(ConfigError):
+            self.load()
+
     def test_defaults_come_from_settings(self) -> None:
         with clean_env():
             config = load_config()
@@ -136,6 +190,30 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.settings.repl.context_collapse_ratio, 0.65)
         self.assertEqual(config.settings.repl.context_collapse_keep_rounds, 2)
         self.assertEqual(config.settings.repl.context_collapse_min_chars, 1000)
+        self.assertEqual(config.settings.repl.ctx_warn_pct, 60)
+        self.assertEqual(config.settings.repl.ctx_danger_pct, 80)
+        self.assertEqual(config.settings.repl.status_bar_width, 20)
+        self.assertEqual(config.settings.agent.max_parse_retries, 2)
+        self.assertEqual(config.settings.agent.stagnation_limit, 3)
+        self.assertEqual(config.settings.agent.feedback_head_lines, 20)
+        self.assertEqual(config.settings.agent.feedback_tail_lines, 40)
+        self.assertEqual(config.settings.tools.max_capture_bytes, 524288)
+        self.assertEqual(config.settings.defaults.agent, "qwen_coder")
+        self.assertEqual(config.settings.defaults.chat, "qwen7b")
+        self.assertEqual(config.settings.defaults.translate, "hymt")
+        self.assertEqual(config.settings.defaults.batch, "qwen7b")
+        self.assertEqual(
+            {
+                mode: config.default_model(mode).id
+                for mode in ("agent", "chat", "translate", "batch")
+            },
+            {
+                "agent": "qwen_coder",
+                "chat": "qwen7b",
+                "translate": "hymt",
+                "batch": "qwen7b",
+            },
+        )
         self.assertEqual(config.settings.tools.move_illegal_chars, '#<>"|?*')
         self.assertIn("git status", config.settings.tools.manual_exec_prefixes)
         self.assertIn("del", config.settings.tools.destructive_commands)

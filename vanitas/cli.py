@@ -118,7 +118,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     translate_cmd = sub.add_parser("translate", help="批量翻译 txt/md/srt")
     translate_cmd.add_argument("inputs", nargs="+", help="待翻译文件")
-    translate_cmd.add_argument("--model", default=None, help="模型 id，默认 role=translate")
+    translate_cmd.add_argument(
+        "--model", default=None, help="模型 id，默认 settings.defaults.translate"
+    )
     translate_cmd.add_argument("--profile", default=None, help="档位编号")
     translate_cmd.add_argument("--out-dir", default=None, help="输出目录，默认与原文件同目录")
     translate_cmd.add_argument("--jobs", type=int, default=1, help="并发数；引擎为 -np 1，实际串行")
@@ -130,16 +132,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
     batch_cmd = sub.add_parser("batch", help="按 JSONL 批量执行任务")
     batch_cmd.add_argument("tasks", help="tasks.jsonl 路径")
-    batch_cmd.add_argument("--model", default=None, help="模型 id，默认 role=general")
+    batch_cmd.add_argument(
+        "--model", default=None, help="模型 id，默认 settings.defaults.batch"
+    )
     batch_cmd.add_argument("--profile", default=None, help="档位编号")
 
     return parser
 
 
-def _resolve_model(config: AppConfig, model_id: str | None, role: str) -> ModelSpec:
+def _resolve_model(
+    config: AppConfig, model_id: str | None, mode: str
+) -> ModelSpec:
     if model_id:
         return config.model(model_id)
-    return config.model_by_role(role)
+    return config.default_model(mode)
 
 
 def _ensure_engine(
@@ -172,6 +178,11 @@ def _cmd_models(config: AppConfig, args: argparse.Namespace, palette: Palette) -
                 f" KV {profile.kv_k}/{profile.kv_v}  {profile.desc}"
             )
         print(palette.meta(f"alias {model.alias} · {model.path}"))
+    routes = " · ".join(
+        f"{mode}={config.default_model(mode).id}"
+        for mode in ("agent", "chat", "translate", "batch")
+    )
+    print(palette.meta(f"默认 {routes}"))
     return 0
 
 
@@ -239,7 +250,7 @@ def _cmd_serve(config: AppConfig, args: argparse.Namespace, palette: Palette) ->
 
 def _cmd_chat(config: AppConfig, args: argparse.Namespace, palette: Palette) -> int:
     verbose = bool(getattr(args, "verbose", False))
-    model = _resolve_model(config, args.model, "general")
+    model = _resolve_model(config, args.model, "chat")
     profile = config.resolve_profile(model, args.profile)
     repl = Repl(
         config,
@@ -255,8 +266,7 @@ def _cmd_chat(config: AppConfig, args: argparse.Namespace, palette: Palette) -> 
 
 def _cmd_agent(config: AppConfig, args: argparse.Namespace, palette: Palette) -> int:
     verbose = bool(getattr(args, "verbose", False))
-    # Agent 与 chat 默认都使用 role=general 的首个模型（qwen_coder）。
-    model = _resolve_model(config, getattr(args, "model", None), "general")
+    model = _resolve_model(config, getattr(args, "model", None), "agent")
     profile = config.resolve_profile(model, getattr(args, "profile", None))
     return agent_mod.run_agent(
         config,
@@ -423,7 +433,7 @@ def _cmd_batch(config: AppConfig, args: argparse.Namespace, palette: Palette) ->
     if tasks.suffix.lower() != ".jsonl":
         print(palette.err(f"批处理文件必须是 .jsonl：{tasks}"), file=sys.stderr)
         return 4
-    model = _resolve_model(config, args.model, "general")
+    model = _resolve_model(config, args.model, "batch")
     profile = config.resolve_profile(model, args.profile)
     client, _port = _ensure_engine(config, model, profile, palette)
     system_default = prompts.system_prompt(config.config_dir / "prompts")
