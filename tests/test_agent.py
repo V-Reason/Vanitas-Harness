@@ -124,7 +124,7 @@ class AgentTests(unittest.TestCase):
         fake_repl.run.return_value = 0
         out = io.StringIO()
         with (
-            mock.patch.object(agent, "AgentRepl", return_value=fake_repl) as repl_cls,
+            mock.patch.object(agent.loop, "AgentRepl", return_value=fake_repl) as repl_cls,
             contextlib.redirect_stdout(out),
         ):
             code = agent.run_agent(

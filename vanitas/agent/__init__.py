@@ -1,0 +1,101 @@
+"""vanitas.agent 公开门面：re-export actions / parser / stream / policy / stagnation / feedback / loop。
+
+所有旧的 `from vanitas.agent import X` 保持可用；
+内部函数需要者从 vanitas.agent.<submodule> import。
+"""
+
+from __future__ import annotations
+
+from .actions import (
+    ACTION_NAMES,
+    AgentAction,
+    _action_from_payload,
+    _action_signature,
+    _build_action,
+    _describe,
+    _optional_int,
+    _optional_text,
+    _require_text,
+    _summary,
+)
+from .feedback import (
+    _clip_feedback,
+    _parse_error_feedback,
+    _shell_detail,
+    wrap_tool_result,
+)
+from .loop import AgentLoop, AgentRepl, _run_action, _run_actions, run_agent
+from .parser import (
+    FUNCTION_CLOSE,
+    FUNCTION_OPEN,
+    FUNCTION_RESULTS_CLOSE,
+    FUNCTION_RESULTS_OPEN,
+    TOOL_CALL_CLOSE,
+    TOOL_CALL_OPEN,
+    _balanced_json_blocks,
+    _escape_path_backslashes,
+    _json_loads,
+    _json_variants,
+    _load_action_json,
+    _looks_like_action_attempt,
+    _parse_action,
+    _parse_actions,
+    _payload_calls,
+    _payloads_from_block,
+    _payloads_from_function_xml,
+    _payloads_from_text,
+    _raw_decode_action,
+    _repair_invalid_json_escapes,
+    _repair_path_escapes,
+    extract_tool_calls,
+)
+from .policy import _needs_confirmation
+from .stagnation import evaluate_stagnation
+from .stream import _AgentAnswerStream
+
+__all__ = [
+    "ACTION_NAMES",
+    "AgentAction",
+    "_action_from_payload",
+    "_action_signature",
+    "_build_action",
+    "_describe",
+    "_optional_int",
+    "_optional_text",
+    "_require_text",
+    "_summary",
+    "TOOL_CALL_OPEN",
+    "TOOL_CALL_CLOSE",
+    "FUNCTION_OPEN",
+    "FUNCTION_CLOSE",
+    "FUNCTION_RESULTS_OPEN",
+    "FUNCTION_RESULTS_CLOSE",
+    "extract_tool_calls",
+    "_parse_actions",
+    "_parse_action",
+    "_load_action_json",
+    "_repair_path_escapes",
+    "_repair_invalid_json_escapes",
+    "_json_loads",
+    "_json_variants",
+    "_balanced_json_blocks",
+    "_raw_decode_action",
+    "_payload_calls",
+    "_payloads_from_text",
+    "_payloads_from_block",
+    "_payloads_from_function_xml",
+    "_looks_like_action_attempt",
+    "_escape_path_backslashes",
+    "_AgentAnswerStream",
+    "_needs_confirmation",
+    "evaluate_stagnation",
+    "_clip_feedback",
+    "_parse_error_feedback",
+    "_shell_detail",
+    "wrap_tool_result",
+    "AgentLoop",
+    "AgentRepl",
+    "run_agent",
+    "_run_action",
+    "_run_actions",
+]
