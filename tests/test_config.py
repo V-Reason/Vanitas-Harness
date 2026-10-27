@@ -113,7 +113,15 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.settings.agent.max_feedback_chars, 8000)
         self.assertEqual(
             config.settings.agent.confirm_actions,
-            frozenset({"write_file", "patch_file", "delete_file", "move_file"}),
+            frozenset(
+                {
+                    "write_file",
+                    "patch_file",
+                    "delete_file",
+                    "delete_path",
+                    "move_file",
+                }
+            ),
         )
         self.assertIn("read_file_range", config.settings.agent.auto_actions)
         self.assertIn("grep_workspace", config.settings.agent.auto_actions)

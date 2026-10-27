@@ -43,6 +43,7 @@ COMMANDS: tuple[Command, ...] = (
     Command("system", "设置系统提示", (), "[text|file]"),
     Command("task", "应用任务模板 config\\prompts\\task_<name>.md", (), "[name]"),
     Command("clear", "清空对话历史"),
+    Command("undo", "回滚最近一轮对话", ("pop", "rollback")),
     Command("save", "保存当前会话 JSON", (), "[path]"),
     Command("load", "加载会话 JSON", (), "<path>"),
     Command("exec", "在用户原生 shell 中执行命令（无白名单）", (), "<cmd>"),
@@ -905,6 +906,31 @@ class Repl:
         )
         return True
 
+    def _cmd_undo(self, rest: str) -> bool:
+        removed, released = self.session.pop_last_turn()
+        if removed == 0:
+            print(self.palette.warn("当前没有可回溯的对话轮次"))
+            return True
+        self.last_turn = None
+        loop = getattr(self, "loop", None)
+        if loop is not None:
+            loop._recent.clear()
+            loop._last_failed_signatures.clear()
+            loop._stagnation_reason = ""
+            loop.steps = 0
+            loop.parse_retries = 0
+            loop.stagnation_hits = 0
+        used = self.session.message_tokens()
+        total = self.profile.ctx
+        pct = int((used / total) * 100) if total > 0 else 0
+        print(
+            self.palette.ok(
+                f"✓ 已回溯上一轮对话（移除 {removed} 条记录，"
+                f"释放 {released} tokens）· 视窗已用降至 {pct}%"
+            )
+        )
+        return True
+
     def _cmd_clear(self, rest: str) -> bool:
         self.session.clear_messages()
         print(self.palette.ok("对话历史已清空，系统提示与任务模板保留"))
@@ -1129,7 +1155,7 @@ class Repl:
             print(
                 self.palette.meta(
                     f"Agent 步数配额 {loop.steps}/{loop.max_steps}"
-                    f" · 熔断停滞计数 {loop.recent_count}/{loop.stagnation_limit}"
+                    f" · 熔断停滞计数 {loop.stagnation_count}/{loop.stagnation_limit}"
                 )
             )
         else:

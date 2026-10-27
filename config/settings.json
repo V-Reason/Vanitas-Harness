@@ -36,7 +36,7 @@
     "max_batch_actions": 100,
     "max_feedback_chars": 8000,
     "auto_actions": ["read_file", "read_file_range", "grep_workspace", "list_dir", "run_shell_ro"],
-    "confirm_actions": ["write_file", "patch_file", "delete_file", "move_file"],
+    "confirm_actions": ["write_file", "patch_file", "delete_file", "delete_path", "move_file"],
     "action_aliases": {
       "shell": "run_shell_ro"
     }
