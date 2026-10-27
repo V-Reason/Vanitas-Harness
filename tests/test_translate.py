@@ -6,6 +6,7 @@ import re
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +24,7 @@ from vanitas.translate import (  # noqa: E402
     parse_window_response,
     plan_translation_outputs,
     rebuild_srt,
+    sanitize_filename_stem,
     sanitize_translation_output,
     translate_file,
 )
@@ -498,6 +500,14 @@ class InputDiscoveryTests(unittest.TestCase):
         )
         self.assertEqual(plans[1].out_dir, out_dir / "sub")
 
+    def test_plan_uses_translated_stem(self) -> None:
+        self.write("The Clock.md")
+        source = collect_translate_inputs([self.dir / "The Clock.md"], SETTINGS)
+        source = [replace(source[0], translated_stem="时钟")]
+        out_dir = self.dir / "out"
+        plans = plan_translation_outputs(source, SETTINGS, out_dir)
+        self.assertEqual(plans[0].target, out_dir / "时钟.zh.md")
+
     def test_plan_rejects_colliding_outputs(self) -> None:
         first = self.dir / "first"
         second = self.dir / "second"
@@ -569,6 +579,30 @@ class FakeTranslationClient:
         }
 
 
+class FilenameTranslationClient:
+    def __init__(self, content: str = "文件名：“时钟.md”", finish: str = "stop") -> None:
+        self.content = content
+        self.finish = finish
+        self.calls: list[dict] = []
+
+    def chat(self, messages, *, max_tokens, temperature=0.2):
+        self.calls.append(
+            {
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+        )
+        return {
+            "choices": [
+                {
+                    "message": {"content": self.content},
+                    "finish_reason": self.finish,
+                }
+            ]
+        }
+
+
 class TranslationEngineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.prompt_dir = ROOT / "config" / "prompts"
@@ -621,6 +655,25 @@ class TranslationEngineTests(unittest.TestCase):
         latest = client.calls[-1]["messages"][-1]["content"]
         self.assertIn("无前文，故事开端", latest)
         self.assertNotIn("alpha", latest)
+
+    def test_translate_filename_uses_model_and_sanitizes(self) -> None:
+        client = FilenameTranslationClient(content="文件名：“时钟.md”")
+        engine = self.make_engine(client)
+
+        self.assertEqual(engine.translate_filename("The Clock.md"), "时钟")
+        prompt = client.calls[-1]["messages"][-1]["content"]
+        self.assertIn("The Clock", prompt)
+        self.assertGreater(client.calls[-1]["max_tokens"], 0)
+
+    def test_translate_filename_rejects_truncated_output(self) -> None:
+        engine = self.make_engine(FilenameTranslationClient(finish="length"))
+        with self.assertRaisesRegex(TranslateError, "被截断"):
+            engine.translate_filename("The Clock.md")
+
+    def test_translate_filename_rejects_empty_result(self) -> None:
+        engine = self.make_engine(FilenameTranslationClient(content="..."))
+        with self.assertRaisesRegex(TranslateError, "结果为空"):
+            engine.translate_filename("The Clock.md")
 
     def test_context_sentinel_and_fifo(self) -> None:
         client = FakeTranslationClient()
@@ -695,6 +748,22 @@ class TranslationEngineTests(unittest.TestCase):
     def test_sanitize_removes_period_after_ellipsis(self) -> None:
         self.assertEqual(sanitize_translation_output("你好……。", "hello"), "你好……")
         self.assertEqual(sanitize_translation_output("你好——。", "hello"), "你好——")
+
+    def test_sanitize_filename_stem_strips_quotes_prefix_and_extension(self) -> None:
+        self.assertEqual(sanitize_filename_stem("文件名：“时钟.md”", ".md"), "时钟")
+        self.assertEqual(sanitize_filename_stem("《雨の駅》.srt", ".srt"), "雨の駅")
+
+    def test_sanitize_filename_stem_replaces_invalid_characters(self) -> None:
+        self.assertEqual(
+            sanitize_filename_stem("雨/车站？", ".md"),
+            "雨_车站",
+        )
+        self.assertEqual(sanitize_filename_stem("...", ".md"), "")
+
+    def test_sanitize_filename_stem_limits_length(self) -> None:
+        cleaned = sanitize_filename_stem("长" * 120, ".md")
+        self.assertEqual(len(cleaned), 80)
+        self.assertEqual(cleaned, "长" * 80)
 
     def test_synthetic_test_ja_quotes_are_preserved(self) -> None:
         source_blocks = [

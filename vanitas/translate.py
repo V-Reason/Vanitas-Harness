@@ -38,6 +38,15 @@ BOM = b"\xef\xbb\xbf"
 FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)\n```$", re.DOTALL)
 QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’", "「": "」", "『": "』"}
 QUOTE_CHARS = frozenset(QUOTE_PAIRS) | frozenset(QUOTE_PAIRS.values())
+FILENAME_PROMPT = (
+    "把下面的文件名翻译成简洁、自然的中文。"
+    "只输出译文文件名本身：不要解释、不要引号、不要保留扩展名、不要换行。\n"
+    "文件名：{name}"
+)
+FILENAME_MAX_TOKENS = 96
+FILENAME_MAX_CHARS = 80
+FILENAME_INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+FILENAME_PREFIX = re.compile(r"^(?:文件名|译名|翻译结果)\s*[:：]\s*")
 
 
 @dataclass
@@ -57,10 +66,11 @@ class TranslationOutcome:
 
 @dataclass(frozen=True)
 class TranslationSource:
-    """一个待翻译文件；relative_parent 用于在 --out-dir 下保留目录层级。"""
+    """一个待翻译文件；relative_parent 用于保留层级，translated_stem 为译名。"""
 
     path: Path
     relative_parent: Path = field(default_factory=Path)
+    translated_stem: str | None = None
 
 
 @dataclass(frozen=True)
@@ -143,6 +153,26 @@ def sanitize_translation_output(raw_text: str, source_text: str) -> str:
     return text
 
 
+def sanitize_filename_stem(raw: str, source_suffix: str = "") -> str:
+    """把模型输出收敛成安全的单段文件名（不含扩展名）。"""
+    text = sanitize_translation_output(raw, "")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    text = FILENAME_PREFIX.sub("", lines[0])
+    text = text.strip(" \t\"'“”‘’「」『』《》")
+    if source_suffix and text.lower().endswith(source_suffix.lower()):
+        text = text[: -len(source_suffix)]
+        text = text.strip(" \t\"'“”‘’「」『』《》")
+    text = FILENAME_INVALID_CHARS.sub("_", text)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"_+", "_", text)
+    text = text.strip(" ._。！？!?；;，,、")
+    if len(text) > FILENAME_MAX_CHARS:
+        text = text[:FILENAME_MAX_CHARS].rstrip(" ._")
+    return text
+
+
 def _clip(text: str, limit: int) -> str:
     compact = " ".join(text.split())
     if len(compact) <= limit:
@@ -180,6 +210,39 @@ class TranslationEngine:
     def reset_history(self) -> None:
         """开始新文档时清空滑动上下文，避免跨文件标题/人称串染。"""
         self._history.clear()
+
+    def translate_filename(self, filename: str) -> str:
+        """用翻译模型把文件名主体译成中文；不写入正文上下文。"""
+        path = Path(filename)
+        stem = path.stem.strip()
+        if not stem:
+            raise TranslateError(f"文件名为空，无法翻译：{filename!r}")
+        messages: list[dict] = []
+        if self._system.strip():
+            messages.append({"role": "system", "content": self._system})
+        messages.append(
+            {
+                "role": "user",
+                "content": FILENAME_PROMPT.format(name=stem),
+            }
+        )
+        result = self._client.chat(
+            messages,
+            max_tokens=FILENAME_MAX_TOKENS,
+            temperature=self._options.temperature,
+        )
+        choices = result.get("choices") or []
+        finish_reason = ""
+        if choices and isinstance(choices[0], dict):
+            finish_reason = str(choices[0].get("finish_reason") or "")
+        if finish_reason == "length":
+            raise TranslateError(f"文件名翻译输出被截断：{filename}")
+        translated = sanitize_filename_stem(
+            extract_content(result), path.suffix
+        )
+        if not translated:
+            raise TranslateError(f"文件名翻译结果为空：{filename}")
+        return translated
 
     # ------------------------------------------------------------------ #
     # 内部
@@ -687,8 +750,17 @@ def _read_text(path: Path) -> tuple[str, bool, str]:
     return text, has_bom, _detect_eol(text)
 
 
-def output_path(source: Path, out_dir: Path | None, suffix: str) -> Path:
-    name = f"{source.stem}{suffix}{source.suffix}"
+def output_path(
+    source: Path,
+    out_dir: Path | None,
+    suffix: str,
+    stem: str | None = None,
+) -> Path:
+    if stem is not None:
+        base = sanitize_filename_stem(stem, source.suffix) or source.stem
+    else:
+        base = source.stem
+    name = f"{base}{suffix}{source.suffix}"
     return (out_dir / name) if out_dir is not None else (source.parent / name)
 
 
@@ -803,7 +875,12 @@ def plan_translation_outputs(
 
     for source in sources:
         target_dir = out_dir / source.relative_parent if out_dir is not None else None
-        target = output_path(source.path, target_dir, settings.output_suffix)
+        target = output_path(
+            source.path,
+            target_dir,
+            settings.output_suffix,
+            source.translated_stem,
+        )
         key = _path_key(target)
         previous = targets.get(key)
         if previous is not None:
@@ -829,6 +906,7 @@ def translate_file(
     settings,
     *,
     out_dir: Path | None = None,
+    output_stem: str | None = None,
     on_segment: Callable[[int, int], None] | None = None,
     window_size: int = 1,
     max_window_chars: int = 250,
@@ -870,7 +948,9 @@ def translate_file(
             on_segment=on_segment,
         )
 
-    target = output_path(source, out_dir, settings.output_suffix)
+    target = output_path(
+        source, out_dir, settings.output_suffix, output_stem
+    )
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         data = translated.encode("utf-8")

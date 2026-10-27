@@ -128,6 +128,13 @@ def _build_parser() -> argparse.ArgumentParser:
     translate_cmd.add_argument(
         "--out-dir", default=None, help="输出目录；目录输入会保留相对层级，默认与原文件同目录"
     )
+    translate_cmd.add_argument(
+        "--translate-name",
+        "--translate-filename",
+        dest="translate_name",
+        action="store_true",
+        help="先用翻译模型把源文件名主体译成中文，再拼输出后缀与扩展名",
+    )
     translate_cmd.add_argument("--jobs", type=int, default=1, help="并发数；引擎为 -np 1，实际串行")
     translate_cmd.add_argument(
         "--preset",
@@ -405,10 +412,16 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
             effective,
             exclude_dir=out_dir,
         )
-        plans = translate.plan_translation_outputs(sources, effective, out_dir)
     except TranslateError as exc:
         print(palette.err(str(exc)), file=sys.stderr)
         return 5
+    plans: list[translate.TranslationPlan] = []
+    if not args.translate_name:
+        try:
+            plans = translate.plan_translation_outputs(sources, effective, out_dir)
+        except TranslateError as exc:
+            print(palette.err(str(exc)), file=sys.stderr)
+            return 5
     monitor = TranslationMonitor(
         stream=sys.stderr,
         enabled=palette.enabled,
@@ -424,6 +437,31 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
         task_template=task_template,
         translate_settings=effective,
     )
+    if args.translate_name:
+        translate_filename = getattr(chat, "translate_filename", None)
+        if not callable(translate_filename):
+            print(
+                palette.err("当前翻译引擎不支持文件名翻译"),
+                file=sys.stderr,
+            )
+            return 5
+        translated: list[translate.TranslationSource] = []
+        for source in sources:
+            try:
+                stem = translate_filename(source.path.name)
+            except (EngineError, TranslateError) as exc:
+                print(
+                    palette.err(f"{source.path.name}：文件名翻译失败：{exc}"),
+                    file=sys.stderr,
+                )
+                return 5
+            translated.append(replace(source, translated_stem=stem))
+        sources = translated
+        try:
+            plans = translate.plan_translation_outputs(sources, effective, out_dir)
+        except TranslateError as exc:
+            print(palette.err(str(exc)), file=sys.stderr)
+            return 5
     print(
         palette.meta(
             f"{model.display} · 档位 {profile.key} · 预设 {preset_name}"
@@ -445,6 +483,7 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                 source,
                 effective,
                 out_dir=plan.out_dir,
+                output_stem=plan.source.translated_stem,
                 window_size=window_size,
                 max_window_chars=max_window_chars,
             )

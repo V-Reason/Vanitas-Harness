@@ -125,7 +125,7 @@ vanitas\
 # 1) 语法
 Get-ChildItem vanitas\*.py, tests\test_*.py | ForEach-Object { python -m py_compile $_.FullName }
 
-# 2) 单测（当前 383 例）
+# 2) 单测（当前 393 例）
 python -m unittest discover -s tests
 python -m unittest tests.test_agent_parser
 
@@ -165,6 +165,7 @@ python -m vanitas stop
 - 提示词：`system_default` 全静态；`task_chat/task_code/task_agent/task_translate_asmr` 使用 XML，`task_translate`/`agent_continue` 保持紧凑纯文本；仅 6 个占位符。`task_agent` 的批量是逐项执行而非事务，`patch_file` 只要求唯一片段、不强制固定上下行数；不提供 `_reason` 参数。
 - 翻译上下文：`TranslationEngine._history` 是文档级状态；CLI 在每个输入文件前调用 `reset_history()`，多文件不得继承上一文件的标题、摘要或人名。`sanitize_translation_output` 会去掉 `……。`/`——。` 的重复句号。
 - 翻译目录：`translate` 的 `inputs` 接受文件、目录或混用；目录用 `os.walk(followlinks=False)` 递归，只收 `settings.translate.source_suffixes`，跳过目录内已有 `<原名><output_suffix>.<扩展名>` 产物，按真实路径去重。`--out-dir` 下目录输入保留相对层级，直接文件平铺；写出前拒绝目标冲突与覆盖输入。空目录/不可遍历目录在启动模型前返回 `5`；显式文件的存在性仍由 `translate_file()` 判定。
+- 文件名翻译：`--translate-name`/`--translate-filename` 在内容翻译前用 `TranslationEngine.translate_filename()` 逐文件翻译文件名主体；只翻主体、不翻扩展名，结果经 `sanitize_filename_stem()` 去引号/前缀/扩展名、替换 Windows 非法字符并限长 80；译名写入 `TranslationSource.translated_stem`，与正文共用输出规划，重名冲突返回 `5`；截断或空结果直接失败，不静默保留原名。
 - 人类 `/exec`/`!` 使用原生 `shell=True`，不再受 `manual_exec_prefixes`/目录限制；`AgentTools.run_shell_ro` 的只读白名单与 `is_inside_workspace` 边界完全不变。
 - AgentTools 新增 `patch_file`、`read_file_range`、`grep_workspace`；全部走 `_require_path`。`patch_file` 需确认，另两项只读自动放行；大文件优先 `read_file_range`/`grep_workspace`，小改优先 `patch_file`，多文件优先单轮动作数组；批量逐项执行，失败不回滚已成功项，不是事务。
 - `delete_path` 递归删除文件/目录，`delete_file` 为兼容别名；工作区根目录、父级与越界路径硬拒绝，符号链接只删链接本身。`/undo`/`/pop`/`/rollback` 回滚最近一轮并释放 tokens。

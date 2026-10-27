@@ -55,6 +55,27 @@ class FakeClient:
         return True
 
 
+class NamingClient(FakeClient):
+    def chat(self, messages, *, max_tokens, temperature=0.2, response_format=None, timeout=None):
+        prompt = str(messages[-1]["content"])
+        if "文件名：" in prompt:
+            name = prompt.split("文件名：", 1)[1]
+            if "Clock" in name:
+                content = "时钟"
+            elif "Station" in name:
+                content = "车站"
+            else:
+                content = "译名"
+            return {"choices": [{"message": {"content": content}}]}
+        return super().chat(
+            messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format=response_format,
+            timeout=timeout,
+        )
+
+
 def run(argv: list[str]) -> tuple[int, str, str]:
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -141,6 +162,74 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("2 段", err)
         self.assertNotIn("\x1b[", err)
 
+    def test_translate_filename_single_file(self) -> None:
+        source = self.dir / "The Clock.md"
+        source.write_text("Hello\n", encoding="utf-8")
+        out_dir = self.dir / "out"
+        with clean_env():
+            with mock.patch.object(
+                cli, "_ensure_engine", return_value=(NamingClient(), 4060)
+            ):
+                code, _out, err = run(
+                    [
+                        "translate",
+                        str(source),
+                        "--out-dir",
+                        str(out_dir),
+                        "--translate-filename",
+                    ]
+                )
+        self.assertEqual(code, 0, err)
+        self.assertTrue((out_dir / "时钟.zh.md").is_file())
+        self.assertFalse((out_dir / "The Clock.zh.md").exists())
+        self.assertIn("The Clock.md → 时钟.zh.md", err)
+
+    def test_translate_filename_directory_names(self) -> None:
+        source_dir = self.dir / "src"
+        source_dir.mkdir()
+        (source_dir / "The Clock.md").write_text("A\n", encoding="utf-8")
+        (source_dir / "Station.md").write_text("B\n", encoding="utf-8")
+        out_dir = self.dir / "out"
+        with clean_env():
+            with mock.patch.object(
+                cli, "_ensure_engine", return_value=(NamingClient(), 4060)
+            ):
+                code, _out, err = run(
+                    [
+                        "translate",
+                        str(source_dir),
+                        "--out-dir",
+                        str(out_dir),
+                        "--translate-name",
+                    ]
+                )
+        self.assertEqual(code, 0, err)
+        self.assertTrue((out_dir / "时钟.zh.md").is_file())
+        self.assertTrue((out_dir / "车站.zh.md").is_file())
+
+    def test_translate_filename_collision_is_rejected(self) -> None:
+        source_dir = self.dir / "src"
+        source_dir.mkdir()
+        (source_dir / "one.md").write_text("A\n", encoding="utf-8")
+        (source_dir / "two.md").write_text("B\n", encoding="utf-8")
+        out_dir = self.dir / "out"
+        with clean_env():
+            with mock.patch.object(
+                cli, "_ensure_engine", return_value=(NamingClient(), 4060)
+            ):
+                code, _out, err = run(
+                    [
+                        "translate",
+                        str(source_dir),
+                        "--out-dir",
+                        str(out_dir),
+                        "--translate-filename",
+                    ]
+                )
+        self.assertEqual(code, 5)
+        self.assertIn("输出路径冲突", err)
+        self.assertFalse((out_dir / "译名.zh.md").exists())
+
     def test_translate_missing_file_exit_5(self) -> None:
         with clean_env():
             with mock.patch.object(
@@ -162,6 +251,7 @@ class CliSmokeTests(unittest.TestCase):
             code, out, _err = run(["translate", "--help"])
         self.assertEqual(code, 0)
         self.assertIn("--preset", out)
+        self.assertIn("--translate-name", out)
 
     def test_translate_unknown_preset_exit_4(self) -> None:
         with clean_env():
