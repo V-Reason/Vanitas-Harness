@@ -54,6 +54,25 @@ class Session:
         self.messages.clear()
         self.is_dirty = False
 
+    def pop_last_turn(self) -> tuple[int, int]:
+        """删除最后一条 user 及其后 assistant/tool_result，返回条数与释放 tokens。"""
+        if not self.messages:
+            return 0, 0
+        last_user = None
+        for index in range(len(self.messages) - 1, -1, -1):
+            if self.messages[index].get("role") == "user":
+                last_user = index
+                break
+        if last_user is None:
+            return 0, 0
+        before = self.message_tokens()
+        removed = len(self.messages) - last_user
+        del self.messages[last_user:]
+        released = max(0, before - self.message_tokens())
+        if removed:
+            self.is_dirty = True
+        return removed, released
+
     def api_messages(self) -> list[dict]:
         if self.system.strip():
             return [{"role": "system", "content": self.system}, *self.messages]
