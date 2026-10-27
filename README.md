@@ -115,7 +115,7 @@ Vanitas-Harness\
 │   │   └── bench_stream.py
 │   ├── multi_model_benchmark.py
 │   ├── smoke_cli.py
-│   ├── test_*.py               # 364 个单元测试
+│   ├── test_*.py               # 369 个单元测试
 │   └── reports\                # 评测与冒烟产物（不入库）
 └── docs\                       # 总设计方案 / 项目现状 / 使用手册 / 范式笔记
 ```
@@ -130,6 +130,7 @@ Vanitas-Harness\
 - **退出码**：`0` 成功 / `1` 中断 / `2` 配置错误 / `3` 守卫失败 / `4` 参数错误 / `5` 引擎或网络失败。
 - **依赖红线**：标准库 + `prompt_toolkit`；`bin\`、`models\` 只读；禁止 `git clean -fdx`。
 - **提示词**：`system_default` 全静态；`task_chat/task_code/task_agent/task_translate_asmr` 使用 XML；`task_translate`/`agent_continue` 保持紧凑纯文本；运行时变量位于模板尾部；仅 6 个合法占位符。
+- **翻译上下文**：每个输入文件开始前清空滑动上下文；多文件翻译不会继承上一文件的标题或人称。
 - **Agent 沙盒**：`vanitas agent` 以启动时的用户原工作目录（`VANITAS_ORIG_CWD`）为根；单动作 `read_file`/`list_dir`/`run_shell_ro` 与只读动作数组自动放行；`write_file`/`delete_file`/`move_file` 必须确认，含修改的数组统一打印清单并只弹一次 `[y/N]`；越界路径转成 `<tool_result>` 并交还模型决策。模型动作优先使用 `<tool_call>[...]</tool_call>`，裸 JSON 仍兼容。步数上限、批量上限、审批策略与反馈长度均由 `settings.agent` 控制（默认 10 步）。`/exec` 仍是手动逐次确认。`failed_signatures` 在单次 Agent 运行内跨批次保留：某动作失败后，相同参数再次提交会在确认前被拦截并回填错误，直到该签名成功或运行结束。
 - **只读白名单分层**：通用只读命令（`dir` / `cat` / `git status` 等）走 `settings.tools.readonly_shell_prefixes`；项目特定脚本（如 `python verify.py`）走 `settings.tools.project_prefixes`。两集合取并集后作为 Agent 只读 Shell 的最终白名单。
 - **工具权限**：`tools.manual_exec_prefixes`、`readonly_shell_prefixes`、写参数/Git 黑名单、文件读写限制全部来自 `config/settings.json`；`exec_whitelist` 仍不接受。

@@ -367,6 +367,27 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(call.args[1].resolve(), source.resolve())
         self.assertEqual(call.kwargs["out_dir"].resolve(), out_dir.resolve())
 
+    def test_translate_resets_history_between_files(self) -> None:
+        outcome = mock.Mock()
+        outcome.source = Path("a.md")
+        outcome.output = Path("a.zh.md")
+        outcome.segments = 1
+        outcome.failures = []
+        chat = mock.Mock()
+        chat.reset_history = mock.Mock()
+        with clean_env():
+            with (
+                mock.patch.object(
+                    cli, "_translate_chat", return_value=(chat, 0)
+                ),
+                mock.patch.object(
+                    cli.translate, "translate_file", return_value=outcome
+                ),
+            ):
+                code, _out, err = run(["translate", "a.md", "b.md"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(chat.reset_history.call_count, 2)
+
     def test_translate_two_files_get_independent_compact_stats(self) -> None:
         first = self.dir / "a.srt"
         first.write_text(

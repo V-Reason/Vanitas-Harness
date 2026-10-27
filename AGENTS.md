@@ -125,7 +125,7 @@ vanitas\
 # 1) 语法
 Get-ChildItem vanitas\*.py, tests\test_*.py | ForEach-Object { python -m py_compile $_.FullName }
 
-# 2) 单测（当前 364 例）
+# 2) 单测（当前 369 例）
 python -m unittest discover -s tests
 python -m unittest tests.test_agent_parser
 
@@ -163,6 +163,7 @@ python -m vanitas stop
 - 默认分工由 `settings.defaults` 配置：Agent=`qwen_coder`、chat=`qwen7b`（非 Coder）、translate=`hymt`、batch=`qwen7b`；`serve <id>` 必须显式模型。`qwen7b` 在 4063，minicpm 仍为 `role=light`。`~/.vanitas/preferences.json` 记忆档位，优先级 CLI > 环境变量 > 偏好 > `default_profile`。
 - 翻译预设：`translate.default_preset=subtitle`；`subtitle/prose/asmr` 使用 HY-MT2 profile 2（8K Q4）、context 12/10/12、chunk 800；`general` 保留 4K Q8 / context 5 / chunk 1500。显式 `--model`/`--profile` 优先；档位不一致时 `translate` 自动停旧启新。
 - 提示词：`system_default` 全静态；`task_chat/task_code/task_agent/task_translate_asmr` 使用 XML，`task_translate`/`agent_continue` 保持紧凑纯文本；仅 6 个占位符。`task_agent` 的批量是逐项执行而非事务，`patch_file` 只要求唯一片段、不强制固定上下行数；不提供 `_reason` 参数。
+- 翻译上下文：`TranslationEngine._history` 是文档级状态；CLI 在每个输入文件前调用 `reset_history()`，多文件不得继承上一文件的标题、摘要或人名。`sanitize_translation_output` 会去掉 `……。`/`——。` 的重复句号。
 - 人类 `/exec`/`!` 使用原生 `shell=True`，不再受 `manual_exec_prefixes`/目录限制；`AgentTools.run_shell_ro` 的只读白名单与 `is_inside_workspace` 边界完全不变。
 - AgentTools 新增 `patch_file`、`read_file_range`、`grep_workspace`；全部走 `_require_path`。`patch_file` 需确认，另两项只读自动放行；大文件优先 `read_file_range`/`grep_workspace`，小改优先 `patch_file`，多文件优先单轮动作数组；批量逐项执行，失败不回滚已成功项，不是事务。
 - `delete_path` 递归删除文件/目录，`delete_file` 为兼容别名；工作区根目录、父级与越界路径硬拒绝，符号链接只删链接本身。`/undo`/`/pop`/`/rollback` 回滚最近一轮并释放 tokens。

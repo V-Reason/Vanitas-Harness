@@ -205,6 +205,30 @@ class PromptTests(unittest.TestCase):
             self.assertIn(phrase, text)
         self.assertNotIn("输入 N 行", text)
 
+    def test_translate_prompt_has_context_insulation_and_perspective_rules(self) -> None:
+        text = prompts.load_task(self.prompt_dir, "translate")
+        for phrase in (
+            "参考上下文绝缘",
+            "第一行",
+            "第三人称",
+            "豚汁",
+            "红烧猪肉",
+        ):
+            self.assertIn(phrase, text)
+
+    def test_asmr_prompt_has_negative_and_punctuation_rules(self) -> None:
+        text = prompts.load_task(self.prompt_dir, "translate_asmr")
+        for phrase in (
+            "咕噜",
+            "嗯姆",
+            "哧溜",
+            "……。",
+            "離れないで",
+            "買わないで",
+            "（轻吻）",
+        ):
+            self.assertIn(phrase, text)
+
     def test_unknown_placeholder_in_template_rejected(self) -> None:
         (self.temp_dir / "bad.md").write_text("hi {unknown}\n", encoding="utf-8")
         with self.assertRaises(ConfigError) as ctx:

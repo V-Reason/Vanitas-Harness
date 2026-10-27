@@ -417,6 +417,10 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
         source = _resolve_cli_path(raw)
         # 每个文件独立计时/计量；reset 也负责清掉上一文件的看板。
         monitor.reset()
+        # 滑动上下文是文档级状态，不能把上一文件的标题/人称带进下一文件。
+        reset_history = getattr(chat, "reset_history", None)
+        if callable(reset_history):
+            reset_history()
         try:
             outcome = translate.translate_file(
                 chat,

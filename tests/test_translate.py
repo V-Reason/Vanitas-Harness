@@ -497,6 +497,17 @@ class TranslationEngineTests(unittest.TestCase):
         )
         self.assertTrue(prompt.rstrip().endswith("alpha"))
 
+    def test_translation_engine_reset_history(self) -> None:
+        client = FakeTranslationClient()
+        engine = self.make_engine(client, context_window=2)
+        engine.translate("alpha")
+        engine.reset_history()
+        engine.translate("beta")
+
+        latest = client.calls[-1]["messages"][-1]["content"]
+        self.assertIn("无前文，故事开端", latest)
+        self.assertNotIn("alpha", latest)
+
     def test_context_sentinel_and_fifo(self) -> None:
         client = FakeTranslationClient()
         stats = []
@@ -566,6 +577,10 @@ class TranslationEngineTests(unittest.TestCase):
             sanitize_translation_output("“未闭合", "hello"),
             "“未闭合",
         )
+
+    def test_sanitize_removes_period_after_ellipsis(self) -> None:
+        self.assertEqual(sanitize_translation_output("你好……。", "hello"), "你好……")
+        self.assertEqual(sanitize_translation_output("你好——。", "hello"), "你好——")
 
     def test_synthetic_test_ja_quotes_are_preserved(self) -> None:
         source_blocks = [

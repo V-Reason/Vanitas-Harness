@@ -106,6 +106,8 @@ def sanitize_translation_output(raw_text: str, source_text: str) -> str:
         if not match:
             break
         text = match.group(1).strip()
+    # 省略号/破折号已经承担句末语气，后面再追加句号属于重复标点。
+    text = re.sub(r"(……|——)。", r"\1", text)
     if _has_dialogue_quotes(source_text):
         return text
     for _ in range(3):
@@ -151,6 +153,10 @@ class TranslationEngine:
 
     def translate(self, text: str) -> str:
         return self._translate_once(text, depth=0)
+
+    def reset_history(self) -> None:
+        """开始新文档时清空滑动上下文，避免跨文件标题/人称串染。"""
+        self._history.clear()
 
     # ------------------------------------------------------------------ #
     # 内部
