@@ -687,9 +687,33 @@ def _read_text(path: Path) -> tuple[str, bool, str]:
     return text, has_bom, _detect_eol(text)
 
 
-def output_path(source: Path, out_dir: Path | None, suffix: str) -> Path:
-    name = f"{source.stem}{suffix}{source.suffix}"
+def output_path(
+    source: Path,
+    out_dir: Path | None,
+    suffix: str,
+    filename: str | None = None,
+) -> Path:
+    if filename is not None:
+        name = normalize_output_name(filename, source.suffix)
+    else:
+        name = f"{source.stem}{suffix}{source.suffix}"
     return (out_dir / name) if out_dir is not None else (source.parent / name)
+
+
+def normalize_output_name(name: str, source_suffix: str) -> str:
+    """校验并补全自定义输出文件名；只接受单个文件名，不接收目录。"""
+    raw = (name or "").strip()
+    if not raw or raw in {".", ".."} or not raw.strip("."):
+        raise TranslateError("--name 不能为空或仅由句点组成")
+    if "/" in raw or "\\" in raw or Path(raw).is_absolute():
+        raise TranslateError("--name 只能是文件名，不能包含目录或驱动器")
+    if any(char in '<>:"|?*' for char in raw) or any(ord(char) < 32 for char in raw):
+        raise TranslateError("--name 包含 Windows 文件名非法字符")
+    if raw.endswith("."):
+        raise TranslateError("--name 不能以句点结尾")
+    if not Path(raw).suffix:
+        raw = f"{raw}{source_suffix}"
+    return raw
 
 
 def _path_key(path: Path) -> str:
@@ -792,18 +816,27 @@ def plan_translation_outputs(
     sources: list[TranslationSource],
     settings: TranslateSettings,
     out_dir: Path | None,
+    *,
+    output_name: str | None = None,
 ) -> list[TranslationPlan]:
     """计算输出路径并在写盘前拦截冲突，避免静默覆盖。
 
     --out-dir 存在时，目录输入保留相对层级；直接指定的文件仍平铺在输出根。
+    output_name 只允许用于单个源文件，可覆盖默认的 ``<原名><suffix><扩展名>``。
     """
+    if output_name is not None and len(sources) != 1:
+        raise TranslateError(
+            f"--name 只能用于单个输出文件；当前展开为 {len(sources)} 个文件"
+        )
     plans: list[TranslationPlan] = []
     targets: dict[str, TranslationSource] = {}
     source_keys = {_path_key(item.path) for item in sources}
 
     for source in sources:
         target_dir = out_dir / source.relative_parent if out_dir is not None else None
-        target = output_path(source.path, target_dir, settings.output_suffix)
+        target = output_path(
+            source.path, target_dir, settings.output_suffix, output_name
+        )
         key = _path_key(target)
         previous = targets.get(key)
         if previous is not None:
@@ -814,7 +847,7 @@ def plan_translation_outputs(
         if key in source_keys:
             raise TranslateError(
                 f"输出会覆盖输入文件：{source.path} → {target}；"
-                "请更换 --out-dir 或输出后缀"
+                "请更换 --out-dir、--name 或输出后缀"
             )
         targets[key] = source
         plans.append(
@@ -829,6 +862,7 @@ def translate_file(
     settings,
     *,
     out_dir: Path | None = None,
+    output_name: str | None = None,
     on_segment: Callable[[int, int], None] | None = None,
     window_size: int = 1,
     max_window_chars: int = 250,
@@ -870,7 +904,9 @@ def translate_file(
             on_segment=on_segment,
         )
 
-    target = output_path(source, out_dir, settings.output_suffix)
+    target = output_path(
+        source, out_dir, settings.output_suffix, output_name
+    )
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         data = translated.encode("utf-8")

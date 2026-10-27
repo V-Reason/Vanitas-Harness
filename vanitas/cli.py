@@ -128,6 +128,13 @@ def _build_parser() -> argparse.ArgumentParser:
     translate_cmd.add_argument(
         "--out-dir", default=None, help="输出目录；目录输入会保留相对层级，默认与原文件同目录"
     )
+    translate_cmd.add_argument(
+        "--name",
+        "--output-name",
+        dest="output_name",
+        default=None,
+        help="自定义输出文件名，仅限单个输入；不含扩展名时自动补源扩展名",
+    )
     translate_cmd.add_argument("--jobs", type=int, default=1, help="并发数；引擎为 -np 1，实际串行")
     translate_cmd.add_argument(
         "--preset",
@@ -405,7 +412,31 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
             effective,
             exclude_dir=out_dir,
         )
-        plans = translate.plan_translation_outputs(sources, effective, out_dir)
+    except TranslateError as exc:
+        print(palette.err(str(exc)), file=sys.stderr)
+        return 5
+    requested_name = args.output_name
+    output_name: str | None = None
+    if requested_name is not None:
+        if len(sources) != 1:
+            print(
+                palette.err(
+                    f"--name 只能用于单个输出文件；当前展开为 {len(sources)} 个文件"
+                ),
+                file=sys.stderr,
+            )
+            return 4
+        try:
+            output_name = translate.normalize_output_name(
+                requested_name, sources[0].path.suffix
+            )
+        except TranslateError as exc:
+            print(palette.err(str(exc)), file=sys.stderr)
+            return 4
+    try:
+        plans = translate.plan_translation_outputs(
+            sources, effective, out_dir, output_name=output_name
+        )
     except TranslateError as exc:
         print(palette.err(str(exc)), file=sys.stderr)
         return 5
@@ -445,6 +476,7 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                 source,
                 effective,
                 out_dir=plan.out_dir,
+                output_name=output_name,
                 window_size=window_size,
                 max_window_chars=max_window_chars,
             )
