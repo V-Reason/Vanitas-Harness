@@ -22,7 +22,7 @@ from .chat import ChatRunner, TurnResult
 from .client import LlamaClient
 from .config import AppConfig, ModelSpec, ProfileSpec
 from .errors import ConfigError, EngineError, GuardError, LaunchError, ToolDenied
-from .session import Session, default_save_path
+from .context import Session, default_save_path
 from .ui import SYMBOLS, Palette, strip_ansi
 
 

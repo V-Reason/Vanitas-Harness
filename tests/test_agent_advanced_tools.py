@@ -21,7 +21,7 @@ from vanitas.config import DEFAULT_THEME, load_config  # noqa: E402
 from vanitas.errors import ToolDenied  # noqa: E402
 from vanitas.launcher import RunRecord  # noqa: E402
 from vanitas.repl import Repl  # noqa: E402
-from vanitas.session import COLLAPSED_OBSERVATION_MARKER, Session  # noqa: E402
+from vanitas.context import COLLAPSED_OBSERVATION_MARKER, Session  # noqa: E402
 from vanitas.ui import Palette  # noqa: E402
 
 

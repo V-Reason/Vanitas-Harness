@@ -17,7 +17,7 @@ from vanitas.chat import ChatRunner  # noqa: E402
 from vanitas.config import load_config  # noqa: E402
 from vanitas.errors import EngineError  # noqa: E402
 from vanitas.metrics import MESSAGE_OVERHEAD, chat_max_tokens, estimate_tokens  # noqa: E402
-from vanitas.session import Session  # noqa: E402
+from vanitas.context import Session  # noqa: E402
 from vanitas.ui import Palette  # noqa: E402
 
 

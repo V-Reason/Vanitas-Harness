@@ -15,10 +15,9 @@ from typing import Callable
 from .client import LlamaClient
 from .config import AppConfig, ModelSpec, ProfileSpec
 from .errors import EngineError
-from .metrics import chat_max_tokens, context_budget
+from .context import ContextBudget, Session
 from .progress import Spinner
 from .render import StreamRenderer
-from .session import Session
 from .ui import Palette
 
 
@@ -77,11 +76,6 @@ class ChatRunner:
     ) -> TurnResult:
         if self.client is None:
             raise EngineError("服务端没有运行：先运行 vanitas serve <id>")
-        budget = context_budget(
-            self.profile.ctx,
-            self.config.settings.repl.max_context_tokens,
-            self.config.settings.repl.context_reserve_tokens,
-        )
         user_message = self.session.build_user_message(
             text,
             self.prompt_dir,
@@ -89,7 +83,6 @@ class ChatRunner:
         )
         self.session.add_user(user_message)
         return self._run_turn(
-            budget,
             on_dropped=on_dropped,
             display=display,
             stream=stream,
@@ -106,14 +99,8 @@ class ChatRunner:
         """把系统反馈直接作为 user 消息追加，不重复套任务模板。"""
         if self.client is None:
             raise EngineError("服务端没有运行：先运行 vanitas serve <id>")
-        budget = context_budget(
-            self.profile.ctx,
-            self.config.settings.repl.max_context_tokens,
-            self.config.settings.repl.context_reserve_tokens,
-        )
         self.session.add_user(feedback)
         return self._run_turn(
-            budget,
             on_dropped=on_dropped,
             display=display,
             stream=stream,
@@ -121,7 +108,6 @@ class ChatRunner:
 
     def _run_turn(
         self,
-        budget: int,
         *,
         on_dropped: Callable[[int], None] | None,
         display: bool,
@@ -129,12 +115,8 @@ class ChatRunner:
     ) -> TurnResult:
         if self.client is None:
             raise EngineError("服务端没有运行：先运行 vanitas serve <id>")
-        collapsed = self.session.collapse_intermediate_observations(
-            budget,
-            threshold=self.config.settings.repl.context_collapse_ratio,
-            keep_rounds=self.config.settings.repl.context_collapse_keep_rounds,
-            min_chars=self.config.settings.repl.context_collapse_min_chars,
-        )
+        budget = ContextBudget.from_config(self.config, self.profile)
+        collapsed = budget.collapse(self.session)
         if collapsed:
             print(
                 self.palette.meta(
@@ -142,16 +124,11 @@ class ChatRunner:
                 ),
                 file=sys.stderr,
             )
-        dropped = self.session.trim(budget)
+        dropped = budget.trim(self.session)
         if dropped and on_dropped is not None:
             on_dropped(dropped)
 
-        max_tokens = chat_max_tokens(
-            self.profile.ctx,
-            self.session.message_tokens(),
-            self.config.settings.repl.context_reserve_tokens,
-            self.config.settings.repl.min_output_tokens,
-        )
+        max_tokens = budget.max_output(self.session)
         renderer = StreamRenderer(
             stream=None
             if display

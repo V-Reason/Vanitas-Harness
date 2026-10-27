@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from vanitas.config import load_config  # noqa: E402
-from vanitas.session import (  # noqa: E402
+from vanitas.context import (  # noqa: E402
     Session,
     context_budget,
     default_save_path,
@@ -89,7 +89,9 @@ class SessionTests(unittest.TestCase):
         session = Session(system="sys", task="agent")
         with (
             mock.patch.dict(os.environ, {"VANITAS_ORIG_CWD": ""}),
-            mock.patch("vanitas.session.os.getcwd", return_value=r"<WORKSPACE>\fallback"),
+            mock.patch(
+                "vanitas.context.session.os.getcwd", return_value=r"<WORKSPACE>\fallback"
+            ),
         ):
             message = session.build_user_message("hello", self.prompt_dir, "alias")
         self.assertIn("当前工作目录：T:\\fallback", message)
@@ -100,7 +102,9 @@ class SessionTests(unittest.TestCase):
 
     def test_default_save_path_is_under_vanitas_sessions(self) -> None:
         home = Path(r"<WORKSPACE>\home")
-        with mock.patch("vanitas.session.Path.home", return_value=home):
+        with mock.patch(
+            "vanitas.context.session.Path.home", return_value=home
+        ):
             path = default_save_path()
         self.assertEqual(path.parent, home / ".vanitas" / "sessions")
         self.assertEqual(path.suffix, ".json")

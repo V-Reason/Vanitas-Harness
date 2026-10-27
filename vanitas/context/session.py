@@ -1,9 +1,7 @@
-"""会话状态（范式笔记 D5）：历史、系统提示、任务模板、上下文预算、存档/恢复。
+"""会话状态：历史、系统提示、任务模板、上下文预算调用、存档/恢复。
 
-预算按「档位 ctx 与 settings.repl.max_context_tokens 取小，再留输出余量」计算，
-不靠猜；超预算时从最早的一轮对话开始丢，并让调用方告知用户裁剪了多少轮。
+本模块只负责消息容器与存档；预算与折叠算法分别由 ..metrics 与 .collapse 提供。
 """
-
 from __future__ import annotations
 
 import json
@@ -12,14 +10,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from . import prompts
-from .errors import ConfigError
-from .metrics import MESSAGE_OVERHEAD, context_budget, estimate_tokens
+from .. import prompts
+from ..errors import ConfigError
+from ..metrics import MESSAGE_OVERHEAD, context_budget, estimate_tokens
+from .collapse import (
+    COLLAPSED_OBSERVATION_MARKER,
+    collapse_intermediate_observations as _collapse_messages,
+)
 
-# 预算与估算集中在 metrics；此处保留同名导入，兼容旧的
-# `from vanitas.session import estimate_tokens` 用法。
 __all__ = ["Session", "context_budget", "default_save_path", "estimate_tokens"]
-COLLAPSED_OBSERVATION_MARKER = "<tool_result [collapsed]>"
+
 
 @dataclass
 class Session:
@@ -101,39 +101,18 @@ class Session:
         keep_rounds: int = 2,
         min_chars: int = 1000,
     ) -> int:
-        """折叠较早的超长工具 Observation，保留动作签名与最近两轮。"""
-        if budget <= 0 or threshold <= 0 or min_chars <= 0:
-            return 0
-        keep_messages = max(0, int(keep_rounds) * 2)
-        # “超过 3 轮”至少是 7 条消息（3 轮 = 6 条）；最近 keep_rounds 轮另算。
-        if len(self.messages) <= max(keep_messages, 6):
-            return 0
-        if self.message_tokens() / budget <= threshold:
-            return 0
-
-        cutoff = max(0, len(self.messages) - keep_messages)
-        collapsed = 0
-        for index in range(cutoff):
-            message = self.messages[index]
-            if message.get("role") != "user":
-                continue
-            content = str(message.get("content", ""))
-            if "<tool_result" not in content:
-                continue
-            if COLLAPSED_OBSERVATION_MARKER in content:
-                continue
-            if len(content) < min_chars:
-                continue
-            self.messages[index] = {
-                **message,
-                "content": (
-                    f"{COLLAPSED_OBSERVATION_MARKER}\n"
-                    f"[历史工具观测已折叠：原内容 {len(content)} 字符，"
-                    "执行动作与成败摘要保留；如仍需细节请重新调用工具]\n"
-                    "</tool_result>"
-                ),
-            }
-            collapsed += 1
+        """折叠较早的超长工具 Observation；算法本体在 .collapse。"""
+        collapsed = _collapse_messages(
+            self.messages,
+            budget,
+            threshold=threshold,
+            keep_rounds=keep_rounds,
+            min_chars=min_chars,
+            token_counter=lambda msgs: sum(
+                estimate_tokens(str(item.get("content", ""))) + MESSAGE_OVERHEAD
+                for item in msgs
+            ),
+        )
         if collapsed:
             self.is_dirty = True
         return collapsed
