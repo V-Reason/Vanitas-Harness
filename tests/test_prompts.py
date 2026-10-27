@@ -233,15 +233,21 @@ class PromptTests(unittest.TestCase):
         text = prompts.load_task(self.prompt_dir, "translate_asmr")
         for phrase in (
             "<asmr_domain_lexicon>",
-            "梵天",
-            "羽毛绒球",
+            "不要过度意译",
+            "梵天（ぼんてん）→ 梵天",
+            "不要加括号解释材质",
             "焚天",
-            "膝枕",
+            "膝枕（ひざまくら）→ 膝枕",
+            "给你膝枕哦",
+            "坐在膝枕上",
             "垫膝盖",
-            "浅いところ",
-            "耳道浅处",
+            "添寝",
+            "甘えん坊",
+            "爱撒娇",
             "オマケ",
             "特典",
+            "浅いところ",
+            "耳道浅处",
             "はむはむ",
             "轻抿",
             "耳ふー",
@@ -250,6 +256,8 @@ class PromptTests(unittest.TestCase):
             "给您添麻烦",
         ):
             self.assertIn(phrase, text)
+        self.assertNotIn("羽毛绒球", text)
+        self.assertNotIn("白毛球", text)
         self.assertEqual(
             prompts.placeholders(text), {"input", "context_history"}
         )
