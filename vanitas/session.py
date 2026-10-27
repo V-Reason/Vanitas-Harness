@@ -19,6 +19,7 @@ from .metrics import MESSAGE_OVERHEAD, context_budget, estimate_tokens
 # 预算与估算集中在 metrics；此处保留同名导入，兼容旧的
 # `from vanitas.session import estimate_tokens` 用法。
 __all__ = ["Session", "context_budget", "default_save_path", "estimate_tokens"]
+COLLAPSED_OBSERVATION_MARKER = "<tool_result [collapsed]>"
 
 @dataclass
 class Session:
@@ -63,6 +64,50 @@ class Session:
             estimate_tokens(str(item.get("content", ""))) + MESSAGE_OVERHEAD
             for item in self.messages
         )
+
+    def collapse_intermediate_observations(
+        self,
+        budget: int,
+        *,
+        threshold: float = 0.65,
+        keep_rounds: int = 2,
+        min_chars: int = 1000,
+    ) -> int:
+        """折叠较早的超长工具 Observation，保留动作签名与最近两轮。"""
+        if budget <= 0 or threshold <= 0 or min_chars <= 0:
+            return 0
+        keep_messages = max(0, int(keep_rounds) * 2)
+        if len(self.messages) <= keep_messages:
+            return 0
+        if self.message_tokens() / budget <= threshold:
+            return 0
+
+        cutoff = max(0, len(self.messages) - keep_messages)
+        collapsed = 0
+        for index in range(cutoff):
+            message = self.messages[index]
+            if message.get("role") != "user":
+                continue
+            content = str(message.get("content", ""))
+            if "<tool_result" not in content:
+                continue
+            if COLLAPSED_OBSERVATION_MARKER in content:
+                continue
+            if len(content) < min_chars:
+                continue
+            self.messages[index] = {
+                **message,
+                "content": (
+                    f"{COLLAPSED_OBSERVATION_MARKER}\n"
+                    f"[历史工具观测已折叠：原内容 {len(content)} 字符，"
+                    "执行动作与成败摘要保留；如仍需细节请重新调用工具]\n"
+                    "</tool_result>"
+                ),
+            }
+            collapsed += 1
+        if collapsed:
+            self.is_dirty = True
+        return collapsed
 
     def trim(self, budget: int) -> int:
         """超预算时丢弃最早的用户/助手对；返回丢弃的轮数。"""

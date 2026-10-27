@@ -455,6 +455,15 @@ def _summary(action: AgentAction) -> str:
         return f"只读命令 {params['command']}"
     if action.name == "read_file":
         return f"读取 {params['path']}"
+    if action.name == "read_file_range":
+        return (
+            f"读取 {params.get('path', '?')} 行 "
+            f"{params.get('start_line', 1)}-{params.get('end_line', 100)}"
+        )
+    if action.name == "grep_workspace":
+        return f"检索 {params.get('pattern', '?')} @ {params.get('path', '.')}"
+    if action.name == "patch_file":
+        return f"局部修改 {params.get('path', '?')}"
     if action.name == "list_dir":
         return f"列出 {params['path']}"
     if action.name == "write_file":
@@ -469,6 +478,19 @@ def _describe(action: AgentAction) -> str:
         return f"将执行只读命令：{action.parameters['command']}"
     if action.name == "read_file":
         return f"将读取文件 {action.parameters['path']}"
+    if action.name == "read_file_range":
+        return (
+            f"将读取文件 {action.parameters.get('path', '?')} 第 "
+            f"{action.parameters.get('start_line', 1)}–"
+            f"{action.parameters.get('end_line', 100)} 行"
+        )
+    if action.name == "grep_workspace":
+        return (
+            f"将检索工作区 {action.parameters.get('path', '.')}："
+            f"{action.parameters.get('pattern', '?')}"
+        )
+    if action.name == "patch_file":
+        return f"将局部修改文件 {action.parameters.get('path', '?')}"
     if action.name == "list_dir":
         return f"将列出目录 {action.parameters['path']}"
     if action.name == "write_file":
@@ -729,6 +751,40 @@ def _run_action(tools: AgentTools, action: AgentAction) -> tuple[bool, str]:
         path = params["path"]
         content = tools.read_file(path)
         return True, f"读取 {path} · {len(content)} 字符\n{content}"
+    if action.name == "read_file_range":
+        path = params.get("path")
+        if not isinstance(path, str) or not path:
+            raise ToolDenied("read_file_range 缺少 path")
+        content = tools.read_file_range(
+            path,
+            int(params.get("start_line", 1)),
+            int(params.get("end_line", 100)),
+        )
+        return True, f"读取 {path} 行范围\n{content}"
+    if action.name == "grep_workspace":
+        pattern = params.get("pattern")
+        if not isinstance(pattern, str) or not pattern:
+            raise ToolDenied("grep_workspace 缺少 pattern")
+        raw_max = params.get("max_results")
+        max_results = int(raw_max) if raw_max is not None else None
+        matches = tools.grep_workspace(
+            pattern,
+            str(params.get("path", ".")),
+            max_results=max_results,
+        )
+        detail = f"检索 {pattern} · {len(matches)} 项"
+        return True, detail + "\n" + "\n".join(matches)
+    if action.name == "patch_file":
+        path = params.get("path")
+        search = params.get("search")
+        replace = params.get("replace")
+        if not all(isinstance(item, str) for item in (path, search, replace)):
+            raise ToolDenied("patch_file 缺少 path/search/replace")
+        assert isinstance(path, str)
+        assert isinstance(search, str)
+        assert isinstance(replace, str)
+        detail = tools.patch_file(path, search, replace)
+        return True, detail
     if action.name == "write_file":
         path = params["path"]
         written = tools.write_file(path, params["content"])
@@ -820,6 +876,13 @@ class AgentLoop:
         self._recent: deque[tuple[str, str]] = deque(
             maxlen=self.stagnation_limit
         )
+        self.steps = 0
+        self.parse_retries = 0
+        self.stagnation_hits = 0
+
+    @property
+    def recent_count(self) -> int:
+        return len(self._recent)
 
     # ------------------------------------------------------------------ #
     # 执行（AgentRepl 复用与可注入钩子）
@@ -856,6 +919,9 @@ class AgentLoop:
         self._recent.clear()
         steps = 0
         parse_retries = 0
+        self.steps = 0
+        self.parse_retries = 0
+        self.stagnation_hits = 0
         stream = _AgentAnswerStream()
         result = converse(text, None, stream)
         if result is None or result.interrupted:
@@ -874,6 +940,7 @@ class AgentLoop:
                     print(self.palette.err(str(exc)), file=sys.stderr)
                     return
                 parse_retries += 1
+                self.parse_retries = parse_retries
                 print(
                     self.palette.warn(
                         "格式解析错误，触发自愈回灌"
@@ -887,6 +954,7 @@ class AgentLoop:
                 continue
 
             parse_retries = 0
+            self.parse_retries = 0
             if actions is None:
                 if stream.suppressed:
                     stream.flush_suppressed()
@@ -898,6 +966,7 @@ class AgentLoop:
                 print(self.palette.warn(f"已达最大步数 {self.max_steps}"))
                 return
             if self._stagnates(actions):
+                self.stagnation_hits += 1
                 print(
                     self.palette.warn(
                         f"检测到动作连续 {self.stagnation_limit} 次停滞，"
@@ -917,6 +986,7 @@ class AgentLoop:
 
             feedback = execute_actions(actions)
             steps += 1
+            self.steps = steps
             stream = _AgentAnswerStream()
             result = converse("", feedback, stream)
             if result is None or result.interrupted:

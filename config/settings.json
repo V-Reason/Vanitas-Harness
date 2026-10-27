@@ -23,7 +23,10 @@
     "context_reserve_tokens": 512,
     "min_output_tokens": 256,
     "idle_timeout_sec": 600,
-    "watchdog_interval_sec": 10
+    "watchdog_interval_sec": 10,
+    "context_collapse_ratio": 0.65,
+    "context_collapse_keep_rounds": 2,
+    "context_collapse_min_chars": 1000
   },
   "chat": {
     "temperature": 0.2
@@ -32,8 +35,8 @@
     "max_steps": 10,
     "max_batch_actions": 100,
     "max_feedback_chars": 8000,
-    "auto_actions": ["read_file", "list_dir", "run_shell_ro"],
-    "confirm_actions": ["write_file", "delete_file", "move_file"],
+    "auto_actions": ["read_file", "read_file_range", "grep_workspace", "list_dir", "run_shell_ro"],
+    "confirm_actions": ["write_file", "patch_file", "delete_file", "move_file"],
     "action_aliases": {
       "shell": "run_shell_ro"
     }
@@ -43,6 +46,11 @@
     "exec_require_confirm": true,
     "max_read_bytes": 262144,
     "max_list_entries": 200,
+    "max_patch_bytes": 262144,
+    "max_range_lines": 400,
+    "max_grep_results": 50,
+    "max_grep_file_bytes": 1048576,
+    "grep_ignore_dirs": [".git", "__pycache__", ".venv", "node_modules"],
     "move_illegal_chars": "#<>\"|?*",
     "manual_exec_prefixes": ["echo", "dir", "type", "python --version", "git status", "git log", "git diff", "del", "erase", "ren", "rename", "copy", "move"],
     "destructive_commands": ["del", "erase", "rd", "rmdir", "rm", "mv", "move", "ren", "rename", "copy", "xcopy", "robocopy", "mkdir", "md", "format"],
