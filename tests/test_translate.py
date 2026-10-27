@@ -25,6 +25,7 @@ from vanitas.translate import (  # noqa: E402
     collect_translate_inputs,
     parse_srt,
     parse_window_response,
+    recover_window_response,
     plan_name_renames,
     plan_translation_outputs,
     rebuild_srt,
@@ -185,6 +186,26 @@ class TranslateTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(aligned, {})
 
+    def test_recover_window_response_for_reset_ids(self) -> None:
+        ok, aligned, missing = recover_window_response(
+            "[#1] 第七句\n[#2] 第八句", ["7", "8"]
+        )
+        self.assertTrue(ok)
+        self.assertEqual(aligned, {"7": "第七句", "8": "第八句"})
+        self.assertEqual(missing, [])
+
+    def test_recover_window_response_rejects_reorder_and_count(self) -> None:
+        ok, aligned, _missing = recover_window_response(
+            "[#2] 第八句\n[#1] 第七句", ["7", "8"]
+        )
+        self.assertFalse(ok)
+        self.assertEqual(aligned, {})
+        ok, aligned, _missing = recover_window_response(
+            "[#1] 第七句", ["7", "8"]
+        )
+        self.assertFalse(ok)
+        self.assertEqual(aligned, {})
+
     def _windowed_srt(self) -> str:
         return (
             "1\n00:00:01,000 --> 00:00:02,000\n一\n\n"
@@ -238,6 +259,34 @@ class TranslateTests(unittest.TestCase):
             ["译一", "译二", "译三", "译四"],
         )
 
+    def test_translate_srt_recovers_reset_window_ids(self) -> None:
+        source = self.write("reset-ids.srt", self._windowed_srt())
+        calls: list[str] = []
+
+        def chat(prompt: str) -> str:
+            calls.append(prompt)
+            output: list[str] = []
+            for index, line in enumerate(prompt.splitlines(), start=1):
+                _tag, text = line.split(" ", 1)
+                output.append(f"[#{index}] 译{text}")
+            return "\n".join(output)
+
+        outcome = translate_file(
+            chat,
+            source,
+            SETTINGS,
+            window_size=2,
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(outcome.failures, [])
+        translated = outcome.output.read_text(encoding="utf-8")
+        blocks = parse_srt(translated, "\n")
+        self.assertEqual(
+            [block.text for block, _ in blocks],
+            ["译一", "译二", "译三", "译四"],
+        )
+        self.assertNotIn("[#", translated)
+
     def test_translate_srt_windowed_fallback_on_guardrail_trip(self) -> None:
         source = self.write("fallback.srt", self._windowed_srt())
         batch_calls = 0
@@ -272,6 +321,29 @@ class TranslateTests(unittest.TestCase):
             [block.text for block, _ in blocks],
             ["译一", "译二", "译三", "译四"],
         )
+
+    def test_translate_srt_fallback_strips_window_id_prefix(self) -> None:
+        source = self.write("fallback-ids.srt", self._windowed_srt())
+
+        def chat(prompt: str) -> str:
+            if "\n" in prompt:
+                return "[#1] 不完整"
+            return f"[#1] 译{prompt}"
+
+        outcome = translate_file(
+            chat,
+            source,
+            SETTINGS,
+            window_size=2,
+        )
+        self.assertEqual(outcome.failures, [])
+        translated = outcome.output.read_text(encoding="utf-8")
+        blocks = parse_srt(translated, "\n")
+        self.assertEqual(
+            [block.text for block, _ in blocks],
+            ["译一", "译二", "译三", "译四"],
+        )
+        self.assertNotIn("[#", translated)
 
     def test_translate_file_with_asmr_preset_end_to_end(self) -> None:
         source = ROOT / "tests" / "fixtures" / "sample_asmr.srt"

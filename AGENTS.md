@@ -125,7 +125,7 @@ vanitas\
 # 1) 语法
 Get-ChildItem vanitas\*.py, tests\test_*.py | ForEach-Object { python -m py_compile $_.FullName }
 
-# 2) 单测（当前 418 例）
+# 2) 单测（当前 422 例）
 python -m unittest discover -s tests
 python -m unittest tests.test_agent_parser
 
@@ -163,7 +163,7 @@ python -m vanitas stop
 - 默认分工由 `settings.defaults` 配置：Agent=`qwen_coder`、chat=`qwen7b`（非 Coder）、translate=`hymt`、batch=`qwen7b`；`serve <id>` 必须显式模型。`qwen7b` 在 4063，minicpm 仍为 `role=light`。`~/.vanitas/preferences.json` 记忆档位，优先级 CLI > 环境变量 > 偏好 > `default_profile`。
 - 翻译预设：`translate.default_preset=subtitle`；`subtitle/prose/asmr` 使用 HY-MT2 profile 2（8K Q4）、context 12/10/12、chunk 800；`general` 保留 4K Q8 / context 5 / chunk 1500。显式 `--model`/`--profile` 优先；档位不一致时 `translate` 自动停旧启新。
 - 提示词：`system_default` 全静态；`task_chat/task_code/task_agent/task_translate_asmr` 使用 XML，`task_translate`/`agent_continue` 保持紧凑纯文本；仅 6 个占位符。`task_translate_asmr` 另含 `<asmr_domain_lexicon>`（采耳道具/解剖方位/互动动作/情境用语/声效词），保留 `梵天`/`膝枕`/`添寝`/`特典` 等圈内词并约束自然搭配，附 `お騒がせ` 自谦方向。`task_agent` 的批量是逐项执行而非事务，`patch_file` 只要求唯一片段、不强制固定上下行数；不提供 `_reason` 参数。
-- 翻译上下文：`TranslationEngine._history` 是文档级状态；CLI 在每个输入文件前调用 `reset_history()`，多文件不得继承上一文件的标题、摘要或人名。`sanitize_translation_output` 会去掉 `……。`/`——。` 的重复句号。
+- 翻译上下文：`TranslationEngine._history` 是文档级状态；CLI 在每个输入文件前调用 `reset_history()`，多文件不得继承上一文件的标题、摘要或人名。`sanitize_translation_output` 会去掉 `……。`/`——。` 的重复句号。ASMR 合流若模型每窗从 `[#1]` 重编号，`recover_window_response()` 仅在编号为 `1..K` 且数量一致时按位置恢复；逐句回退用 `strip_window_id_prefix()` 剥离行首 `[#N]`。
 - 翻译目录：`translate` 的 `inputs` 接受文件、目录或混用；目录用 `os.walk(followlinks=False)` 递归，只收 `settings.translate.source_suffixes`，跳过目录内已有 `<原名><output_suffix>.<扩展名>` 产物，按真实路径去重。`--out-dir` 下目录输入保留相对层级，直接文件平铺；写出前拒绝目标冲突与覆盖输入。空目录/不可遍历目录在启动模型前返回 `5`；显式文件的存在性仍由 `translate_file()` 判定。
 - 文件名翻译：`--translate-filename`/`--translate-name` 同时翻译正文与文件名，输出 suffix 覆盖为空串（不加 `.zh`），正文仍只接受 `source_suffixes`；`--translate-filename-only`/`--translate-name-only` 只原地改名、不读内容、支持任意扩展名、拒绝 `--out-dir`。两者都用短正向 `FILENAME_SYSTEM_PROMPT`；`_mask_name_literals()` 把高置信编号、全大写/内部大写、版本号、`_临时` 白名单和装饰符号替换为 `[[K0]]` 占位符，模型翻译普通词后 `_restore_literals()` 逐字恢复。`sanitize_filename_stem()` 保留引号/括号/下划线、去 `文件名：`/`翻译：` 前缀；纯中文/纯技术名（`wav`）和去掉占位符后无可译文本的名称不调用模型。占位符丢失/重复、截断、空结果、恢复后超 80 字符，或含假名的名称完全未翻译时最多重试一次并回退原名；单文件回退不中止批处理。CLI 用 `Spinner` 显示 `文件名/目录名 i/N` 进度；正文模式回退且无 `--out-dir` 时跳过该文件避免覆盖源文件。
 - 人类 `/exec`/`!` 使用原生 `shell=True`，不再受 `manual_exec_prefixes`/目录限制；`AgentTools.run_shell_ro` 的只读白名单与 `is_inside_workspace` 边界完全不变。

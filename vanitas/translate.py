@@ -32,6 +32,7 @@ SENTENCE_ENDERS = "。！？!?；;"
 BLOCK_SEP = re.compile(r"(\r?\n[ \t]*\r?\n)")
 SRT_TIME = re.compile(r"^\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}")
 WINDOW_ID_RE = re.compile(r"^\[#(\d+)\]\s*(.*)$")
+WINDOW_ID_PREFIX_RE = re.compile(r"^(?:\[#\d+\]\s*)+")
 ASR_HALLUCINATION_PATTERNS = re.compile(
     r"(?:ご視聴ありがとうございました|チャンネル登録|高評価|ベルマーク|Thank you for watching|Please subscribe|Sous-titres)",
     re.IGNORECASE,
@@ -742,15 +743,9 @@ def split_prose(text: str) -> list[tuple[str, str]]:
     return paragraphs
 
 
-def parse_window_response(
-    raw_text: str, expected_ids: list[str]
-) -> tuple[bool, dict[str, str], list[str]]:
-    """解析带有 [#序号] 前缀的模型多行输出。
-
-    返回：(是否完全对齐, {序号: 译文}, 缺失序号列表)。
-    支持同一序号下多行字幕的自动合并（续行逻辑）。
-    重复序号、额外序号与乱序都判为失败，交给调用方整体回退。
-    """
+def _parse_window_items(
+    raw_text: str,
+) -> tuple[dict[str, list[str]], list[str], bool]:
     translations: dict[str, list[str]] = {}
     order: list[str] = []
     current_id: str | None = None
@@ -769,7 +764,19 @@ def parse_window_response(
             order.append(current_id)
         elif current_id is not None:
             translations[current_id].append(stripped)
+    return translations, order, duplicated
 
+
+def parse_window_response(
+    raw_text: str, expected_ids: list[str]
+) -> tuple[bool, dict[str, str], list[str]]:
+    """解析带有 [#序号] 前缀的模型多行输出。
+
+    返回：(是否完全对齐, {序号: 译文}, 缺失序号列表)。
+    支持同一序号下多行字幕的自动合并（续行逻辑）。
+    重复序号、额外序号与乱序都判为失败，交给调用方整体回退。
+    """
+    translations, order, duplicated = _parse_window_items(raw_text)
     missing = [cid for cid in expected_ids if cid not in translations]
     if duplicated or missing or order != expected_ids:
         return False, {}, missing
@@ -778,6 +785,38 @@ def parse_window_response(
         cid: "\n".join(translations[cid]).strip() for cid in expected_ids
     }
     return True, aligned_dict, []
+
+
+def recover_window_response(
+    raw_text: str, expected_ids: list[str]
+) -> tuple[bool, dict[str, str], list[str]]:
+    """恢复“模型每窗从 [#1] 重新编号”的已知失败模式。
+
+    仅在输出编号恰好为 1..K、无重复且数量与 expected_ids 一致时，按位置重映射；
+    乱序、缺项、多翻、重复一律不恢复，继续走逐句回退。
+    """
+    translations, order, duplicated = _parse_window_items(raw_text)
+    if (
+        duplicated
+        or len(order) != len(expected_ids)
+        or len(translations) != len(expected_ids)
+    ):
+        return False, {}, []
+    if order == expected_ids:
+        return parse_window_response(raw_text, expected_ids)
+    expected_count = len(expected_ids)
+    if order != [str(index) for index in range(1, expected_count + 1)]:
+        return False, {}, []
+    aligned_dict = {
+        expected_id: "\n".join(translations[actual_id]).strip()
+        for expected_id, actual_id in zip(expected_ids, order)
+    }
+    return True, aligned_dict, []
+
+
+def strip_window_id_prefix(text: str) -> str:
+    """去掉回退译文行首误带的 [#N]；不触碰正文中间的内容。"""
+    return WINDOW_ID_PREFIX_RE.sub("", text.strip()).lstrip()
 
 
 def translate_srt(
@@ -867,9 +906,15 @@ def translate_srt(
                 ok, aligned, _missing = parse_window_response(
                     batch_output, expected_ids
                 )
+                if not ok:
+                    ok, aligned, _missing = recover_window_response(
+                        batch_output, expected_ids
+                    )
                 if ok:
                     for _block_index, subtitle in window:
-                        subtitle.text = aligned[subtitle.index]
+                        subtitle.text = strip_window_id_prefix(
+                            aligned[subtitle.index]
+                        )
                 else:
                     fallback = True
             except (EngineError, TranslateError):
@@ -887,7 +932,7 @@ def translate_srt(
                     failures=failures,
                 )
                 if result is not None:
-                    subtitle.text = result
+                    subtitle.text = strip_window_id_prefix(result)
 
         done += len(window)
         if on_segment is not None:
