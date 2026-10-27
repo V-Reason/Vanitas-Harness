@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -34,17 +36,19 @@ class Command:
 # D1：命令是数据，不是散落的 if 分支；/help 由本表生成。
 COMMANDS: tuple[Command, ...] = (
     Command("help", "列出内置命令"),
-    Command("model", "列出模型或切换模型", (), "[id]"),
-    Command("profile", "查看或切换档位", (), "[N]"),
+    Command("model", "列出模型或切换模型（更新记忆）", (), "[id]"),
+    Command("profile", "查看或切换档位（立即落盘记忆）", (), "[N]"),
+    Command("restart", "重启服务以应用待生效档位", ("reload",)),
     Command("system", "设置系统提示", (), "[text|file]"),
     Command("task", "应用任务模板 config\\prompts\\task_<name>.md", (), "[name]"),
     Command("clear", "清空对话历史"),
     Command("save", "保存当前会话 JSON", (), "[path]"),
     Command("load", "加载会话 JSON", (), "<path>"),
-    Command("exec", "在固定兼容前缀内执行本地命令，逐次确认", (), "<cmd>"),
+    Command("exec", "在用户原生 shell 中执行命令（无白名单）", (), "<cmd>"),
     Command("stop", "停止所有 llama-server", ("kill",)),
-    Command("status", "显示服务端 / 显存 / 当前模型"),
-    Command("quit", "退出 REPL", ("exit",)),
+    Command("shutdown", "保存会话、停止服务并退出", ("halt",)),
+    Command("status", "显示服务端 / 显存 / 当前模型 / 空闲倒计时"),
+    Command("quit", "退出 REPL（后台服务保留）", ("exit",)),
 )
 
 COMMAND_MAP: dict[str, Command] = {}
@@ -52,6 +56,85 @@ for _command in COMMANDS:
     COMMAND_MAP[_command.name] = _command
     for _alias in _command.aliases:
         COMMAND_MAP[_alias] = _command
+
+
+class IdleWatchdog:
+    """单守护线程：空闲超时后回调一次；pause/resume 供重启与长命令使用。"""
+
+    def __init__(
+        self,
+        timeout_sec: float,
+        interval_sec: float,
+        on_idle: Callable[[], None],
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.timeout_sec = max(0.0, float(timeout_sec))
+        self.interval_sec = max(0.01, float(interval_sec))
+        self._on_idle = on_idle
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last_active = clock()
+        self._paused = False
+        self._fired = False
+
+    def start(self) -> None:
+        if self.timeout_sec <= 0 or self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._loop, name="vanitas-idle-watchdog", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        self._thread = None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+
+    def touch(self) -> None:
+        with self._lock:
+            self._last_active = self._clock()
+            self._fired = False
+
+    def pause(self) -> None:
+        with self._lock:
+            self._paused = True
+            self._last_active = self._clock()
+
+    def resume(self) -> None:
+        with self._lock:
+            self._paused = False
+            self._last_active = self._clock()
+            self._fired = False
+
+    def remaining(self) -> float | None:
+        with self._lock:
+            if self.timeout_sec <= 0:
+                return None
+            if self._fired:
+                return 0.0
+            return max(0.0, self.timeout_sec - (self._clock() - self._last_active))
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval_sec):
+            with self._lock:
+                if self._paused or self._fired or self.timeout_sec <= 0:
+                    continue
+                if self._clock() - self._last_active < self.timeout_sec:
+                    continue
+                self._fired = True
+            try:
+                self._on_idle()
+            except Exception as exc:  # 守护线程不能因回调异常静默退出
+                print(
+                    Palette({}, enabled=False).err(f"空闲看门狗异常：{exc}"),
+                    file=sys.stderr,
+                )
+
 
 class Repl:
     def __init__(
@@ -84,6 +167,14 @@ class Repl:
         self._prompt_session = None
         self._prompt_ready = False
         self._ansi_formatter = None
+        self._state_lock = threading.RLock()
+        self._chat_active = False
+        self._sleeping = False
+        self._watchdog = IdleWatchdog(
+            config.settings.repl.idle_timeout_sec,
+            config.settings.repl.watchdog_interval_sec,
+            self._on_idle,
+        )
 
     def _activate(
         self,
@@ -98,6 +189,8 @@ class Repl:
         self.pending_profile = None
         self.client = client
         self.port = port
+        self._sleeping = False
+        self.config.preferences.last_used_model = model.id
         self.session.model_id = model.id
         self.session.profile = profile.key
         self.chat_runner = (
@@ -113,6 +206,15 @@ class Repl:
             if client is not None
             else None
         )
+
+    def _remember_model(self, model: ModelSpec, profile: ProfileSpec) -> None:
+        prefs = self.config.preferences
+        prefs.last_used_model = model.id
+        prefs.preferred_profiles[model.id] = profile.key
+        try:
+            prefs.save()
+        except ConfigError as exc:
+            print(self.palette.warn(str(exc)), file=sys.stderr)
 
     def configure(self, system: str | None = None, task: str | None = None) -> None:
         """应用 --system 文件与 --task 模板；供 CLI 与 agent 复用。"""
@@ -135,24 +237,32 @@ class Repl:
 
     def run(self) -> int:
         self._bootstrap()
-        print(self.palette.muted("[Enter] 输入，[/] 命令"))
-        while True:
-            try:
-                line = self._read_line(self._prompt_text())
-            except KeyboardInterrupt:
-                print()
-                continue
-            except EOFError:
-                print()
-                break
-            text = line.strip()
-            if not text:
-                continue
-            if self._is_command(text):
-                if not self._handle_command(text):
+        self._watchdog.start()
+        print(self.palette.muted("[Enter] 输入，[/] 命令，[!] 原生命令"))
+        try:
+            while True:
+                try:
+                    line = self._read_line(self._prompt_text())
+                except KeyboardInterrupt:
+                    print()
+                    continue
+                except EOFError:
+                    print()
                     break
-            else:
-                self._chat(text)
+                self._watchdog.touch()
+                text = line.strip()
+                if not text:
+                    continue
+                if text.startswith("!") and len(text) > 1:
+                    self._cmd_exec(text[1:].strip())
+                    continue
+                if self._is_command(text):
+                    if not self._handle_command(text):
+                        break
+                else:
+                    self._chat(text)
+        finally:
+            self._watchdog.stop()
         print(self.palette.meta("再见"))
         return 0
 
@@ -161,7 +271,12 @@ class Repl:
         return len(text) > 1 and text.startswith("/") and text[1] != " "
 
     def _prompt_text(self) -> str:
-        head = self.palette.accent(f"{self.model.id}@{self.profile.key}")
+        if self._sleeping:
+            head = self.palette.muted(
+                f"{self.model.id}@{self.profile.key} [休眠]"
+            )
+        else:
+            head = self.palette.accent(f"{self.model.id}@{self.profile.key}")
         return f"{head} {SYMBOLS['prompt']} "
 
     def confirm_plan(self, plan: str) -> bool:
@@ -338,6 +453,82 @@ class Repl:
             return True
         return False
 
+    @staticmethod
+    def _autosave_path() -> Path:
+        return Path.home() / ".vanitas" / "sessions" / "autosave.json"
+
+    def _on_idle(self) -> None:
+        with self._state_lock:
+            if self._chat_active or self.client is None:
+                return
+            saved: Path | None = None
+            if self.session.is_dirty and self.session.messages:
+                try:
+                    saved = self.session.save(self._autosave_path())
+                except ConfigError as exc:
+                    print(self.palette.err(str(exc)), file=sys.stderr)
+                    return
+            try:
+                launcher.stop_all(self.config)
+            except LaunchError as exc:
+                print(self.palette.err(str(exc)), file=sys.stderr)
+                return
+            self.client = None
+            self.chat_runner = None
+            self._sleeping = True
+        minutes = max(1, int(self.config.settings.repl.idle_timeout_sec // 60))
+        message = f"· 已空闲 {minutes} 分钟，后台服务已休眠；输入任意内容自动唤醒"
+        if saved is not None:
+            message += f"；会话已保存至 {saved}"
+        print(self.palette.meta(message), file=sys.stderr)
+
+    def _ensure_client(self) -> bool:
+        if self.client is not None and self.chat_runner is not None:
+            return True
+        if self._sleeping:
+            print(self.palette.meta("· 服务已休眠，正在原地唤醒..."))
+            if not self._start_engine(self.model, self.profile):
+                return False
+            self._sleeping = False
+            self._watchdog.touch()
+            print(self.palette.ok(f"✓ 已唤醒 · 档位 {self.profile.key}"))
+            return True
+        print(
+            self.palette.hint(
+                "服务端没有运行：先运行 vanitas serve <id>，或用 /model 查看可用模型"
+            )
+        )
+        return False
+
+    def _confirm_unsaved(self, action: str) -> bool:
+        if not (self.session.is_dirty and self.session.messages):
+            return True
+        print(
+            self.palette.warn(
+                f"{action}前当前会话有 {len(self.session.messages)} 条未保存记录，"
+                "是否保存？[Y/n/c]"
+            )
+        )
+        try:
+            answer = input("[Y/n/c] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+        if answer in {"c", "cancel", "取消"}:
+            print(self.palette.meta("已取消"))
+            return False
+        if answer in {"n", "no", "否"}:
+            self.session.is_dirty = False
+            print(self.palette.meta("已丢弃未保存变动"))
+            return True
+        try:
+            saved = self.session.save(default_save_path())
+        except ConfigError as exc:
+            print(self.palette.err(str(exc)), file=sys.stderr)
+            return False
+        print(self.palette.ok(f"已保存到 {saved} · {len(self.session.messages)} 条消息"))
+        return True
+
     # ------------------------------------------------------------------ #
     # 对话
     # ------------------------------------------------------------------ #
@@ -351,58 +542,61 @@ class Repl:
         stream: object | None = None,
     ) -> TurnResult | None:
         """运行一轮对话；Agent 复用本方法但不把原始 JSON 写屏。"""
-        if self.client is None or self.chat_runner is None:
-            print(
-                self.palette.hint(
-                    "服务端没有运行：先运行 vanitas serve <id>，或用 /model 查看可用模型"
-                )
-            )
-            return None
+        with self._state_lock:
+            self._chat_active = True
         try:
-            kwargs = {
-                "display": display,
-                "on_dropped": lambda count: print(
-                    self.palette.warn(f"上下文已满，丢弃最早 {count} 轮对话")
-                ),
-            }
-            if stream is not None:
-                kwargs["stream"] = stream
-            if feedback is None:
-                result = self.chat_runner.run(text, **kwargs)
-            else:
-                result = self.chat_runner.run_followup(feedback, **kwargs)
-        except ConfigError as exc:
-            print(self.palette.err(str(exc)), file=sys.stderr)
-            return None
-        except EngineError as exc:
-            print()
-            print(self.palette.err(str(exc)), file=sys.stderr)
-            return None
-        if result.interrupted:
-            print(self.palette.warn("已中止生成"))
-            return result
-        if result.finish_reason == "length":
-            print(self.palette.warn("达到长度上限，输出被截断"))
-        if not result.text.strip() and result.reasoning_chars:
-            print(
-                self.palette.hint(
-                    "仅返回 reasoning_content，content 为空："
-                    "检查 chat_template_kwargs 或提高 max_tokens"
-                ),
-                file=sys.stderr,
-            )
-        if not display:
-            return result
+            if not self._ensure_client():
+                return None
+            self._watchdog.pause()
+            try:
+                kwargs = {
+                    "display": display,
+                    "on_dropped": lambda count: print(
+                        self.palette.warn(f"上下文已满，丢弃最早 {count} 轮对话")
+                    ),
+                }
+                if stream is not None:
+                    kwargs["stream"] = stream
+                if feedback is None:
+                    result = self.chat_runner.run(text, **kwargs)
+                else:
+                    result = self.chat_runner.run_followup(feedback, **kwargs)
+            except ConfigError as exc:
+                print(self.palette.err(str(exc)), file=sys.stderr)
+                return None
+            except EngineError as exc:
+                print()
+                print(self.palette.err(str(exc)), file=sys.stderr)
+                return None
+            if result.interrupted:
+                print(self.palette.warn("已中止生成"))
+                return result
+            if result.finish_reason == "length":
+                print(self.palette.warn("达到长度上限，输出被截断"))
+            if not result.text.strip() and result.reasoning_chars:
+                print(
+                    self.palette.hint(
+                        "仅返回 reasoning_content，content 为空："
+                        "检查 chat_template_kwargs 或提高 max_tokens"
+                    ),
+                    file=sys.stderr,
+                )
+            if not display:
+                return result
 
-        pieces = [
-            f"{result.tokens} tokens",
-            f"{result.elapsed_s:.1f}s",
-            f"{result.tps:.1f} t/s",
-        ]
-        if self.verbose and result.ttft_ms is not None:
-            pieces.append(f"首字 {result.ttft_ms:.0f} ms")
-        print(self.palette.meta(" · ".join(pieces)))
-        return result
+            pieces = [
+                f"{result.tokens} tokens",
+                f"{result.elapsed_s:.1f}s",
+                f"{result.tps:.1f} t/s",
+            ]
+            if self.verbose and result.ttft_ms is not None:
+                pieces.append(f"首字 {result.ttft_ms:.0f} ms")
+            print(self.palette.meta(" · ".join(pieces)))
+            return result
+        finally:
+            with self._state_lock:
+                self._chat_active = False
+            self._watchdog.resume()
 
     def _chat(self, text: str) -> None:
         self._run_chat(text)
@@ -484,6 +678,7 @@ class Repl:
                 print(self.palette.err(str(exc)), file=sys.stderr)
                 return True
             self._activate(model, profile, client, port)
+            self._remember_model(model, profile)
             print(
                 self.palette.ok(
                     f"已切换到 {model.display} · 档位 {profile.key}"
@@ -531,6 +726,7 @@ class Repl:
             LlamaClient.for_model(self.config, model, record.port),
             record.port,
         )
+        self._remember_model(model, profile)
         print(self.palette.ok("已切换"))
         return True
 
@@ -563,8 +759,75 @@ class Repl:
             return True
         # 只改“待生效”档位：当前服务端的 ctx 不能凭命令幻觉改变。
         self.pending_profile = profile
-        print(self.palette.meta(f"档位 {profile.key} 已暂存，重启生效"))
+        try:
+            self.config.preferences.set_profile(self.model.id, profile.key)
+        except ConfigError as exc:
+            print(self.palette.err(str(exc)), file=sys.stderr)
+            return True
+        print(
+            self.palette.meta(
+                f"档位 {profile.key} 已暂存，重启生效；偏好已写入"
+            )
+        )
+        print(self.palette.hint("执行 /restart 立即应用该档位"))
         return True
+
+    def _cmd_restart(self, rest: str) -> bool:
+        if not self._confirm_unsaved("重启"):
+            return True
+        target = self.pending_profile or self.profile
+        with self._state_lock:
+            self._chat_active = True
+        self._watchdog.pause()
+        started = time.monotonic()
+        try:
+            try:
+                self.config.preferences.set_profile(self.model.id, target.key)
+            except ConfigError as exc:
+                print(self.palette.err(str(exc)), file=sys.stderr)
+                return True
+            print(self.palette.spin("正在切换档位并重启服务"))
+            try:
+                launcher.stop_all(self.config)
+            except LaunchError as exc:
+                print(self.palette.err(str(exc)), file=sys.stderr)
+                return True
+            self.client = None
+            self.chat_runner = None
+            try:
+                record = launcher.start(
+                    self.config,
+                    self.model,
+                    target,
+                    palette=self.palette,
+                    verbose=self.verbose,
+                )
+                launcher.wait_ready(self.config, record, self.palette)
+            except GuardError as exc:
+                self._print_guard_error(exc)
+                return True
+            except LaunchError as exc:
+                print(self.palette.err(str(exc)), file=sys.stderr)
+                return True
+            self._activate(
+                self.model,
+                target,
+                LlamaClient.for_model(self.config, self.model, record.port),
+                record.port,
+            )
+            elapsed = time.monotonic() - started
+            print(
+                self.palette.ok(
+                    f"✓ 服务端已重启 · 档位 {target.key} "
+                    f"({target.ctx} ctx + {target.kv_k}/{target.kv_v} KV) "
+                    f"· 耗时 {elapsed:.1f}s"
+                )
+            )
+            return True
+        finally:
+            with self._state_lock:
+                self._chat_active = False
+            self._watchdog.resume()
 
     def _cmd_system(self, rest: str) -> bool:
         if not rest:
@@ -677,26 +940,37 @@ class Repl:
 
     def _cmd_exec(self, rest: str) -> bool:
         if not rest:
-            print(self.palette.hint("用法：/exec <命令>"), file=sys.stderr)
+            print(self.palette.hint("用法：/exec <命令> 或 !<命令>"), file=sys.stderr)
             return True
+        with self._state_lock:
+            self._chat_active = True
+        self._watchdog.pause()
         try:
-            result = tools.run_exec(self.config, rest)
-        except ToolDenied as exc:
-            if str(exc) == tools.CANCEL_MESSAGE:
-                print(self.palette.meta(tools.CANCEL_MESSAGE))
-            else:
-                print(self.palette.err(str(exc)), file=sys.stderr)
+            try:
+                result = tools.run_exec(self.config, rest)
+            except ToolDenied as exc:
+                if str(exc) == tools.CANCEL_MESSAGE:
+                    print(self.palette.meta(tools.CANCEL_MESSAGE))
+                else:
+                    print(self.palette.err(str(exc)), file=sys.stderr)
+                return True
+            if result.stdout:
+                print(
+                    result.stdout,
+                    end="" if result.stdout.endswith("\n") else "\n",
+                )
+            if result.stderr:
+                print(
+                    result.stderr,
+                    end="" if result.stderr.endswith("\n") else "\n",
+                    file=sys.stderr,
+                )
+            print(self.palette.meta(f"退出码 {result.exit_code}"))
             return True
-        if result.stdout:
-            print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
-        if result.stderr:
-            print(
-                result.stderr,
-                end="" if result.stderr.endswith("\n") else "\n",
-                file=sys.stderr,
-            )
-        print(self.palette.meta(f"退出码 {result.exit_code}"))
-        return True
+        finally:
+            with self._state_lock:
+                self._chat_active = False
+            self._watchdog.resume()
 
     def _cmd_stop(self, rest: str) -> bool:
         try:
@@ -706,6 +980,8 @@ class Repl:
             return True
         self.client = None
         self.chat_runner = None
+        self._sleeping = False
+        self._watchdog.touch()
         if pids:
             print(self.palette.ok(f"已停止 {len(pids)} 个服务"))
             if self.verbose:
@@ -734,6 +1010,12 @@ class Repl:
         state = self.palette.ok("就绪") if ready else self.palette.err("停止")
         head = self.palette.meta(f"端口 {self.port}")
         print(f"{head}  {state}")
+        if self._sleeping:
+            print(self.palette.meta("空闲休眠中；输入任意内容自动唤醒"))
+        else:
+            remaining = self._watchdog.remaining()
+            if remaining is not None and self.client is not None:
+                print(self.palette.meta(f"空闲倒计时 {remaining:.0f}s"))
         records = launcher.read_records()
         if records:
             for record in records:
@@ -767,7 +1049,48 @@ class Repl:
         )
         return True
 
+    def _cmd_shutdown(self, rest: str) -> bool:
+        with self._state_lock:
+            if self.session.is_dirty and self.session.messages:
+                try:
+                    saved = self.session.save(default_save_path())
+                except ConfigError as exc:
+                    print(self.palette.err(str(exc)), file=sys.stderr)
+                    return True
+                print(
+                    self.palette.meta(
+                        f"· 会话已自动保存至 {saved}"
+                    )
+                )
+            try:
+                pids = launcher.stop_all(self.config)
+            except LaunchError as exc:
+                print(self.palette.err(str(exc)), file=sys.stderr)
+                return True
+            self.client = None
+            self.chat_runner = None
+            self._sleeping = False
+        if pids:
+            print(
+                self.palette.ok(
+                    f"✓ 已停止后台推理服务 (PID "
+                    f"{'、'.join(str(pid) for pid in pids)}) · 显存通道已完全释放"
+                )
+            )
+        else:
+            print(self.palette.meta("没有服务在运行"))
+        self._watchdog.stop()
+        return False
+
     def _cmd_quit(self, rest: str) -> bool:
+        if rest.strip().lower() == "all":
+            return self._cmd_shutdown("")
+        if self.client is not None:
+            print(
+                self.palette.hint(
+                    "后台服务仍驻留；完全退出请用 /shutdown 或 /exit all"
+                )
+            )
         return False
 
     # ------------------------------------------------------------------ #
