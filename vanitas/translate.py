@@ -47,13 +47,23 @@ FILENAME_PROMPT = (
 FILENAME_SYSTEM_PROMPT = (
     "你是文件名翻译器，只输出译名主体。"
     "中文文件名必须原样照搬，不润色、不改写、不扩写；"
+    "编号/编码（如 RJ401457、A-12、2024-001）必须逐字符保留，"
+    "不拆解、不改大小写、不改分隔符；"
     "英文专有名词、缩写、型号、符号（如 AI、PDF、v2、NYC、C++、&、+、#、[]、【】）"
     "必须原样保留，不翻译、不展开、不音译；"
+    "刻意放置的前后缀/符号（如 _临时、_final、[草稿]、【保留】）必须原样保留，"
+    "不得删除、改写或替换；"
     "只翻译确实需要翻译的英文/日文普通词，禁止添加原文没有的词语或解释。"
-    "示例：AI简报_v2 → AI简报_v2；NYC_2024 → NYC_2024；The Clock → 时钟。"
-    "宁可保留原文，也不要改写专名或缩写。"
+    "示例：AI简报_v2 → AI简报_v2；NYC_2024 → NYC_2024；"
+    "RJ401457_临时 → RJ401457_临时；The Clock → 时钟。"
+    "宁可保留原文，也不要改写编号、专名或刻意符号。"
 )
 FILENAME_PROTECTED_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9+#&._-]*")
+FILENAME_PROTECTED_MARKER = re.compile(
+    r"(?:[_#\-]+[\u4e00-\u9fff]{1,8}|"
+    r"[\[\【\(（《][^\]\】\)）《》]{1,12}[\]\】\)）《》])"
+)
+FILENAME_KEEP_SYMBOLS = "_-[]【】()（）《》+#&."
 FILENAME_MAX_TOKENS = 96
 FILENAME_MAX_CHARS = 80
 FILENAME_INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -194,6 +204,22 @@ def _protected_name_tokens(stem: str) -> list[str]:
     return protected
 
 
+def _protected_name_fragments(stem: str) -> list[str]:
+    fragments = _protected_name_tokens(stem)
+    for match in FILENAME_PROTECTED_MARKER.finditer(stem):
+        fragment = match.group(0)
+        if fragment not in fragments:
+            fragments.append(fragment)
+    return fragments
+
+
+def _has_lost_symbols(source: str, translated: str) -> bool:
+    return any(
+        source.count(symbol) != translated.count(symbol)
+        for symbol in FILENAME_KEEP_SYMBOLS
+    )
+
+
 def sanitize_filename_stem(raw: str, source_suffix: str = "") -> str:
     """把模型输出收敛成安全的单段文件名（不含扩展名）。"""
     text = sanitize_translation_output(raw, "")
@@ -201,16 +227,17 @@ def sanitize_filename_stem(raw: str, source_suffix: str = "") -> str:
     if not lines:
         return ""
     text = FILENAME_PREFIX.sub("", lines[0])
-    text = text.strip(" \t\"'“”‘’「」『』《》")
+    text = text.strip(" \t\"'“”‘’「」『』")
     if source_suffix and text.lower().endswith(source_suffix.lower()):
         text = text[: -len(source_suffix)]
-        text = text.strip(" \t\"'“”‘’「」『』《》")
+        text = text.strip(" \t\"'“”‘’「」『』")
     text = FILENAME_INVALID_CHARS.sub("_", text)
     text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"_+", "_", text)
-    text = text.strip(" ._。！？!?；;，,、")
+    text = text.strip(" 。！？!?；;，,、").rstrip(" .")
+    if not text.strip("_"):
+        return ""
     if len(text) > FILENAME_MAX_CHARS:
-        text = text[:FILENAME_MAX_CHARS].rstrip(" ._")
+        text = text[:FILENAME_MAX_CHARS].rstrip(" .")
     return text
 
 
@@ -289,14 +316,14 @@ class TranslationEngine:
             extract_content(result), source_suffix
         )
         missing = [
-            token
-            for token in _protected_name_tokens(stem)
-            if token not in translated
+            fragment
+            for fragment in _protected_name_fragments(stem)
+            if fragment not in translated
         ]
-        if missing:
-            # 模型常把 NYC 音译成“纽约市”或把 AI 展开成“人工智能”；
-            # 宁可不改，也不能产出错误专名。
-            translated = sanitize_filename_stem(stem, source_suffix)
+        if missing or _has_lost_symbols(stem, translated):
+            # 模型常把 NYC 音译成“纽约市”、把编号拆开或删掉 _临时；
+            # 宁可不改，也不能产出错误编号/专名/刻意符号。
+            translated = stem
         if not translated:
             raise TranslateError(f"名称翻译结果为空：{label}")
         return translated

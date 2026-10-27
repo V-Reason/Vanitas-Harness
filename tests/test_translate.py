@@ -787,6 +787,24 @@ class TranslationEngineTests(unittest.TestCase):
             engine.translate_filename("AI简报_v2.md"), "AI简报_v2"
         )
 
+    def test_translate_filename_falls_back_when_code_or_marker_is_lost(self) -> None:
+        engine = self.make_engine(
+            FilenameTranslationClient(content="RJ401457_temporary")
+        )
+        self.assertEqual(
+            engine.translate_filename("RJ401457_临时.md"),
+            "RJ401457_临时",
+        )
+
+    def test_translate_filename_keeps_code_and_marker(self) -> None:
+        engine = self.make_engine(
+            FilenameTranslationClient(content="RJ401457_临时")
+        )
+        self.assertEqual(
+            engine.translate_filename("RJ401457_临时.md"),
+            "RJ401457_临时",
+        )
+
     def test_context_sentinel_and_fifo(self) -> None:
         client = FakeTranslationClient()
         stats = []
@@ -863,7 +881,7 @@ class TranslationEngineTests(unittest.TestCase):
 
     def test_sanitize_filename_stem_strips_quotes_prefix_and_extension(self) -> None:
         self.assertEqual(sanitize_filename_stem("文件名：“时钟.md”", ".md"), "时钟")
-        self.assertEqual(sanitize_filename_stem("《雨の駅》.srt", ".srt"), "雨の駅")
+        self.assertEqual(sanitize_filename_stem("《雨の駅》.srt", ".srt"), "《雨の駅》")
 
     def test_sanitize_filename_stem_replaces_invalid_characters(self) -> None:
         self.assertEqual(
@@ -871,6 +889,10 @@ class TranslationEngineTests(unittest.TestCase):
             "雨_车站",
         )
         self.assertEqual(sanitize_filename_stem("...", ".md"), "")
+
+    def test_sanitize_filename_stem_preserves_markers(self) -> None:
+        self.assertEqual(sanitize_filename_stem("_临时", ".md"), "_临时")
+        self.assertEqual(sanitize_filename_stem("【临时】", ".md"), "【临时】")
 
     def test_sanitize_filename_stem_limits_length(self) -> None:
         cleaned = sanitize_filename_stem("长" * 120, ".md")
