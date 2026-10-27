@@ -108,7 +108,7 @@
 # 1) 语法
 Get-ChildItem vanitas\*.py, tests\test_*.py | ForEach-Object { python -m py_compile $_.FullName }
 
-# 2) 单测（当前 341 例）
+# 2) 单测（当前 342 例）
 python -m unittest discover -s tests
 python -m unittest tests.test_agent_parser
 
