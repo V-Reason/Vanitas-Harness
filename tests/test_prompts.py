@@ -229,6 +229,35 @@ class PromptTests(unittest.TestCase):
         ):
             self.assertIn(phrase, text)
 
+    def test_asmr_domain_lexicon_and_subject_direction(self) -> None:
+        text = prompts.load_task(self.prompt_dir, "translate_asmr")
+        for phrase in (
+            "<asmr_domain_lexicon>",
+            "梵天",
+            "羽毛绒球",
+            "焚天",
+            "膝枕",
+            "垫膝盖",
+            "浅いところ",
+            "耳道浅处",
+            "オマケ",
+            "特典",
+            "はむはむ",
+            "轻抿",
+            "耳ふー",
+            "耳边轻吹",
+            "お騒がせ",
+            "给您添麻烦",
+        ):
+            self.assertIn(phrase, text)
+        self.assertEqual(
+            prompts.placeholders(text), {"input", "context_history"}
+        )
+        self.assertLess(
+            text.index("<asmr_domain_lexicon>"),
+            text.index("<asr_repair_protocol>"),
+        )
+
     def test_unknown_placeholder_in_template_rejected(self) -> None:
         (self.temp_dir / "bad.md").write_text("hi {unknown}\n", encoding="utf-8")
         with self.assertRaises(ConfigError) as ctx:
