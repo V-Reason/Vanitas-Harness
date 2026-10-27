@@ -188,6 +188,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertTrue((out_dir / "时钟.md").is_file())
         self.assertFalse((out_dir / "时钟.zh.md").exists())
+        self.assertIn("文件名 1/1", err)
         self.assertIn("The Clock.md → 时钟.md", err)
 
     def test_translate_filename_directory_names(self) -> None:
@@ -249,7 +250,7 @@ class CliSmokeTests(unittest.TestCase):
                 cli, "_ensure_engine", return_value=(NamingClient(), 4060)
             ):
                 code, out, err = run(
-                    ["translate", str(root), "--translate-filename-only"]
+                    ["translate", str(root), "--translate-name-only"]
                 )
         self.assertEqual(code, 0, err)
         target_dir = root / "中文目录"
@@ -257,6 +258,9 @@ class CliSmokeTests(unittest.TestCase):
         self.assertTrue((target_dir / "封面.jpg").is_file())
         self.assertEqual((target_dir / "片段.mp4").read_bytes(), b"\x00\x01\xff")
         self.assertFalse(folder.exists())
+        self.assertIn("目录名 1/3", err)
+        self.assertIn("文件名 2/3", err)
+        self.assertIn("文件名 3/3", err)
         self.assertIn("完成，重命名 3 项", out)
 
     def test_translate_filename_only_rejects_out_dir(self) -> None:
@@ -300,6 +304,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("--preset", out)
         self.assertIn("--translate-name", out)
+        self.assertIn("--translate-name-only", out)
         self.assertIn("--translate-filename-only", out)
 
     def test_translate_unknown_preset_exit_4(self) -> None:

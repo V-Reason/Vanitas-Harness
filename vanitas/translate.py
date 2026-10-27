@@ -40,10 +40,20 @@ FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)\n```$", re.DOTALL)
 QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’", "「": "」", "『": "』"}
 QUOTE_CHARS = frozenset(QUOTE_PAIRS) | frozenset(QUOTE_PAIRS.values())
 FILENAME_PROMPT = (
-    "把下面的文件名翻译成简洁、自然的中文。"
-    "只输出译文文件名本身：不要解释、不要引号、不要保留扩展名、不要换行。\n"
-    "文件名：{name}"
+    "翻译下面的文件名主体。只翻译普通英文/日文词；中文、专有名词、缩写、"
+    "型号和符号原样保留。不要解释、不要加引号、不要保留扩展名、不要换行。"
+    "只输出结果。\n文件名：{name}"
 )
+FILENAME_SYSTEM_PROMPT = (
+    "你是文件名翻译器，只输出译名主体。"
+    "中文文件名必须原样照搬，不润色、不改写、不扩写；"
+    "英文专有名词、缩写、型号、符号（如 AI、PDF、v2、NYC、C++、&、+、#、[]、【】）"
+    "必须原样保留，不翻译、不展开、不音译；"
+    "只翻译确实需要翻译的英文/日文普通词，禁止添加原文没有的词语或解释。"
+    "示例：AI简报_v2 → AI简报_v2；NYC_2024 → NYC_2024；The Clock → 时钟。"
+    "宁可保留原文，也不要改写专名或缩写。"
+)
+FILENAME_PROTECTED_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9+#&._-]*")
 FILENAME_MAX_TOKENS = 96
 FILENAME_MAX_CHARS = 80
 FILENAME_INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -167,6 +177,23 @@ def sanitize_translation_output(raw_text: str, source_text: str) -> str:
     return text
 
 
+def _protected_name_tokens(stem: str) -> list[str]:
+    """找出必须逐字保留的缩写/型号/符号片段，供模型不听话时兜底。"""
+    protected: list[str] = []
+    for token in FILENAME_PROTECTED_TOKEN.findall(stem):
+        letters = [char for char in token if char.isalpha()]
+        uppercase = sum(1 for char in letters if char.isupper())
+        has_internal_upper = any(char.isupper() for char in token[1:])
+        if (
+            any(char.isdigit() for char in token)
+            or any(char in "+#&" for char in token)
+            or uppercase >= 2
+            or has_internal_upper
+        ):
+            protected.append(token)
+    return protected
+
+
 def sanitize_filename_stem(raw: str, source_suffix: str = "") -> str:
     """把模型输出收敛成安全的单段文件名（不含扩展名）。"""
     text = sanitize_translation_output(raw, "")
@@ -238,9 +265,9 @@ class TranslationEngine:
         stem = name.strip()
         if not stem:
             raise TranslateError(f"名称为空，无法翻译：{label!r}")
-        messages: list[dict] = []
-        if self._system.strip():
-            messages.append({"role": "system", "content": self._system})
+        messages: list[dict] = [
+            {"role": "system", "content": FILENAME_SYSTEM_PROMPT}
+        ]
         messages.append(
             {
                 "role": "user",
@@ -261,6 +288,15 @@ class TranslationEngine:
         translated = sanitize_filename_stem(
             extract_content(result), source_suffix
         )
+        missing = [
+            token
+            for token in _protected_name_tokens(stem)
+            if token not in translated
+        ]
+        if missing:
+            # 模型常把 NYC 音译成“纽约市”或把 AI 展开成“人工智能”；
+            # 宁可不改，也不能产出错误专名。
+            translated = sanitize_filename_stem(stem, source_suffix)
         if not translated:
             raise TranslateError(f"名称翻译结果为空：{label}")
         return translated

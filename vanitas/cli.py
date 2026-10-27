@@ -33,6 +33,7 @@ from .errors import (
     VanitasError,
 )
 from .monitor import TranslationMonitor
+from .progress import Spinner
 from .repl import Repl
 from .ui import Palette, resolve_enabled
 
@@ -138,6 +139,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     translate_mode.add_argument(
         "--translate-filename-only",
+        "--translate-name-only",
         dest="translate_name_only",
         action="store_true",
         help="只原地翻译文件名/目录名，不翻译内容；支持任意文件类型，不加 .zh",
@@ -473,9 +475,17 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
             )
             return 5
         translated: list[translate.TranslationSource] = []
-        for source in sources:
+        total = len(sources)
+        for index, source in enumerate(sources, start=1):
             try:
-                stem = translate_filename(source.path.name)
+                stem = _translate_one_name(
+                    translate_filename,
+                    source.path.name,
+                    source.path.suffix,
+                    f"文件名 {index}/{total}",
+                    palette,
+                    config.settings.ui.spinner_interval_ms,
+                )
             except (EngineError, TranslateError) as exc:
                 print(
                     palette.err(f"{source.path.name}：文件名翻译失败：{exc}"),
@@ -554,6 +564,26 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
     return 0
 
 
+def _translate_one_name(
+    translate_name,
+    old_name: str,
+    suffix: str,
+    label: str,
+    palette: Palette,
+    interval_ms: int,
+) -> str:
+    """逐项翻译名称并即时显示进度；非 TTY 只输出完成行。"""
+    with Spinner(
+        f"{label} {old_name}",
+        palette,
+        interval_ms=interval_ms,
+    ) as spinner:
+        translated = translate_name(old_name)
+        final_name = f"{translated}{suffix}"
+        spinner.done(f"{label} {old_name} → {final_name}")
+    return translated
+
+
 def _cmd_translate_names(
     config: AppConfig,
     args: argparse.Namespace,
@@ -594,13 +624,27 @@ def _cmd_translate_names(
         )
     )
     translated: list[translate.NameTarget] = []
-    for target in targets:
+    total = len(targets)
+    for index, target in enumerate(targets, start=1):
         try:
-            name = (
-                translate_dirname(target.path.name)
-                if target.is_dir
-                else translate_filename(target.path.name)
-            )
+            if target.is_dir:
+                name = _translate_one_name(
+                    translate_dirname,
+                    target.path.name,
+                    "",
+                    f"目录名 {index}/{total}",
+                    palette,
+                    config.settings.ui.spinner_interval_ms,
+                )
+            else:
+                name = _translate_one_name(
+                    translate_filename,
+                    target.path.name,
+                    target.path.suffix,
+                    f"文件名 {index}/{total}",
+                    palette,
+                    config.settings.ui.spinner_interval_ms,
+                )
         except (EngineError, TranslateError) as exc:
             print(
                 palette.err(f"{target.path.name}：名称翻译失败：{exc}"),
@@ -617,8 +661,6 @@ def _cmd_translate_names(
     if not renames:
         print(palette.ok("没有需要重命名的名称"))
         return 0
-    for rename in renames:
-        print(palette.ok(f"{rename.old.name} → {rename.new.name}"))
     print(palette.ok(f"完成，重命名 {len(renames)} 项"))
     return 0
 

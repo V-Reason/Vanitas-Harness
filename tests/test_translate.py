@@ -758,6 +758,10 @@ class TranslationEngineTests(unittest.TestCase):
         prompt = client.calls[-1]["messages"][-1]["content"]
         self.assertIn("The Clock", prompt)
         self.assertGreater(client.calls[-1]["max_tokens"], 0)
+        system = client.calls[-1]["messages"][0]["content"]
+        self.assertIn("原样照搬", system)
+        self.assertIn("AI、PDF、v2", system)
+        self.assertIn("不翻译、不展开", system)
 
     def test_translate_filename_rejects_truncated_output(self) -> None:
         engine = self.make_engine(FilenameTranslationClient(finish="length"))
@@ -768,6 +772,20 @@ class TranslationEngineTests(unittest.TestCase):
         engine = self.make_engine(FilenameTranslationClient(content="..."))
         with self.assertRaisesRegex(TranslateError, "结果为空"):
             engine.translate_filename("The Clock.md")
+
+    def test_translate_filename_falls_back_when_abbreviation_is_lost(self) -> None:
+        engine = self.make_engine(
+            FilenameTranslationClient(content="纽约市_2024")
+        )
+        self.assertEqual(engine.translate_filename("NYC_2024.md"), "NYC_2024")
+
+    def test_translate_filename_keeps_chinese_and_abbreviation(self) -> None:
+        engine = self.make_engine(
+            FilenameTranslationClient(content="AI简报_v2")
+        )
+        self.assertEqual(
+            engine.translate_filename("AI简报_v2.md"), "AI简报_v2"
+        )
 
     def test_context_sentinel_and_fifo(self) -> None:
         client = FakeTranslationClient()
