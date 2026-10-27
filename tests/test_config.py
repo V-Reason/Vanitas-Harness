@@ -111,12 +111,23 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.settings.agent.max_steps, 10)
         self.assertEqual(config.settings.agent.max_batch_actions, 100)
         self.assertEqual(config.settings.agent.max_feedback_chars, 8000)
-        self.assertEqual(config.settings.agent.confirm_actions, frozenset(
-            {"write_file", "delete_file", "move_file"}
-        ))
+        self.assertEqual(
+            config.settings.agent.confirm_actions,
+            frozenset({"write_file", "patch_file", "delete_file", "move_file"}),
+        )
+        self.assertIn("read_file_range", config.settings.agent.auto_actions)
+        self.assertIn("grep_workspace", config.settings.agent.auto_actions)
         self.assertEqual(config.settings.agent.action_aliases["shell"], "run_shell_ro")
         self.assertEqual(config.settings.tools.max_read_bytes, 262144)
         self.assertEqual(config.settings.tools.max_list_entries, 200)
+        self.assertEqual(config.settings.tools.max_patch_bytes, 262144)
+        self.assertEqual(config.settings.tools.max_range_lines, 400)
+        self.assertEqual(config.settings.tools.max_grep_results, 50)
+        self.assertEqual(config.settings.tools.max_grep_file_bytes, 1048576)
+        self.assertIn(".git", config.settings.tools.grep_ignore_dirs)
+        self.assertEqual(config.settings.repl.context_collapse_ratio, 0.65)
+        self.assertEqual(config.settings.repl.context_collapse_keep_rounds, 2)
+        self.assertEqual(config.settings.repl.context_collapse_min_chars, 1000)
         self.assertEqual(config.settings.tools.move_illegal_chars, '#<>"|?*')
         self.assertIn("git status", config.settings.tools.manual_exec_prefixes)
         self.assertIn("del", config.settings.tools.destructive_commands)

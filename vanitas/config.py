@@ -80,6 +80,9 @@ REPL_FIELDS = frozenset(
         "min_output_tokens",
         "idle_timeout_sec",
         "watchdog_interval_sec",
+        "context_collapse_ratio",
+        "context_collapse_keep_rounds",
+        "context_collapse_min_chars",
     }
 )
 CHAT_FIELDS = frozenset({"temperature"})
@@ -99,6 +102,11 @@ TOOLS_FIELDS = frozenset(
         "exec_require_confirm",
         "max_read_bytes",
         "max_list_entries",
+        "max_patch_bytes",
+        "max_range_lines",
+        "max_grep_results",
+        "max_grep_file_bytes",
+        "grep_ignore_dirs",
         "move_illegal_chars",
         "manual_exec_prefixes",
         "destructive_commands",
@@ -168,10 +176,24 @@ DEFAULT_THEME = {
 
 # Agent 动作 schema 是固定协议；settings 只能调整审批策略和别名，不能新增动作。
 AGENT_ACTION_NAMES = frozenset(
-    {"read_file", "list_dir", "run_shell_ro", "write_file", "delete_file", "move_file"}
+    {
+        "read_file",
+        "read_file_range",
+        "grep_workspace",
+        "list_dir",
+        "run_shell_ro",
+        "write_file",
+        "patch_file",
+        "delete_file",
+        "move_file",
+    }
 )
-DEFAULT_AUTO_ACTIONS = frozenset({"read_file", "list_dir", "run_shell_ro"})
-DEFAULT_CONFIRM_ACTIONS = frozenset({"write_file", "delete_file", "move_file"})
+DEFAULT_AUTO_ACTIONS = frozenset(
+    {"read_file", "read_file_range", "grep_workspace", "list_dir", "run_shell_ro"}
+)
+DEFAULT_CONFIRM_ACTIONS = frozenset(
+    {"write_file", "patch_file", "delete_file", "move_file"}
+)
 DEFAULT_ACTION_ALIASES = {"shell": "run_shell_ro"}
 
 DEFAULT_MANUAL_EXEC_PREFIXES = (
@@ -319,6 +341,9 @@ class ReplSettings:
     min_output_tokens: int = 256
     idle_timeout_sec: float = 600.0
     watchdog_interval_sec: float = 10.0
+    context_collapse_ratio: float = 0.65
+    context_collapse_keep_rounds: int = 2
+    context_collapse_min_chars: int = 1000
 
 
 @dataclass(frozen=True)
@@ -351,6 +376,16 @@ class ToolsSettings:
     exec_require_confirm: bool
     max_read_bytes: int = 256 * 1024
     max_list_entries: int = 200
+    max_patch_bytes: int = 256 * 1024
+    max_range_lines: int = 400
+    max_grep_results: int = 50
+    max_grep_file_bytes: int = 1024 * 1024
+    grep_ignore_dirs: tuple[str, ...] = (
+        ".git",
+        "__pycache__",
+        ".venv",
+        "node_modules",
+    )
     move_illegal_chars: str = DEFAULT_MOVE_ILLEGAL_CHARS
     manual_exec_prefixes: tuple[str, ...] = DEFAULT_MANUAL_EXEC_PREFIXES
     destructive_commands: frozenset[str] = CORE_DESTRUCTIVE_COMMANDS
@@ -834,6 +869,25 @@ def _load_tools(entry: object) -> "ToolsSettings":
     max_list_entries = _as_optional_int(
         entry, "max_list_entries", label, defaults.max_list_entries, minimum=1
     )
+    max_patch_bytes = _as_optional_int(
+        entry, "max_patch_bytes", label, defaults.max_patch_bytes, minimum=1
+    )
+    max_range_lines = _as_optional_int(
+        entry, "max_range_lines", label, defaults.max_range_lines, minimum=1
+    )
+    max_grep_results = _as_optional_int(
+        entry, "max_grep_results", label, defaults.max_grep_results, minimum=1
+    )
+    max_grep_file_bytes = _as_optional_int(
+        entry,
+        "max_grep_file_bytes",
+        label,
+        defaults.max_grep_file_bytes,
+        minimum=1,
+    )
+    grep_ignore_dirs = _as_str_list(
+        entry, "grep_ignore_dirs", label, defaults.grep_ignore_dirs
+    )
     move_illegal_chars = entry.get(
         "move_illegal_chars", defaults.move_illegal_chars
     )
@@ -891,6 +945,11 @@ def _load_tools(entry: object) -> "ToolsSettings":
         exec_require_confirm=defaults.exec_require_confirm,
         max_read_bytes=max_read_bytes,
         max_list_entries=max_list_entries,
+        max_patch_bytes=max_patch_bytes,
+        max_range_lines=max_range_lines,
+        max_grep_results=max_grep_results,
+        max_grep_file_bytes=max_grep_file_bytes,
+        grep_ignore_dirs=tuple(grep_ignore_dirs),
         move_illegal_chars=move_illegal_chars,
         manual_exec_prefixes=_as_str_list(
             entry,
@@ -1208,6 +1267,31 @@ def _load_settings(document: dict) -> Settings:
         if "watchdog_interval_sec" in repl
         else 10.0
     )
+    collapse_ratio = (
+        _as_number(repl, "context_collapse_ratio", "settings.repl", minimum=0.1)
+        if "context_collapse_ratio" in repl
+        else 0.65
+    )
+    collapse_keep_rounds = (
+        _as_int(
+            repl,
+            "context_collapse_keep_rounds",
+            "settings.repl",
+            minimum=1,
+        )
+        if "context_collapse_keep_rounds" in repl
+        else 2
+    )
+    collapse_min_chars = (
+        _as_int(
+            repl,
+            "context_collapse_min_chars",
+            "settings.repl",
+            minimum=100,
+        )
+        if "context_collapse_min_chars" in repl
+        else 1000
+    )
     repl_settings = ReplSettings(
         history_file=Path(os.path.expanduser(history_raw)),
         max_context_tokens=_as_int(
@@ -1218,6 +1302,9 @@ def _load_settings(document: dict) -> Settings:
         min_output_tokens=min_output,
         idle_timeout_sec=idle_timeout,
         watchdog_interval_sec=watchdog_interval,
+        context_collapse_ratio=collapse_ratio,
+        context_collapse_keep_rounds=collapse_keep_rounds,
+        context_collapse_min_chars=collapse_min_chars,
     )
 
     chat_settings = _load_chat(document.get("chat"))

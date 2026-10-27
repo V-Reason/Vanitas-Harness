@@ -1,17 +1,19 @@
 """受控工具执行：手动 /exec + Agent 内置工具 + 工作区沙盒。
 
 两条路径刻意分开：
-- `run_exec` 保留 `/exec` 契约：手动确认、以仓库根为工作目录、硬编码的兼容前缀；
+- `run_exec` 是人类的 `/exec`/`!cmd`：原生 shell、无白名单/目录限制，只保留确认、
+  超时与 512 KiB 输出折叠；
 - `AgentTools` 供 Agent 闭环使用：强类型文件工具、只读 Shell、工作区内路径校验。
 
-安全边界是参数级而不是 OS 级：所有文件路径在进入 `Path` 操作前都必须经过
-`is_inside_workspace`；Shell 使用 `shell=False`，不启动命令解释器。
+Agent 的安全边界是参数级而不是 OS 级：所有文件路径在进入 `Path` 操作前都必须经过
+`is_inside_workspace`；Agent Shell 使用 `shell=False`，不启动命令解释器。
 """
 
 from __future__ import annotations
 
 import locale
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -559,6 +561,184 @@ def list_dir(
     return entries
 
 
+def patch_file(
+    path: str,
+    search: str,
+    replace: str,
+    *,
+    root: Path | str | None = None,
+    max_bytes: int = 262144,
+) -> str:
+    """对已有文件做唯一片段替换；保留原 BOM/换行字节，避免全量重写。"""
+    if not isinstance(search, str) or not search:
+        raise ToolDenied("patch_file 的 search 匹配串必须是非空字符串")
+    if not isinstance(replace, str):
+        raise ToolDenied("patch_file 的 replace 替换串必须是字符串")
+    target = _require_path(path, root)
+    try:
+        if not target.is_file():
+            raise ToolDenied(f"目标文件不存在：{path}")
+        size = target.stat().st_size
+        if size > max_bytes:
+            raise ToolDenied(
+                f"文件超过 {max_bytes // 1024} KiB，已拒绝补丁：{path}"
+            )
+        raw = target.read_bytes()
+    except ToolDenied:
+        raise
+    except OSError as exc:
+        raise ToolDenied(f"读取文件失败：{path}；{exc.strerror or exc}") from exc
+
+    has_bom = raw.startswith(b"\xef\xbb\xbf")
+    try:
+        content = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ToolDenied(f"文件不是 UTF-8 编码，无法打补丁：{path}") from exc
+
+    count = content.count(search)
+    if count == 0:
+        raise ToolDenied(
+            f"未在文件 {path} 中找到完全匹配的代码片段。"
+            "请先调用 read_file_range 核对最新内容。"
+        )
+    if count > 1:
+        raise ToolDenied(
+            f"在文件 {path} 中找到 {count} 处匹配片段，定位不唯一。"
+            "请扩展 search 前后的上下文行以唯一定位。"
+        )
+
+    patched = content.replace(search, replace, 1)
+    encoding = "utf-8-sig" if has_bom else "utf-8"
+    try:
+        target.write_bytes(patched.encode(encoding))
+    except OSError as exc:
+        raise ToolDenied(f"写入补丁失败：{path}；{exc.strerror or exc}") from exc
+    return f"补丁应用成功：{path}（替换 1 处匹配）"
+
+
+def read_file_range(
+    path: str,
+    start_line: int = 1,
+    end_line: int = 100,
+    *,
+    root: Path | str | None = None,
+    max_bytes: int = 262144,
+    max_lines: int = 400,
+) -> str:
+    """按 1-based 闭区间读取文件行，防止大文件撑爆上下文。"""
+    if start_line < 1:
+        raise ToolDenied("start_line 必须 ≥ 1")
+    if end_line < start_line:
+        raise ToolDenied(
+            f"end_line ({end_line}) 必须 ≥ start_line ({start_line})"
+        )
+    if end_line - start_line + 1 > max_lines:
+        raise ToolDenied(
+            f"请求行数超过上限 {max_lines}；请缩小 start_line/end_line 范围"
+        )
+    target = _require_path(path, root)
+    try:
+        if not target.is_file():
+            raise ToolDenied(f"文件不存在：{path}")
+        size = target.stat().st_size
+        if size > max_bytes:
+            raise ToolDenied(
+                f"文件超过 {max_bytes // 1024} KiB，已拒绝读取：{path}"
+            )
+        raw = target.read_bytes()
+    except ToolDenied:
+        raise
+    except OSError as exc:
+        raise ToolDenied(f"读取文件失败：{path}；{exc.strerror or exc}") from exc
+    try:
+        content = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ToolDenied(f"文件不是 UTF-8 编码：{path}") from exc
+
+    lines = content.splitlines()
+    total_lines = len(lines)
+    if total_lines == 0:
+        return f"[{path}] 共 0 行：\n"
+    if start_line > total_lines:
+        raise ToolDenied(
+            f"start_line {start_line} 超出文件总行数 {total_lines}：{path}"
+        )
+    actual_start = max(1, start_line)
+    actual_end = min(end_line, total_lines)
+    selected = lines[actual_start - 1 : actual_end]
+    formatted = [
+        f"{idx:4d} | {line}"
+        for idx, line in enumerate(selected, start=actual_start)
+    ]
+    header = (
+        f"[{path}] 第 {actual_start}–{actual_end} 行"
+        f"（共 {total_lines} 行）：\n"
+    )
+    return header + "\n".join(formatted)
+
+
+def grep_workspace(
+    pattern: str,
+    path: str = ".",
+    *,
+    root: Path | str | None = None,
+    max_results: int = 50,
+    max_file_bytes: int = 1048576,
+    ignore_dirs: tuple[str, ...] = (".git", "__pycache__", ".venv", "node_modules"),
+) -> list[str]:
+    """在工作区内做正则检索；跳过隐藏目录、符号链接与超大文件。"""
+    if not pattern:
+        raise ToolDenied("检索 pattern 不能为空")
+    if max_results < 1:
+        raise ToolDenied("max_results 必须 ≥ 1")
+    target_dir = _require_path(path, root)
+    if not target_dir.is_dir():
+        raise ToolDenied(f"检索路径不是目录：{path}")
+    try:
+        regex = re.compile(pattern, re.IGNORECASE)
+    except re.error as exc:
+        raise ToolDenied(f"无效的正则表达式 {pattern!r}：{exc}") from exc
+
+    base_root = _workspace_root(root)
+    ignored = frozenset(ignore_dirs)
+    matches: list[str] = []
+    for cur_root, dirs, files in os.walk(target_dir, followlinks=False):
+        dirs[:] = [
+            item
+            for item in dirs
+            if not item.startswith(".") and item not in ignored
+        ]
+        for file in files:
+            if file.startswith("."):
+                continue
+            file_path = Path(cur_root) / file
+            if file_path.is_symlink():
+                continue
+            try:
+                resolved = file_path.resolve()
+                if not is_inside_workspace(
+                    resolved, base_root, raise_on_error=False
+                ):
+                    continue
+                if resolved.stat().st_size > max_file_bytes:
+                    continue
+                text = resolved.read_text(encoding="utf-8", errors="ignore")
+            except (OSError, RuntimeError, ValueError):
+                continue
+            try:
+                rel_path = resolved.relative_to(base_root).as_posix()
+            except ValueError:
+                continue
+            for line_idx, line in enumerate(text.splitlines(), start=1):
+                if not regex.search(line):
+                    continue
+                matches.append(f"{rel_path}:{line_idx}: {line.strip()[:120]}")
+                if len(matches) >= max_results:
+                    matches.append("…（结果超出上限，已截断）")
+                    return matches
+    return matches or ["未找到匹配文本"]
+
+
 class AgentTools:
     """Agent 闭环的内置工具；所有路径都限制在构造时确定的根目录内。"""
 
@@ -597,6 +777,49 @@ class AgentTools:
             path,
             root=self.root,
             max_entries=self.config.settings.tools.max_list_entries,
+        )
+
+    def patch_file(self, path: str, search: str, replace: str) -> str:
+        settings = self.config.settings.tools
+        return patch_file(
+            path,
+            search,
+            replace,
+            root=self.root,
+            max_bytes=settings.max_patch_bytes,
+        )
+
+    def read_file_range(
+        self, path: str, start_line: int = 1, end_line: int = 100
+    ) -> str:
+        settings = self.config.settings.tools
+        return read_file_range(
+            path,
+            start_line,
+            end_line,
+            root=self.root,
+            max_bytes=settings.max_read_bytes,
+            max_lines=settings.max_range_lines,
+        )
+
+    def grep_workspace(
+        self,
+        pattern: str,
+        path: str = ".",
+        max_results: int | None = None,
+    ) -> list[str]:
+        settings = self.config.settings.tools
+        return grep_workspace(
+            pattern,
+            path,
+            root=self.root,
+            max_results=(
+                settings.max_grep_results
+                if max_results is None
+                else max_results
+            ),
+            max_file_bytes=settings.max_grep_file_bytes,
+            ignore_dirs=settings.grep_ignore_dirs,
         )
 
     # ------------------------------------------------------------------ #
