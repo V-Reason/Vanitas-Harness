@@ -889,10 +889,13 @@ class AgentTools:
         tokens = split_command(command)
         settings = self.config.settings.tools
         prefix = self._readonly_prefix(tokens)
-        if prefix not in settings.readonly_shell_prefixes:
+        allowed_prefixes = settings.readonly_shell_prefixes | frozenset(
+            settings.project_prefixes
+        )
+        if prefix not in allowed_prefixes:
             raise ToolDenied(
                 f"安全限制：只允许只读命令；收到 {prefix!r}。"
-                f"允许：{'、'.join(sorted(settings.readonly_shell_prefixes))}"
+                f"允许：{'、'.join(sorted(allowed_prefixes))}"
             )
         self._reject_write_flags(
             tokens,

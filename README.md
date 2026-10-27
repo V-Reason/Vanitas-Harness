@@ -2,9 +2,10 @@
 
 单机本地推理 CLI：为 RTX 4060 Laptop（8 GB）准备的 llama.cpp 启动器、单实例守卫、交互式 REPL、受控 Agent 闭环、批量翻译与批处理。模型、端口、上下文与 KV 类型全部由 `config\` 驱动。
 
-- 通用主力：Qwen2.5-7B-Instruct Q6_K（4060，2 分片，只传首片）
-- 轻量高质：MiniCPM5-2B **Q8_0**（4061）
-- 专业翻译：HY-MT2-7B Q6_K（4062）
+- 代码主力：Qwen2.5-Coder-7B-Instruct Q6_K（4060，Agent 默认）
+- 通用备胎：Qwen2.5-7B-Instruct Q6_K（4063，chat/batch 默认，2 分片只传首片）
+- 轻量高质：MiniCPM5-2B Q8_0（4061）
+- 专业翻译：HY-MT2-7B Q6_K（4062，translate 默认）
 
 ---
 
