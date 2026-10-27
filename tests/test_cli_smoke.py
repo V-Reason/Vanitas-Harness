@@ -73,10 +73,10 @@ class CliSmokeTests(unittest.TestCase):
         with clean_env():
             code, out, _err = run(["models"])
         self.assertEqual(code, 0)
-        for model_id in ("qwen7b", "minicpm", "hymt"):
+        for model_id in ("qwen_coder", "qwen7b", "minicpm", "hymt"):
             self.assertIn(model_id, out)
         self.assertIn("4060", out)
-        self.assertIn("qwen2.5-7b-instruct-q6_k", out)
+        self.assertIn("qwen2.5-coder-7b-instruct-q6_k", out)
 
     def test_status_without_server(self) -> None:
         with clean_env():
@@ -189,7 +189,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         called.assert_called_once()
         args, kwargs = called.call_args
-        self.assertEqual(args[1].id, "minicpm")
+        self.assertEqual(args[1].id, "qwen_coder")
         self.assertIsNone(kwargs["system"])
 
     def test_translate_two_files_get_independent_compact_stats(self) -> None:
