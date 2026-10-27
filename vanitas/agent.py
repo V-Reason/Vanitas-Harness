@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import re
 import sys
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass
 from typing import Callable
 
@@ -59,10 +59,41 @@ class AgentAction:
     parameters: dict
 
 
-def _require_text(params: dict, key: str) -> str:
+def _require_text(params: dict, key: str, action: str) -> str:
     value = params.get(key)
     if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"parameters.{key} 必须是非空字符串")
+        keys = "、".join(sorted(params)) or "（空）"
+        raise ValueError(
+            f"动作 {action!r} 缺少/非法 parameters.{key}；"
+            f"收到参数键：{keys}"
+        )
+    return value.strip()
+
+
+def _optional_int(params: dict, key: str, default: int, action: str) -> int:
+    value = params.get(key, default)
+    if isinstance(value, bool):
+        raise ValueError(
+            f"动作 {action!r} 的 parameters.{key} 必须是整数；收到 {value!r}"
+        )
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"动作 {action!r} 的 parameters.{key} 必须是整数；收到 {value!r}"
+        ) from exc
+
+
+def _optional_text(
+    params: dict, key: str, default: str, action: str
+) -> str:
+    value = params.get(key, default)
+    if not isinstance(value, str) or not value.strip():
+        keys = "、".join(sorted(params)) or "（空）"
+        raise ValueError(
+            f"动作 {action!r} 缺少/非法 parameters.{key}；"
+            f"收到参数键：{keys}"
+        )
     return value.strip()
 
 
@@ -71,34 +102,77 @@ def _build_action(name: str, params: dict, aliases: dict[str, str]) -> AgentActi
     if name not in ACTION_NAMES:
         raise ValueError(f"未知动作：{name!r}")
     if name == "read_file":
-        return AgentAction(name, {"path": _require_text(params, "path")})
+        return AgentAction(name, {"path": _require_text(params, "path", name)})
+    if name == "read_file_range":
+        return AgentAction(
+            name,
+            {
+                "path": _require_text(params, "path", name),
+                "start_line": _optional_int(params, "start_line", 1, name),
+                "end_line": _optional_int(params, "end_line", 100, name),
+            },
+        )
+    if name == "grep_workspace":
+        return AgentAction(
+            name,
+            {
+                "pattern": _require_text(params, "pattern", name),
+                "path": _optional_text(params, "path", ".", name),
+                "max_results": _optional_int(
+                    params, "max_results", 50, name
+                ),
+            },
+        )
+    if name == "patch_file":
+        path = _require_text(params, "path", name)
+        search = _require_text(params, "search", name)
+        replace = params.get("replace")
+        if not isinstance(replace, str):
+            keys = "、".join(sorted(params)) or "（空）"
+            raise ValueError(
+                f"动作 {name!r} 缺少/非法 parameters.replace；"
+                f"收到参数键：{keys}"
+            )
+        return AgentAction(
+            name,
+            {"path": path, "search": search, "replace": replace},
+        )
     if name == "write_file":
-        path = _require_text(params, "path")
+        path = _require_text(params, "path", name)
         content = params.get("content")
         if not isinstance(content, str):
-            raise ValueError("parameters.content 必须是字符串")
+            keys = "、".join(sorted(params)) or "（空）"
+            raise ValueError(
+                f"动作 {name!r} 缺少/非法 parameters.content；"
+                f"收到参数键：{keys}"
+            )
         return AgentAction(name, {"path": path, "content": content})
     if name == "move_file":
         src = params.get("src", params.get("source"))
         dst = params.get("dst", params.get("dest", params.get("destination")))
         if not isinstance(src, str) or not src.strip():
-            raise ValueError("parameters.src 必须是非空字符串")
+            raise ValueError(f"动作 {name!r} 缺少/非法 parameters.src")
         if not isinstance(dst, str) or not dst.strip():
-            raise ValueError("parameters.dst 必须是非空字符串")
+            raise ValueError(f"动作 {name!r} 缺少/非法 parameters.dst")
         return AgentAction(
             name,
             {"src": src.strip(), "dst": dst.strip()},
         )
-    if name == "delete_file":
-        return AgentAction(name, {"path": _require_text(params, "path")})
+    if name in {"delete_file", "delete_path"}:
+        return AgentAction(
+            name, {"path": _require_text(params, "path", name)}
+        )
     if name == "list_dir":
-        path = params.get("path", ".")
-        if not isinstance(path, str) or not path.strip():
-            raise ValueError("parameters.path 必须是非空字符串")
-        return AgentAction(name, {"path": path.strip()})
-    return AgentAction(
-        name, {"command": _require_text(params, "command")}
-    )
+        return AgentAction(
+            name,
+            {"path": _optional_text(params, "path", ".", name)},
+        )
+    if name == "run_shell_ro":
+        return AgentAction(
+            name,
+            {"command": _require_text(params, "command", name)},
+        )
+    raise ValueError(f"动作 {name!r} 的参数校验未实现")
 
 
 def _action_from_payload(
@@ -470,7 +544,9 @@ def _summary(action: AgentAction) -> str:
         return f"写入 {params['path']}"
     if action.name == "move_file":
         return f"重命名 {params['src']} -> {params['dst']}"
-    return f"删除 {params['path']}"
+    if action.name in {"delete_file", "delete_path"}:
+        return f"删除文件/目录 {params.get('path', '?')}"
+    return f"删除 {params.get('path', '?')}"
 
 
 def _describe(action: AgentAction) -> str:
@@ -500,7 +576,12 @@ def _describe(action: AgentAction) -> str:
             f"将重命名 {action.parameters['src']} -> "
             f"{action.parameters['dst']}"
         )
-    return f"将删除文件 {action.parameters['path']}"
+    if action.name in {"delete_file", "delete_path"}:
+        return (
+            "将删除文件或递归目录 "
+            f"{action.parameters.get('path', '?')}"
+        )
+    return f"将删除文件 {action.parameters.get('path', '?')}"
 
 
 def _needs_confirmation(
@@ -792,8 +873,8 @@ def _run_action(tools: AgentTools, action: AgentAction) -> tuple[bool, str]:
     if action.name == "move_file":
         detail = tools.move_file(params["src"], params["dst"])
         return True, detail
-    if action.name == "delete_file":
-        detail = tools.delete_file(params["path"])
+    if action.name in {"delete_file", "delete_path"}:
+        detail = tools.delete_path(params["path"])
         return True, detail
     path = params["path"]
     names = tools.list_dir(path)
@@ -805,12 +886,20 @@ def _run_action(tools: AgentTools, action: AgentAction) -> tuple[bool, str]:
     return True, detail
 
 
+def _action_signature(action: AgentAction) -> tuple[str, str]:
+    return (
+        action.name,
+        json.dumps(action.parameters, sort_keys=True),
+    )
+
+
 def _run_actions(
     actions: list[AgentAction],
     execute_one: Callable[[AgentAction], tuple[bool, str]],
     *,
     max_feedback_chars: int,
     palette: Palette,
+    failed_sink: dict[tuple[str, str], str] | None = None,
 ) -> str:
     results: list[tuple[AgentAction, bool, str]] = []
     for action in actions:
@@ -825,6 +914,8 @@ def _run_actions(
         except (TypeError, ValueError) as exc:
             ok, detail = False, f"工具参数无效：{exc}"
             print(palette.err(detail), file=sys.stderr)
+        if not ok and failed_sink is not None:
+            failed_sink[_action_signature(action)] = detail
         results.append((action, ok, detail))
 
     if len(results) == 1:
@@ -874,15 +965,21 @@ class AgentLoop:
         self.stagnation_limit = max(2, int(stagnation_limit))
         self.palette = palette or Palette({}, enabled=False)
         self._recent: deque[tuple[str, str]] = deque(
-            maxlen=self.stagnation_limit
+            maxlen=max(6, self.stagnation_limit)
         )
         self.steps = 0
         self.parse_retries = 0
         self.stagnation_hits = 0
+        self._stagnation_reason = ""
+        self._last_failed_signatures: dict[tuple[str, str], str] = {}
 
     @property
     def recent_count(self) -> int:
         return len(self._recent)
+
+    @property
+    def stagnation_count(self) -> int:
+        return min(len(self._recent), self.stagnation_limit)
 
     # ------------------------------------------------------------------ #
     # 执行（AgentRepl 复用与可注入钩子）
@@ -897,6 +994,7 @@ class AgentLoop:
             self.execute_action,
             max_feedback_chars=self.config.settings.agent.max_feedback_chars,
             palette=self.palette,
+            failed_sink=self._last_failed_signatures,
         )
 
     # ------------------------------------------------------------------ #
@@ -922,6 +1020,8 @@ class AgentLoop:
         self.steps = 0
         self.parse_retries = 0
         self.stagnation_hits = 0
+        self._stagnation_reason = ""
+        self._last_failed_signatures.clear()
         stream = _AgentAnswerStream()
         result = converse(text, None, stream)
         if result is None or result.interrupted:
@@ -967,13 +1067,50 @@ class AgentLoop:
                 return
             if self._stagnates(actions):
                 self.stagnation_hits += 1
+                reason = (
+                    f"连续 {self.stagnation_limit} 次"
+                    if self._stagnation_reason == "连续"
+                    else self._stagnation_reason
+                )
                 print(
                     self.palette.warn(
-                        f"检测到动作连续 {self.stagnation_limit} 次停滞，"
+                        f"检测到动作{reason}停滞，"
                         "已触发硬熔断保护"
                     )
                 )
                 return
+
+            blocked = [
+                (
+                    action,
+                    self._last_failed_signatures[_action_signature(action)],
+                )
+                for action in actions
+                if _action_signature(action) in self._last_failed_signatures
+            ]
+            if blocked:
+                summary = "；".join(
+                    f"{_summary(action)}（{reason[:200]}）"
+                    for action, reason in blocked
+                )
+                print(
+                    self.palette.warn(
+                        f"拦截上一步已失败动作，不再二次确认：{summary}"
+                    )
+                )
+                steps += 1
+                self.steps = steps
+                feedback = (
+                    "<tool_result>\n"
+                    f"执行失败：该动作在上一步已失败（{summary}）。"
+                    "严禁以相同参数重复提交；请修改参数、改用其他策略或直接收尾。\n"
+                    "</tool_result>"
+                )
+                stream = _AgentAnswerStream()
+                result = converse("", feedback, stream)
+                if result is None or result.interrupted:
+                    return
+                continue
 
             if _needs_confirmation(
                 actions, self.config.settings.agent.confirm_actions
@@ -984,6 +1121,7 @@ class AgentLoop:
             else:
                 announce(actions)
 
+            self._last_failed_signatures.clear()
             feedback = execute_actions(actions)
             steps += 1
             self.steps = steps
@@ -994,15 +1132,35 @@ class AgentLoop:
 
     def _stagnates(self, actions: list[AgentAction]) -> bool:
         for action in actions:
-            signature = (
-                action.name,
-                json.dumps(action.parameters, sort_keys=True),
-            )
-            self._recent.append(signature)
+            self._recent.append(_action_signature(action))
+
+        recent = list(self._recent)
+        if (
+            len(recent) >= self.stagnation_limit
+            and len(set(recent[-self.stagnation_limit :])) == 1
+        ):
+            self._stagnation_reason = "连续"
+            return True
+        if len(recent) >= 4:
             if (
-                len(self._recent) >= self.stagnation_limit
-                and len(set(self._recent)) == 1
+                recent[-1] == recent[-3]
+                and recent[-2] == recent[-4]
+                and recent[-1] != recent[-2]
             ):
+                self._stagnation_reason = "震荡"
+                return True
+        if len(recent) >= 6:
+            if (
+                recent[-1] == recent[-4]
+                and recent[-2] == recent[-5]
+                and recent[-3] == recent[-6]
+            ):
+                self._stagnation_reason = "震荡"
+                return True
+        window = recent[-6:]
+        if window:
+            if max(Counter(window).values()) >= 3:
+                self._stagnation_reason = "重复"
                 return True
         return False
 
@@ -1097,6 +1255,7 @@ class AgentRepl(Repl):
             self._execute,
             max_feedback_chars=self.config.settings.agent.max_feedback_chars,
             palette=self.palette,
+            failed_sink=self.loop._last_failed_signatures,
         )
 
     def _execute(self, action: AgentAction) -> tuple[bool, str]:
