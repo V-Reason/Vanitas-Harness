@@ -852,6 +852,22 @@ class TranslationEngineTests(unittest.TestCase):
                 self.assertIsNone(result.fallback_reason)
                 self.assertEqual(client.calls, [])
 
+    def test_translate_filename_retries_when_japanese_is_untranslated(self) -> None:
+        masked = "[[K0]]最初は優しく感度上げ[[K1]]はむはむふぅふぅ"
+        client = FilenameTranslationClient(
+            responses=[
+                (masked, "stop"),
+                ("[[K0]]最初是温柔提升敏感度[[K1]]吧唧吧唧呼呼声", "stop"),
+            ]
+        )
+        engine = self.make_engine(client)
+        result = engine.translate_filename_result(
+            "①最初は優しく感度上げ♪はむはむふぅふぅ.wav"
+        )
+        self.assertEqual(result.name, "①最初是温柔提升敏感度♪吧唧吧唧呼呼声")
+        self.assertIsNone(result.fallback_reason)
+        self.assertEqual(len(client.calls), 2)
+
     def test_translate_filename_overlong_result_falls_back(self) -> None:
         client = FilenameTranslationClient(content="长" * 120)
         engine = self.make_engine(client)

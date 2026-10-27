@@ -65,6 +65,7 @@ FILENAME_EXPLANATION = re.compile(
     r"(?:翻译|译文|译名|file name)\s*[:：]\s*", re.IGNORECASE
 )
 FILENAME_PLACEHOLDER = re.compile(r"\[\[K(\d+)\]\]")
+FILENAME_KANA = re.compile(r"[\u3040-\u30ff]")
 FILENAME_TOKEN = re.compile(r"[A-Za-z0-9+#&]+")
 FILENAME_CODE_ID = re.compile(
     r"(?<![A-Za-z0-9])[A-Za-z]{1,4}\d{2,}(?![A-Za-z0-9])"
@@ -421,16 +422,26 @@ class TranslationEngine:
             if len(restored) > FILENAME_MAX_CHARS:
                 reason = "译名过长"
                 continue
+            if restored == stem and FILENAME_KANA.search(stem):
+                reason = "未翻译日文假名"
+                continue
             return NameTranslation(restored)
         return NameTranslation(stem, reason or "模型输出不可用")
 
     def _call_name(self, masked: str, correction: str) -> dict:
         user_content = FILENAME_PROMPT.format(name=masked)
         if correction:
-            user_content += (
-                f"\n上一次结果不可用：{correction}。"
-                "请重新翻译，完整保留所有占位符，只输出文件名主体。"
-            )
+            if "日文假名" in correction:
+                user_content += (
+                    "\n上一次结果没有翻译日文假名内容；"
+                    "请把普通日文词翻译成中文，完整保留所有占位符，"
+                    "只输出文件名主体。"
+                )
+            else:
+                user_content += (
+                    f"\n上一次结果不可用：{correction}。"
+                    "请重新翻译，完整保留所有占位符，只输出文件名主体。"
+                )
         messages: list[dict] = [
             {"role": "system", "content": FILENAME_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
