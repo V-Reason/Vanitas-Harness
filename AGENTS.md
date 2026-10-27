@@ -125,7 +125,7 @@ vanitas\
 # 1) 语法
 Get-ChildItem vanitas\*.py, tests\test_*.py | ForEach-Object { python -m py_compile $_.FullName }
 
-# 2) 单测（当前 369 例）
+# 2) 单测（当前 383 例）
 python -m unittest discover -s tests
 python -m unittest tests.test_agent_parser
 
@@ -164,6 +164,7 @@ python -m vanitas stop
 - 翻译预设：`translate.default_preset=subtitle`；`subtitle/prose/asmr` 使用 HY-MT2 profile 2（8K Q4）、context 12/10/12、chunk 800；`general` 保留 4K Q8 / context 5 / chunk 1500。显式 `--model`/`--profile` 优先；档位不一致时 `translate` 自动停旧启新。
 - 提示词：`system_default` 全静态；`task_chat/task_code/task_agent/task_translate_asmr` 使用 XML，`task_translate`/`agent_continue` 保持紧凑纯文本；仅 6 个占位符。`task_agent` 的批量是逐项执行而非事务，`patch_file` 只要求唯一片段、不强制固定上下行数；不提供 `_reason` 参数。
 - 翻译上下文：`TranslationEngine._history` 是文档级状态；CLI 在每个输入文件前调用 `reset_history()`，多文件不得继承上一文件的标题、摘要或人名。`sanitize_translation_output` 会去掉 `……。`/`——。` 的重复句号。
+- 翻译目录：`translate` 的 `inputs` 接受文件、目录或混用；目录用 `os.walk(followlinks=False)` 递归，只收 `settings.translate.source_suffixes`，跳过目录内已有 `<原名><output_suffix>.<扩展名>` 产物，按真实路径去重。`--out-dir` 下目录输入保留相对层级，直接文件平铺；写出前拒绝目标冲突与覆盖输入。空目录/不可遍历目录在启动模型前返回 `5`；显式文件的存在性仍由 `translate_file()` 判定。
 - 人类 `/exec`/`!` 使用原生 `shell=True`，不再受 `manual_exec_prefixes`/目录限制；`AgentTools.run_shell_ro` 的只读白名单与 `is_inside_workspace` 边界完全不变。
 - AgentTools 新增 `patch_file`、`read_file_range`、`grep_workspace`；全部走 `_require_path`。`patch_file` 需确认，另两项只读自动放行；大文件优先 `read_file_range`/`grep_workspace`，小改优先 `patch_file`，多文件优先单轮动作数组；批量逐项执行，失败不回滚已成功项，不是事务。
 - `delete_path` 递归删除文件/目录，`delete_file` 为兼容别名；工作区根目录、父级与越界路径硬拒绝，符号链接只删链接本身。`/undo`/`/pop`/`/rollback` 回滚最近一轮并释放 tokens。
@@ -172,7 +173,7 @@ python -m vanitas stop
 - 重命名/改扩展名只允许 `move_file(src,dst)`；`patch_file` 只改内容。Prompt 明确禁止用 `patch_file` 绕文件名变更。
 - 可配扩展：`settings.defaults`（四模式默认模型）、`agent.max_parse_retries/stagnation_limit/feedback_head_lines/feedback_tail_lines`、`tools.max_capture_bytes`、`repl.ctx_warn_pct/ctx_danger_pct/status_bar_width`。默认值保持 2/3/20/40、512 KiB、60/80/20。
 - CLI 相对路径（`translate` 输入/`--out-dir`、`batch` 的 JSONL、`--system`、`--config-dir`）统一按 `VANITAS_ORIG_CWD` 解析；`vanitas.bat` 切仓库根不影响用户在启动目录使用相对路径。
-- 并发（`-np 1`）、长上下文质量、持续压测、TTY 交互、`--foreground`、`.md/.txt` 真机翻译、5xx 重试路径尚未验证。
+- 并发（`-np 1`）、长上下文质量、持续压测、TTY 交互、`--foreground`、`.txt` 真机翻译、5xx 重试路径尚未验证；`.md` 已用 HY-MT2 做 2 文件目录小样本冒烟。
 - v0.4.1 的 16 色配色与三处覆盖式进度未做真人 TTY 验收（仅伪 TTY 单测 + 强制 `always` 抓字节）。
 - `vanitas agent` 的默认入口、`{cwd}` 注入、只读列目录不确认、批量 `move_file` 清单与一次 `[y/N]`、三连输入不触发上下文裁剪、最终答复流式（实测 111 次写入）、解释文字后的尾部动作 JSON、`run_shell_ro` 拒绝写命令、工作区外读取拦截均已用 qwen7b 真机冒烟；工具调用已改为 `<tool_call>` 标签优先，`raw_decode`/栈平衡兜底与 `<tool_result>` 反馈由单测覆盖；qwen7b 已真机输出 `<tool_call>` 数组并一次确认创建 `a.txt`/`b.txt`。真实终端 `[y/N]` 观感、真实删除、模型在 shell 被拒后自动改用 `move_file`，以及 `max_steps` 耗尽提示仍未验收。
 - `exec_whitelist` 已退役；Agent 的步数/批量/反馈/审批在 `settings.agent`，文件限制、只读 Shell、`/exec` 前缀与写参数拦截在 `settings.tools`。配置可调整策略，但破坏性命令与写参数黑名单的安全底线只能追加、不能删除。

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from collections import deque
@@ -16,7 +17,7 @@ from typing import Callable
 
 from . import prompts
 from .client import LlamaClient
-from .config import AppConfig, ModelSpec
+from .config import AppConfig, ModelSpec, TranslateSettings
 from .errors import EngineError, OutputTruncated, TranslateError
 from .metrics import (
     PROMPT_OVERHEAD,
@@ -52,6 +53,28 @@ class TranslationOutcome:
     output: Path | None
     segments: int
     failures: list[TranslationFailure] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TranslationSource:
+    """一个待翻译文件；relative_parent 用于在 --out-dir 下保留目录层级。"""
+
+    path: Path
+    relative_parent: Path = field(default_factory=Path)
+
+
+@dataclass(frozen=True)
+class TranslationPlan:
+    source: TranslationSource
+    out_dir: Path | None
+    target: Path
+
+    @property
+    def label(self) -> str:
+        parent = self.source.relative_parent
+        if parent in (Path(), Path(".")):
+            return self.source.path.name
+        return (parent / self.source.path.name).as_posix()
 
 
 @dataclass
@@ -667,6 +690,137 @@ def _read_text(path: Path) -> tuple[str, bool, str]:
 def output_path(source: Path, out_dir: Path | None, suffix: str) -> Path:
     name = f"{source.stem}{suffix}{source.suffix}"
     return (out_dir / name) if out_dir is not None else (source.parent / name)
+
+
+def _path_key(path: Path) -> str:
+    """跨 Windows 大小写/符号链接比较路径；目标文件通常尚不存在。"""
+    return os.path.normcase(os.path.realpath(os.path.abspath(str(path))))
+
+
+def _is_generated_output(path: Path, output_suffix: str) -> bool:
+    suffix = (output_suffix or "").lower()
+    return bool(suffix) and path.stem.lower().endswith(suffix)
+
+
+def _is_excluded_dir(candidate: Path, excluded_key: str | None) -> bool:
+    """仅剪掉 --out-dir 本身，避免把上次产物再次当输入。"""
+    if not excluded_key:
+        return False
+    return _path_key(candidate) == excluded_key
+
+
+def collect_translate_inputs(
+    inputs: list[Path],
+    settings: TranslateSettings,
+    *,
+    exclude_dir: Path | None = None,
+) -> list[TranslationSource]:
+    """把文件/目录输入展开为去重后的文件列表。
+
+    - 目录递归遍历，只收 settings.source_suffixes，显式文件不按后缀过滤；
+    - 目录中的 ``*.zh.md`` 等已有产物跳过，避免自我递归；
+    - 同名文件按真实路径去重，首次出现的目录层级决定输出层级；
+    - 空目录与不可遍历目录在启动模型前报错；显式文件仍由 translate_file 判定。
+    """
+    allowed = frozenset(item.lower() for item in settings.source_suffixes)
+    excluded_key = _path_key(exclude_dir) if exclude_dir is not None else None
+    collected: list[TranslationSource] = []
+    seen: set[str] = set()
+
+    def add(path: Path, relative_parent: Path) -> bool:
+        key = _path_key(path)
+        if key in seen:
+            return False
+        seen.add(key)
+        collected.append(TranslationSource(path=path, relative_parent=relative_parent))
+        return True
+
+    for raw in inputs:
+        path = Path(raw)
+        if path.is_dir():
+            matched = 0
+            errors: list[OSError] = []
+
+            def on_error(exc: OSError) -> None:
+                errors.append(exc)
+
+            for root, dirs, files in os.walk(
+                path, topdown=True, onerror=on_error, followlinks=False
+            ):
+                root_path = Path(root)
+                dirs[:] = sorted(
+                    (
+                        name
+                        for name in dirs
+                        if not _is_excluded_dir(root_path / name, excluded_key)
+                    ),
+                    key=str.lower,
+                )
+                files.sort(key=str.lower)
+                for name in files:
+                    candidate = root_path / name
+                    if candidate.suffix.lower() not in allowed:
+                        continue
+                    if _is_generated_output(candidate, settings.output_suffix):
+                        continue
+                    if not candidate.is_file():
+                        continue
+                    matched += 1
+                    add(candidate, candidate.parent.relative_to(path))
+            if errors:
+                first = errors[0]
+                detail = first.strerror or str(first)
+                raise TranslateError(
+                    f"遍历目录失败：{first.filename or path}；{detail}"
+                ) from first
+            if matched == 0:
+                suffixes = "、".join(settings.source_suffixes)
+                raise TranslateError(
+                    f"目录中没有可翻译文件：{path}；支持：{suffixes}"
+                )
+        else:
+            # 显式文件保持旧契约：存在性、后缀与可读性仍由 translate_file 判定。
+            # 这里不能提前拒绝，否则调用方替换/延迟写盘的场景会被误伤。
+            add(path, Path())
+
+    if not collected:
+        raise TranslateError("没有可翻译的输入")
+    return collected
+
+
+def plan_translation_outputs(
+    sources: list[TranslationSource],
+    settings: TranslateSettings,
+    out_dir: Path | None,
+) -> list[TranslationPlan]:
+    """计算输出路径并在写盘前拦截冲突，避免静默覆盖。
+
+    --out-dir 存在时，目录输入保留相对层级；直接指定的文件仍平铺在输出根。
+    """
+    plans: list[TranslationPlan] = []
+    targets: dict[str, TranslationSource] = {}
+    source_keys = {_path_key(item.path) for item in sources}
+
+    for source in sources:
+        target_dir = out_dir / source.relative_parent if out_dir is not None else None
+        target = output_path(source.path, target_dir, settings.output_suffix)
+        key = _path_key(target)
+        previous = targets.get(key)
+        if previous is not None:
+            raise TranslateError(
+                f"输出路径冲突：{previous.path} 与 {source.path} 都会写到 {target}；"
+                "请调整 --out-dir 或输入目录"
+            )
+        if key in source_keys:
+            raise TranslateError(
+                f"输出会覆盖输入文件：{source.path} → {target}；"
+                "请更换 --out-dir 或输出后缀"
+            )
+        targets[key] = source
+        plans.append(
+            TranslationPlan(source=source, out_dir=target_dir, target=target)
+        )
+    return plans
 
 
 def translate_file(

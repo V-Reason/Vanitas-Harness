@@ -118,12 +118,16 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("models", help="列出配置中的全部模型")
 
     translate_cmd = sub.add_parser("translate", help="批量翻译 txt/md/srt")
-    translate_cmd.add_argument("inputs", nargs="+", help="待翻译文件")
+    translate_cmd.add_argument(
+        "inputs", nargs="+", help="待翻译文件或目录；目录会递归展开其中的可翻译文件"
+    )
     translate_cmd.add_argument(
         "--model", default=None, help="模型 id，默认 settings.defaults.translate"
     )
     translate_cmd.add_argument("--profile", default=None, help="档位编号")
-    translate_cmd.add_argument("--out-dir", default=None, help="输出目录，默认与原文件同目录")
+    translate_cmd.add_argument(
+        "--out-dir", default=None, help="输出目录；目录输入会保留相对层级，默认与原文件同目录"
+    )
     translate_cmd.add_argument("--jobs", type=int, default=1, help="并发数；引擎为 -np 1，实际串行")
     translate_cmd.add_argument(
         "--preset",
@@ -392,6 +396,19 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
     profile_key = args.profile or preset_info.get("profile")
     profile = config.resolve_profile(model, profile_key)
     out_dir = _resolve_cli_path(args.out_dir) if args.out_dir else None
+    if out_dir is not None and out_dir.exists() and not out_dir.is_dir():
+        print(palette.err(f"输出路径不是目录：{out_dir}"), file=sys.stderr)
+        return 4
+    try:
+        sources = translate.collect_translate_inputs(
+            [_resolve_cli_path(raw) for raw in args.inputs],
+            effective,
+            exclude_dir=out_dir,
+        )
+        plans = translate.plan_translation_outputs(sources, effective, out_dir)
+    except TranslateError as exc:
+        print(palette.err(str(exc)), file=sys.stderr)
+        return 5
     monitor = TranslationMonitor(
         stream=sys.stderr,
         enabled=palette.enabled,
@@ -410,11 +427,12 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
     print(
         palette.meta(
             f"{model.display} · 档位 {profile.key} · 预设 {preset_name}"
+            f" · {len(plans)} 个文件"
         )
     )
     failures = 0
-    for raw in args.inputs:
-        source = _resolve_cli_path(raw)
+    for plan in plans:
+        source = plan.source.path
         # 每个文件独立计时/计量；reset 也负责清掉上一文件的看板。
         monitor.reset()
         # 滑动上下文是文档级状态，不能把上一文件的标题/人称带进下一文件。
@@ -426,12 +444,12 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                 chat,
                 source,
                 effective,
-                out_dir=out_dir,
+                out_dir=plan.out_dir,
                 window_size=window_size,
                 max_window_chars=max_window_chars,
             )
         except TranslateError as exc:
-            print(palette.err(f"{raw}：{exc}"), file=sys.stderr)
+            print(palette.err(f"{plan.label}：{exc}"), file=sys.stderr)
             failures += 1
             if monitor.segments:
                 monitor.finish()
@@ -439,14 +457,20 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
         finally:
             # 成功、失败与意外异常都先擦掉看板，避免残行。
             monitor.clear()
-        target = outcome.output.name if outcome.output else "—"
+        output = outcome.output or plan.target
+        target = output.name
+        if out_dir is not None:
+            try:
+                target = output.relative_to(out_dir).as_posix()
+            except ValueError:
+                pass
         monitor.print_line(
-            palette.ok(f"{outcome.source.name} → {target} · {outcome.segments} 段")
+            palette.ok(f"{plan.label} → {target} · {outcome.segments} 段")
         )
         for failure in outcome.failures:
             print(
                 palette.err(
-                    f"{Path(failure.source).name} {failure.segment}：{failure.reason}"
+                    f"{plan.label} {failure.segment}：{failure.reason}"
                 ),
                 file=sys.stderr,
             )

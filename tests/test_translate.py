@@ -18,8 +18,10 @@ from vanitas.translate import (  # noqa: E402
     TranslationEngine,
     TranslationOptions,
     chunk_text,
+    collect_translate_inputs,
     parse_srt,
     parse_window_response,
+    plan_translation_outputs,
     rebuild_srt,
     sanitize_translation_output,
     translate_file,
@@ -416,6 +418,118 @@ class TranslateTests(unittest.TestCase):
     def test_missing_file_rejected(self) -> None:
         with self.assertRaises(TranslateError):
             translate_file(echo_chat, self.dir / "nope.srt", SETTINGS)
+
+
+class InputDiscoveryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+
+    def write(self, name: str, text: str = "x") -> Path:
+        path = self.dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def relative(self, sources) -> list[str]:
+        return [source.path.relative_to(self.dir).as_posix() for source in sources]
+
+    def test_directory_recursively_collects_supported_files(self) -> None:
+        self.write("b.md")
+        self.write("A.SRT")
+        self.write("sub/c.txt")
+        self.write("skip.json")
+        self.write("old.zh.md")
+        self.write("sub/old.zh.srt")
+
+        sources = collect_translate_inputs([self.dir], SETTINGS)
+
+        self.assertEqual(self.relative(sources), ["A.SRT", "b.md", "sub/c.txt"])
+        self.assertEqual(sources[0].relative_parent, Path())
+        self.assertEqual(sources[1].relative_parent, Path())
+        self.assertEqual(sources[2].relative_parent, Path("sub"))
+
+    def test_explicit_generated_name_is_still_translated(self) -> None:
+        source = self.write("old.zh.md")
+        sources = collect_translate_inputs([source], SETTINGS)
+        self.assertEqual([item.path for item in sources], [source])
+
+    def test_overlapping_inputs_are_deduplicated_in_first_seen_order(self) -> None:
+        root = self.write("a.md")
+        nested = self.write("sub/b.md")
+        sources = collect_translate_inputs([root, self.dir, self.dir / "sub"], SETTINGS)
+        self.assertEqual([item.path for item in sources], [root, nested])
+
+    def test_empty_or_only_generated_directory_is_rejected(self) -> None:
+        self.write("sub/old.zh.md")
+        with self.assertRaisesRegex(TranslateError, "没有可翻译文件"):
+            collect_translate_inputs([self.dir], SETTINGS)
+
+    def test_exclude_dir_prunes_previous_output_subtree(self) -> None:
+        self.write("a.md")
+        out_dir = self.dir / "out"
+        self.write("out/leftover.md")
+        sources = collect_translate_inputs(
+            [self.dir], SETTINGS, exclude_dir=out_dir
+        )
+        self.assertEqual(self.relative(sources), ["a.md"])
+
+    def test_exclude_nested_dir_does_not_drop_sibling_sources(self) -> None:
+        self.write("a.md")
+        self.write("sub/chapter.md")
+        out_dir = self.dir / "sub" / "out"
+        self.write("sub/out/leftover.md")
+        sources = collect_translate_inputs(
+            [self.dir], SETTINGS, exclude_dir=out_dir
+        )
+        self.assertEqual(self.relative(sources), ["a.md", "sub/chapter.md"])
+
+    def test_plan_preserves_directory_tree_under_out_dir(self) -> None:
+        self.write("a.md")
+        self.write("sub/b.md")
+        out_dir = self.dir / "out"
+        plans = plan_translation_outputs(
+            collect_translate_inputs([self.dir], SETTINGS), SETTINGS, out_dir
+        )
+        self.assertEqual(
+            [plan.target.relative_to(out_dir).as_posix() for plan in plans],
+            ["a.zh.md", "sub/b.zh.md"],
+        )
+        self.assertEqual(plans[1].out_dir, out_dir / "sub")
+
+    def test_plan_rejects_colliding_outputs(self) -> None:
+        first = self.dir / "first"
+        second = self.dir / "second"
+        self.write("first/a.md")
+        self.write("second/a.md")
+        sources = collect_translate_inputs([first, second], SETTINGS)
+        with self.assertRaisesRegex(TranslateError, "输出路径冲突"):
+            plan_translation_outputs(sources, SETTINGS, self.dir / "out")
+
+    def test_plan_rejects_output_overwriting_another_input(self) -> None:
+        self.write("a.md")
+        self.write("a.zh.md")
+        sources = collect_translate_inputs(
+            [self.dir / "a.md", self.dir / "a.zh.md"], SETTINGS
+        )
+        with self.assertRaisesRegex(TranslateError, "输出会覆盖输入"):
+            plan_translation_outputs(sources, SETTINGS, None)
+
+    def test_explicit_missing_path_is_left_for_translate_file(self) -> None:
+        missing = self.dir / "missing"
+        sources = collect_translate_inputs([missing], SETTINGS)
+        self.assertEqual([item.path for item in sources], [missing])
+
+    def test_directory_order_is_stable_case_insensitive(self) -> None:
+        self.write("b.md")
+        self.write("A.md")
+        self.write("sub/z.md")
+        self.write("sub/C.md")
+        sources = collect_translate_inputs([self.dir], SETTINGS)
+        self.assertEqual(
+            self.relative(sources), ["A.md", "b.md", "sub/C.md", "sub/z.md"]
+        )
 
 
 class FakeTranslationClient:

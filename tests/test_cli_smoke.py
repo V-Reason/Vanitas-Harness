@@ -421,6 +421,56 @@ class CliSmokeTests(unittest.TestCase):
         self.assertNotIn("统计段数", err)
         self.assertNotIn("累计汉字", err)
 
+    def test_translate_directory_recursively_preserves_tree(self) -> None:
+        source_dir = self.dir / "src"
+        (source_dir / "sub").mkdir(parents=True)
+        (source_dir / "a.md").write_text("A\n\nB\n", encoding="utf-8")
+        (source_dir / "sub" / "a.md").write_text("C\n", encoding="utf-8")
+        (source_dir / "sub" / "b.srt").write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nHello\n",
+            encoding="utf-8",
+        )
+        (source_dir / "skip.json").write_text("{}", encoding="utf-8")
+        (source_dir / "old.zh.md").write_text("旧译文\n", encoding="utf-8")
+        out_dir = self.dir / "out"
+        with clean_env():
+            with mock.patch.object(
+                cli, "_ensure_engine", return_value=(FakeClient(), 4060)
+            ):
+                code, out, err = run(
+                    ["translate", str(source_dir), "--out-dir", str(out_dir)]
+                )
+        self.assertEqual(code, 0, err)
+        self.assertTrue((out_dir / "a.zh.md").is_file())
+        self.assertTrue((out_dir / "sub" / "a.zh.md").is_file())
+        self.assertTrue((out_dir / "sub" / "b.zh.srt").is_file())
+        self.assertFalse((out_dir / "skip.zh.json").exists())
+        self.assertFalse((out_dir / "old.zh.zh.md").exists())
+        self.assertIn("3 个文件", out)
+        self.assertIn("sub/a.md", err)
+
+    def test_translate_empty_directory_fails_before_engine_start(self) -> None:
+        source_dir = self.dir / "empty"
+        source_dir.mkdir()
+        with clean_env():
+            with mock.patch.object(cli, "_ensure_engine") as engine:
+                code, _out, err = run(["translate", str(source_dir)])
+        self.assertEqual(code, 5)
+        self.assertIn("没有可翻译文件", err)
+        engine.assert_not_called()
+
+    def test_translate_output_path_that_is_file_exits_4(self) -> None:
+        source = self.dir / "a.md"
+        source.write_text("A\n", encoding="utf-8")
+        target = self.dir / "out"
+        target.write_text("not a directory\n", encoding="utf-8")
+        with clean_env():
+            code, _out, err = run(
+                ["translate", str(source), "--out-dir", str(target)]
+            )
+        self.assertEqual(code, 4)
+        self.assertIn("输出路径不是目录", err)
+
     def test_status_state_uses_error_color(self) -> None:
         config = load_config()
         palette = Palette(DEFAULT_THEME, enabled=True)

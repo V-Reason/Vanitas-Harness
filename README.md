@@ -37,6 +37,7 @@ vanitas.bat serve qwen7b :: 后台启动并等待 /health
 vanitas.bat agent        :: Agent 闭环；只读自动放行，修改动作确认，步数由 settings.agent.max_steps 控制
 vanitas.bat translate a.srt --preset subtitle :: 普通字幕（默认 8K Q4 / 12 条上下文）
 vanitas.bat translate novel.md --preset prose :: 小说/散文（8K Q4 / 10 条上下文 / 800 字符 chunk）
+vanitas.bat translate novels --preset prose --out-dir translated :: 递归翻译目录并保留子目录层级
 vanitas.bat translate asmr.srt --preset asmr :: ASMR 字幕（8K Q4 / 6 行合流）
 vanitas.bat stop         :: 停止所有 llama-server
 ```
