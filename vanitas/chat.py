@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -128,6 +129,19 @@ class ChatRunner:
     ) -> TurnResult:
         if self.client is None:
             raise EngineError("服务端没有运行：先运行 vanitas serve <id>")
+        collapsed = self.session.collapse_intermediate_observations(
+            budget,
+            threshold=self.config.settings.repl.context_collapse_ratio,
+            keep_rounds=self.config.settings.repl.context_collapse_keep_rounds,
+            min_chars=self.config.settings.repl.context_collapse_min_chars,
+        )
+        if collapsed:
+            print(
+                self.palette.meta(
+                    f"· 已折叠 {collapsed} 条历史工具观测"
+                ),
+                file=sys.stderr,
+            )
         dropped = self.session.trim(budget)
         if dropped and on_dropped is not None:
             on_dropped(dropped)

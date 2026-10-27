@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -56,6 +57,20 @@ for _command in COMMANDS:
     COMMAND_MAP[_command.name] = _command
     for _alias in _command.aliases:
         COMMAND_MAP[_alias] = _command
+
+
+def _context_bar(pct: float, width: int = 20) -> str:
+    filled = max(0, min(width, int(round(pct / 100 * width))))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _format_uptime(started_at: str) -> str:
+    try:
+        started = datetime.fromisoformat(started_at)
+    except ValueError:
+        return "-"
+    seconds = max(0, int((datetime.now() - started).total_seconds()))
+    return f"{seconds // 60}分{seconds % 60:02d}秒"
 
 
 class IdleWatchdog:
@@ -175,6 +190,7 @@ class Repl:
             config.settings.repl.watchdog_interval_sec,
             self._on_idle,
         )
+        self.last_turn: TurnResult | None = None
 
     def _activate(
         self,
@@ -271,13 +287,20 @@ class Repl:
         return len(text) > 1 and text.startswith("/") and text[1] != " "
 
     def _prompt_text(self) -> str:
-        if self._sleeping:
-            head = self.palette.muted(
-                f"{self.model.id}@{self.profile.key} [休眠]"
-            )
+        used = self.session.message_tokens()
+        total = self.profile.ctx
+        pct = int((used / total) * 100) if total > 0 else 0
+        tag = f"ctx: {pct}% | {used / 1000:.1f}k/{total / 1000:.1f}k"
+        if pct >= 80:
+            colored_tag = self.palette.error(f"[{tag}]")
+        elif pct >= 60:
+            colored_tag = self.palette.warning(f"[{tag}]")
         else:
-            head = self.palette.accent(f"{self.model.id}@{self.profile.key}")
-        return f"{head} {SYMBOLS['prompt']} "
+            colored_tag = self.palette.muted(f"[{tag}]")
+        head = self.palette.accent(f"{self.model.id}@{self.profile.key}")
+        if self._sleeping:
+            head += " " + self.palette.muted("[休眠]")
+        return f"{head} {colored_tag} {SYMBOLS['prompt']} "
 
     def confirm_plan(self, plan: str) -> bool:
         """展示动作清单并做一次 [y/N] 确认；无 TTY 的测试可注入 confirm。"""
@@ -568,6 +591,7 @@ class Repl:
                 print()
                 print(self.palette.err(str(exc)), file=sys.stderr)
                 return None
+            self.last_turn = result
             if result.interrupted:
                 print(self.palette.warn("已中止生成"))
                 return result
@@ -993,58 +1017,135 @@ class Repl:
         return True
 
     def _cmd_status(self, rest: str) -> bool:
+        detail = self.verbose or rest.strip() == "-v"
         print(self.palette.meta(f"模型 {self.model.id} · {self.model.display}"))
         print(
             self.palette.meta(
                 f"档位 {self.profile.key} · {self.profile.desc}"
-                f" · ctx {self.profile.ctx} · KV {self.profile.kv_k}/{self.profile.kv_v}"
+                f" · ctx {self.profile.ctx} · KV "
+                f"{self.profile.kv_k}/{self.profile.kv_v}"
             )
         )
         if self.pending_profile is not None:
             print(
                 self.palette.meta(
-                    f"待生效档位 {self.pending_profile.key} · {self.pending_profile.desc}"
+                    f"待生效档位 {self.pending_profile.key} · "
+                    f"{self.pending_profile.desc}"
                 )
             )
         ready = bool(self.client and self.client.health())
         state = self.palette.ok("就绪") if ready else self.palette.err("停止")
         head = self.palette.meta(f"端口 {self.port}")
         print(f"{head}  {state}")
+
+        used = self.session.message_tokens()
+        total = self.profile.ctx
+        pct = (used / total * 100) if total > 0 else 0.0
+        bar = _context_bar(pct)
+        if pct >= 80:
+            bar_text = self.palette.error(bar)
+        elif pct >= 60:
+            bar_text = self.palette.warning(bar)
+        else:
+            bar_text = self.palette.muted(bar)
+        print(
+            self.palette.meta(
+                f"视窗监控 {bar_text} {pct:.1f}% · 已用 {used:,} / "
+                f"上限 {total:,} tokens · 剩余 {max(0, total - used):,}"
+            )
+        )
         if self._sleeping:
             print(self.palette.meta("空闲休眠中；输入任意内容自动唤醒"))
         else:
             remaining = self._watchdog.remaining()
             if remaining is not None and self.client is not None:
                 print(self.palette.meta(f"空闲倒计时 {remaining:.0f}s"))
+
+        memory = guard.gpu_memory()
+        if memory is not None:
+            gpu_used, gpu_total = memory
+            free = max(0, gpu_total - gpu_used)
+            print(
+                self.palette.meta(
+                    f"显存物理 GPU 已用 {gpu_used:,} MiB / "
+                    f"总量 {gpu_total:,} MiB · 余量 {free:,} MiB"
+                )
+            )
+        else:
+            gpu = guard.gpu_status()
+            print(
+                self.palette.meta(gpu)
+                if gpu
+                else self.palette.meta("GPU 信息不可用，nvidia-smi 未找到")
+            )
+
         records = launcher.read_records()
-        if records:
+        current = next(
+            (
+                record
+                for record in records
+                if record.model_id == self.model.id
+                and launcher.pid_running(record.pid)
+            ),
+            None,
+        )
+        if current is not None:
+            rss = guard.process_memory_kb(current.pid)
+            rss_text = f"{rss / 1024:.0f} MiB" if rss is not None else "-"
+            print(
+                self.palette.meta(
+                    f"系统进程 PID {current.pid} · RSS {rss_text} · "
+                    f"存活 {_format_uptime(current.started_at)}"
+                )
+            )
+        else:
+            print(self.palette.meta("系统进程 - · 无当前模型运行记录"))
+        if detail:
             for record in records:
                 alive = launcher.pid_running(record.pid)
-                if self.verbose:
-                    detail = (
+                print(
+                    self.palette.meta(
                         f"{record.model_id} PID {record.pid} 端口 {record.port}"
                         f" 档位 {record.profile} {'运行' if alive else '停止'}"
                     )
-                    print(self.palette.meta(detail))
-                else:
-                    state_text = (
-                        self.palette.ok("运行")
-                        if alive
-                        else self.palette.warn("残留")
-                    )
-                    print(self.palette.meta(f"{record.model_id} {state_text}"))
+                )
+
+        if self.last_turn is not None:
+            ttft = (
+                f"{self.last_turn.ttft_ms:.0f} ms"
+                if self.last_turn.ttft_ms is not None
+                else "-"
+            )
+            print(
+                self.palette.meta(
+                    f"最近推理 TTFT {ttft} · 生成 {self.last_turn.tps:.1f} t/s"
+                )
+            )
         else:
-            print(self.palette.meta("无运行记录，serve 会在 ~/.vanitas/run/ 下写入"))
-        gpu = guard.gpu_status()
-        print(
-            self.palette.meta(gpu)
-            if gpu
-            else self.palette.meta("GPU 信息不可用，nvidia-smi 未找到")
+            print(self.palette.meta("最近推理 TTFT - · 生成 -"))
+
+        loop = getattr(self, "loop", None)
+        if loop is not None:
+            print(
+                self.palette.meta(
+                    f"Agent 步数配额 {loop.steps}/{loop.max_steps}"
+                    f" · 熔断停滞计数 {loop.recent_count}/{loop.stagnation_limit}"
+                )
+            )
+        else:
+            print(
+                self.palette.meta(
+                    f"Agent 步数配额 -/{self.config.settings.agent.max_steps}"
+                    " · 熔断停滞计数 -/3"
+                )
+            )
+        rounds = sum(
+            1 for item in self.session.messages if item.get("role") == "assistant"
         )
         print(
             self.palette.meta(
-                f"会话 {len(self.session.messages)} 条消息"
-                f" · 约 {self.session.message_tokens()} tokens"
+                f"会话 {len(self.session.messages)} 条消息 "
+                f"({rounds} 轮交互) · 约 {used} tokens"
             )
         )
         return True

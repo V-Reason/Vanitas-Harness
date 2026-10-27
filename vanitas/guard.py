@@ -126,7 +126,8 @@ def _port_owner(port: int, host: str) -> tuple[int, str] | None:
     return None
 
 
-def _gpu_snapshot() -> str | None:
+def gpu_memory() -> tuple[int, int] | None:
+    """返回 (已用 MiB, 总量 MiB)；nvidia-smi 不可用/输出异常时 None。"""
     output = _run(
         [
             "nvidia-smi",
@@ -137,7 +138,32 @@ def _gpu_snapshot() -> str | None:
     line = output.strip().splitlines()[0] if output.strip() else ""
     fields = [item.strip() for item in line.split(",")]
     if len(fields) == 2 and all(item.isdigit() for item in fields):
-        return f"GPU 已用 {fields[0]} MiB / 总量 {fields[1]} MiB"
+        return int(fields[0]), int(fields[1])
+    return None
+
+
+def _gpu_snapshot() -> str | None:
+    memory = gpu_memory()
+    if memory is None:
+        return None
+    used, total = memory
+    return f"GPU 已用 {used} MiB / 总量 {total} MiB"
+
+
+def process_memory_kb(pid: int) -> int | None:
+    """通过 tasklist 读取进程工作集（KiB）；查询失败时 None。"""
+    if pid <= 0:
+        return None
+    output = _run(["tasklist", "/fi", f"pid eq {pid}", "/fo", "csv", "/nh"])
+    for line in output.splitlines():
+        if not line.strip().startswith('"'):
+            continue
+        fields = [field.strip('"') for field in line.strip().split('","')]
+        if len(fields) < 5 or not fields[1].isdigit():
+            continue
+        raw = fields[4].replace(",", "").replace("K", "").strip()
+        if raw.isdigit():
+            return int(raw)
     return None
 
 
