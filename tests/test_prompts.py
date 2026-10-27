@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from vanitas import prompts  # noqa: E402
+from vanitas.config import AGENT_ACTION_NAMES  # noqa: E402
 from vanitas.errors import ConfigError  # noqa: E402
 
 
@@ -119,7 +120,8 @@ class PromptTests(unittest.TestCase):
         self.assertIn("patch_file", text)
         self.assertIn("read_file_range", text)
         self.assertIn("grep_workspace", text)
-        self.assertIn("多动作原子批处理军规", text)
+        self.assertIn("单轮批量提交", text)
+        self.assertNotIn("原子", text)
         self.assertIn("git apply", text)
         self.assertIn("改扩展名", text)
         self.assertIn("move_file(src", text)
@@ -131,6 +133,77 @@ class PromptTests(unittest.TestCase):
         self.assertIn("{input}", text)
         self.assertIn("move_file", text)
         self.assertIn("patch_file", text)
+
+    def test_system_prompt_is_static_and_rejects_placeholders(self) -> None:
+        system = prompts.system_prompt(self.prompt_dir)
+        self.assertEqual(prompts.placeholders(system), set())
+        (self.temp_dir / "system_default.md").write_text(
+            "静态占位符 {date}\n", encoding="utf-8"
+        )
+        with self.assertRaises(ConfigError) as ctx:
+            prompts.system_prompt(self.temp_dir)
+        self.assertIn("全静态", str(ctx.exception))
+
+    def test_agent_prompt_matches_action_contract(self) -> None:
+        text = prompts.load_task(self.prompt_dir, "agent")
+        required = {
+            "read_file": ("path",),
+            "write_file": ("path", "content"),
+            "patch_file": ("path", "search", "replace"),
+            "read_file_range": ("path",),
+            "grep_workspace": ("pattern",),
+            "move_file": ("src", "dst"),
+            "delete_path": ("path",),
+            "delete_file": ("path",),
+            "list_dir": (),
+            "run_shell_ro": ("command",),
+        }
+        self.assertEqual(set(required), set(AGENT_ACTION_NAMES))
+        for name, fields in required.items():
+            self.assertIn(name, text)
+            for field in fields:
+                self.assertIn(field, text)
+        for optional in ("start_line", "end_line", "max_results"):
+            self.assertIn(optional, text)
+
+    def test_agent_prompt_avoids_false_semantics(self) -> None:
+        text = prompts.load_task(self.prompt_dir, "agent")
+        for phrase in ("_reason", "recursive", "原子", "二次确认", "100%"):
+            self.assertNotIn(phrase, text)
+        self.assertIn("一次确认", text)
+        self.assertIn("逐项执行", text)
+        self.assertIn("不回滚", text)
+
+    def test_dynamic_values_are_at_tail(self) -> None:
+        cases = {
+            "chat": ("{date}", "{model}"),
+            "code": ("{date}", "{model}"),
+            "agent": ("{cwd}", "{date}", "{model}"),
+        }
+        for name, variables in cases.items():
+            with self.subTest(task=name):
+                text = prompts.load_task(self.prompt_dir, name)
+                self.assertIn("<runtime_context>", text)
+                runtime = text.index("<runtime_context>")
+                input_index = text.index("{input}")
+                for variable in variables:
+                    index = text.index(variable)
+                    self.assertGreater(index, runtime)
+                    self.assertLess(index, input_index)
+
+    def test_asmr_prompt_uses_item_and_blank_id_contract(self) -> None:
+        text = prompts.load_task(self.prompt_dir, "translate_asmr")
+        for phrase in (
+            "[#N]",
+            "[#序号]",
+            "编号项",
+            "空",
+            "不新增",
+            "不合并",
+            "不重排",
+        ):
+            self.assertIn(phrase, text)
+        self.assertNotIn("输入 N 行", text)
 
     def test_unknown_placeholder_in_template_rejected(self) -> None:
         (self.temp_dir / "bad.md").write_text("hi {unknown}\n", encoding="utf-8")

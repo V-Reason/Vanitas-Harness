@@ -78,7 +78,13 @@ def render(template: str, values: dict | None = None) -> str:
 
 
 def system_prompt(prompt_dir: Path) -> str:
-    return load_template(prompt_dir, DEFAULT_SYSTEM)
+    text = load_template(prompt_dir, DEFAULT_SYSTEM)
+    found = placeholders(text)
+    if found:
+        raise ConfigError(
+            f"系统提示 {DEFAULT_SYSTEM}.md 必须全静态，发现占位符 {sorted(found)}"
+        )
+    return text
 
 
 def task_names(prompt_dir: Path) -> list[str]:

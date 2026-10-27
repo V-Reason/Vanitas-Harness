@@ -482,6 +482,21 @@ class TranslationEngineTests(unittest.TestCase):
             )
         self.assertEqual(engine._template, "CUSTOM {input}")
 
+    def test_translate_prompt_keeps_context_before_source(self) -> None:
+        client = FakeTranslationClient()
+        engine = self.make_engine(client)
+        engine.translate("alpha")
+
+        prompt = client.calls[0]["messages"][-1]["content"]
+        context_marker = "【参考前文背景"
+        source_marker = "【当前待翻译内容】"
+        self.assertIn(context_marker, prompt)
+        self.assertIn(source_marker, prompt)
+        self.assertLess(
+            prompt.index(context_marker), prompt.index(source_marker)
+        )
+        self.assertTrue(prompt.rstrip().endswith("alpha"))
+
     def test_context_sentinel_and_fifo(self) -> None:
         client = FakeTranslationClient()
         stats = []
