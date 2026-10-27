@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -68,6 +69,27 @@ class StagnationTests(unittest.TestCase):
         for item in sequence:
             result = self.loop._stagnates([item])
         return result, self.loop._stagnation_reason
+
+    def test_agent_limits_come_from_config(self) -> None:
+        agent_settings = replace(
+            self.config.settings.agent,
+            max_parse_retries=0,
+            stagnation_limit=2,
+            feedback_head_lines=3,
+            feedback_tail_lines=4,
+        )
+        config = replace(
+            self.config,
+            settings=replace(self.config.settings, agent=agent_settings),
+        )
+        loop = AgentLoop(
+            config,
+            AgentTools(config, self.root),
+            palette=Palette({}, enabled=False),
+        )
+        self.assertEqual(loop.max_parse_retries, 0)
+        self.assertEqual(loop.stagnation_limit, 2)
+        self.assertEqual(loop._recent.maxlen, 6)
 
     def test_classic_repeat(self) -> None:
         a = action("list_dir", path=".")

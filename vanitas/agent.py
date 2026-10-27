@@ -900,6 +900,8 @@ def _run_actions(
     max_feedback_chars: int,
     palette: Palette,
     failed_sink: dict[tuple[str, str], str] | None = None,
+    head_lines: int = 20,
+    tail_lines: int = 40,
 ) -> str:
     results: list[tuple[AgentAction, bool, str]] = []
     for action in actions:
@@ -933,7 +935,12 @@ def _run_actions(
             lines.append(f"{index}. {status}：{_summary(action)}")
             lines.append(f"   {detail.rstrip()}")
         body = "\n".join(lines)
-    clipped = _clip_feedback(body, max_feedback_chars)
+    clipped = _clip_feedback(
+        body,
+        max_feedback_chars,
+        head_lines=head_lines,
+        tail_lines=tail_lines,
+    )
     return f"<tool_result>\n{clipped}\n</tool_result>"
 
 
@@ -950,8 +957,8 @@ class AgentLoop:
         tools: AgentTools,
         *,
         max_steps: int | None = None,
-        max_parse_retries: int = 2,
-        stagnation_limit: int = 3,
+        max_parse_retries: int | None = None,
+        stagnation_limit: int | None = None,
         palette: Palette | None = None,
     ) -> None:
         self.config = config
@@ -960,9 +967,19 @@ class AgentLoop:
             config.settings.agent.max_steps if max_steps is None else max_steps
         )
         self.max_steps = max(1, int(configured_steps))
-        self.max_parse_retries = max(0, int(max_parse_retries))
+        configured_retries = (
+            config.settings.agent.max_parse_retries
+            if max_parse_retries is None
+            else max_parse_retries
+        )
+        self.max_parse_retries = max(0, int(configured_retries))
+        configured_stagnation = (
+            config.settings.agent.stagnation_limit
+            if stagnation_limit is None
+            else stagnation_limit
+        )
         # 连续 1 次相同动作没有判别意义；下限固定为 2。
-        self.stagnation_limit = max(2, int(stagnation_limit))
+        self.stagnation_limit = max(2, int(configured_stagnation))
         self.palette = palette or Palette({}, enabled=False)
         self._recent: deque[tuple[str, str]] = deque(
             maxlen=max(6, self.stagnation_limit)
@@ -995,6 +1012,8 @@ class AgentLoop:
             max_feedback_chars=self.config.settings.agent.max_feedback_chars,
             palette=self.palette,
             failed_sink=self._last_failed_signatures,
+            head_lines=self.config.settings.agent.feedback_head_lines,
+            tail_lines=self.config.settings.agent.feedback_tail_lines,
         )
 
     # ------------------------------------------------------------------ #
@@ -1180,8 +1199,8 @@ class AgentRepl(Repl):
         tools: AgentTools | None = None,
         max_steps: int | None = None,
         confirm: Callable[[str], bool] | None = None,
-        max_parse_retries: int = 2,
-        stagnation_limit: int = 3,
+        max_parse_retries: int | None = None,
+        stagnation_limit: int | None = None,
     ) -> None:
         super().__init__(
             config,
@@ -1256,6 +1275,8 @@ class AgentRepl(Repl):
             max_feedback_chars=self.config.settings.agent.max_feedback_chars,
             palette=self.palette,
             failed_sink=self.loop._last_failed_signatures,
+            head_lines=self.config.settings.agent.feedback_head_lines,
+            tail_lines=self.config.settings.agent.feedback_tail_lines,
         )
 
     def _execute(self, action: AgentAction) -> tuple[bool, str]:
