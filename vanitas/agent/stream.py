@@ -47,6 +47,21 @@ class _AgentAnswerStream:
         }
 
     def write(self, text: str) -> int:
+        if (
+            self._mode == "text"
+            and not self._line_start
+            and "<" not in text
+            and "\n" not in text
+            and "\r" not in text
+            and text
+        ):
+            # 快速路径：行中纯文本，无标签起点、无换行；换行会改变行首
+            # 状态并可能让后续 `{`/`[` 进入抑制，必须走慢速路径。
+            self._wrote = True
+            self._target.write(text)
+            self._target.flush()
+            self._line_start = text.endswith(("\n", "\r"))
+            return len(text)
         for char in text:
             self._feed(char)
         return len(text)

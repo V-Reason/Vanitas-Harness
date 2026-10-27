@@ -32,6 +32,7 @@ class Session:
         default_factory=lambda: datetime.now().isoformat(timespec="seconds")
     )
     is_dirty: bool = False
+    _cached_tokens: int | None = field(default=None, repr=False, compare=False)
 
     # ------------------------------------------------------------------ #
     # 消息
@@ -40,19 +41,23 @@ class Session:
     def add_user(self, content: str) -> None:
         self.messages.append({"role": "user", "content": content})
         self.is_dirty = True
+        self._cached_tokens = None
 
     def add_assistant(self, content: str) -> None:
         self.messages.append({"role": "assistant", "content": content})
         self.is_dirty = True
+        self._cached_tokens = None
 
     def pop_last_user(self) -> None:
         if self.messages and self.messages[-1]["role"] == "user":
             self.messages.pop()
             self.is_dirty = True
+            self._cached_tokens = None
 
     def clear_messages(self) -> None:
         self.messages.clear()
         self.is_dirty = False
+        self._cached_tokens = None
 
     def pop_last_turn(self) -> tuple[int, int]:
         """原子回退整轮人类交互。
@@ -77,6 +82,8 @@ class Session:
                 )
                 if not is_tool_feedback:
                     break
+        if popped:
+            self._cached_tokens = None
         released = max(0, initial_tokens - self.message_tokens())
         if popped:
             self.is_dirty = True
@@ -88,10 +95,12 @@ class Session:
         return list(self.messages)
 
     def message_tokens(self) -> int:
-        return sum(
-            estimate_tokens(str(item.get("content", ""))) + MESSAGE_OVERHEAD
-            for item in self.messages
-        )
+        if self._cached_tokens is None:
+            self._cached_tokens = sum(
+                estimate_tokens(str(item.get("content", ""))) + MESSAGE_OVERHEAD
+                for item in self.messages
+            )
+        return self._cached_tokens
 
     def collapse_intermediate_observations(
         self,
@@ -115,6 +124,7 @@ class Session:
         )
         if collapsed:
             self.is_dirty = True
+            self._cached_tokens = None
         return collapsed
 
     def trim(self, budget: int) -> int:
@@ -124,9 +134,11 @@ class Session:
             if len(self.messages) >= 2 and self.messages[0].get("role") == "user":
                 del self.messages[:2]
                 dropped += 1
+                self._cached_tokens = None
             else:
                 if self.messages:
                     self.messages.pop(0)
+                    self._cached_tokens = None
                 break
         if dropped:
             self.is_dirty = True

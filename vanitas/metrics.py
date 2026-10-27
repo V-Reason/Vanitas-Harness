@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 # CJK 统一表意文字、扩展 A、兼容表意文字，外加日文假名与韩文音节：
 # 估算 token 时这些字符都按「接近 1 token」处理。
@@ -30,7 +31,10 @@ MESSAGE_OVERHEAD = 4
 PROMPT_OVERHEAD = 8
 
 
-def estimate_tokens(text: str) -> int:
+_CACHE_CHAR_LIMIT = 1024
+
+
+def _estimate_tokens_uncached(text: str) -> int:
     """粗略估算：CJK 约 1 字 1 token，其它约 4 字符 1 token。"""
     if not text:
         return 0
@@ -41,6 +45,17 @@ def estimate_tokens(text: str) -> int:
             cjk += 1
     other = len(text) - cjk
     return max(1, cjk + (other + 3) // 4)
+
+
+@lru_cache(maxsize=2048)
+def _estimate_tokens_cached(text: str) -> int:
+    return _estimate_tokens_uncached(text)
+
+
+def estimate_tokens(text: str) -> int:
+    if len(text) <= _CACHE_CHAR_LIMIT:
+        return _estimate_tokens_cached(text)
+    return _estimate_tokens_uncached(text)
 
 
 def context_budget(ctx: int, max_context_tokens: int, reserve: int = 512) -> int:

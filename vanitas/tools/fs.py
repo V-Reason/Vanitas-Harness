@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+from functools import lru_cache
 from pathlib import Path
 
 from ..errors import ToolDenied
@@ -268,6 +269,11 @@ def read_file_range(
     return header + "\n".join(formatted)
 
 
+@lru_cache(maxsize=64)
+def _compile_pattern(pattern: str) -> re.Pattern[str]:
+    return re.compile(pattern, re.IGNORECASE)
+
+
 def grep_workspace(
     pattern: str,
     path: str = ".",
@@ -286,7 +292,7 @@ def grep_workspace(
     if not target_dir.is_dir():
         raise ToolDenied(f"检索路径不是目录：{path}")
     try:
-        regex = re.compile(pattern, re.IGNORECASE)
+        regex = _compile_pattern(pattern)
     except re.error as exc:
         raise ToolDenied(f"无效的正则表达式 {pattern!r}：{exc}") from exc
 
