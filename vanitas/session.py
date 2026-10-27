@@ -77,7 +77,8 @@ class Session:
         if budget <= 0 or threshold <= 0 or min_chars <= 0:
             return 0
         keep_messages = max(0, int(keep_rounds) * 2)
-        if len(self.messages) <= keep_messages:
+        # “超过 3 轮”至少是 7 条消息（3 轮 = 6 条）；最近 keep_rounds 轮另算。
+        if len(self.messages) <= max(keep_messages, 6):
             return 0
         if self.message_tokens() / budget <= threshold:
             return 0
