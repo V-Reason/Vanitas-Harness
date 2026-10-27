@@ -38,7 +38,8 @@ vanitas.bat agent        :: Agent 闭环；只读自动放行，修改动作确�
 vanitas.bat translate a.srt --preset subtitle :: 普通字幕（默认 8K Q4 / 12 条上下文）
 vanitas.bat translate novel.md --preset prose :: 小说/散文（8K Q4 / 10 条上下文 / 800 字符 chunk）
 vanitas.bat translate novels --preset prose --out-dir translated :: 递归翻译目录并保留子目录层级
-vanitas.bat translate novels --translate-name --out-dir translated :: 同时把英文/日文文件名译成中文
+vanitas.bat translate novels --translate-filename --out-dir translated :: 翻译内容+文件名，输出不加 .zh
+vanitas.bat translate media --translate-filename-only :: 只原地改名，支持 mp3/mp4/png 等任意文件
 vanitas.bat translate asmr.srt --preset asmr :: ASMR 字幕（8K Q4 / 6 行合流）
 vanitas.bat stop         :: 停止所有 llama-server
 ```

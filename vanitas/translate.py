@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -85,6 +86,19 @@ class TranslationPlan:
         if parent in (Path(), Path(".")):
             return self.source.path.name
         return (parent / self.source.path.name).as_posix()
+
+
+@dataclass(frozen=True)
+class NameTarget:
+    path: Path
+    is_dir: bool
+    translated_name: str | None = None
+
+
+@dataclass(frozen=True)
+class NameRename:
+    old: Path
+    new: Path
 
 
 @dataclass
@@ -214,9 +228,16 @@ class TranslationEngine:
     def translate_filename(self, filename: str) -> str:
         """用翻译模型把文件名主体译成中文；不写入正文上下文。"""
         path = Path(filename)
-        stem = path.stem.strip()
+        return self._translate_name(path.stem, path.suffix, filename)
+
+    def translate_dirname(self, dirname: str) -> str:
+        """翻译目录名整体，不把点号当扩展名剥离。"""
+        return self._translate_name(dirname, "", dirname)
+
+    def _translate_name(self, name: str, source_suffix: str, label: str) -> str:
+        stem = name.strip()
         if not stem:
-            raise TranslateError(f"文件名为空，无法翻译：{filename!r}")
+            raise TranslateError(f"名称为空，无法翻译：{label!r}")
         messages: list[dict] = []
         if self._system.strip():
             messages.append({"role": "system", "content": self._system})
@@ -236,12 +257,12 @@ class TranslationEngine:
         if choices and isinstance(choices[0], dict):
             finish_reason = str(choices[0].get("finish_reason") or "")
         if finish_reason == "length":
-            raise TranslateError(f"文件名翻译输出被截断：{filename}")
+            raise TranslateError(f"名称翻译输出被截断：{label}")
         translated = sanitize_filename_stem(
-            extract_content(result), path.suffix
+            extract_content(result), source_suffix
         )
         if not translated:
-            raise TranslateError(f"文件名翻译结果为空：{filename}")
+            raise TranslateError(f"名称翻译结果为空：{label}")
         return translated
 
     # ------------------------------------------------------------------ #
@@ -860,15 +881,181 @@ def collect_translate_inputs(
     return collected
 
 
+def collect_name_targets(inputs: list[Path]) -> list[NameTarget]:
+    """收集只改名模式的目标：显式文件本身 + 目录下的文件/子目录。
+
+    传入的根目录本身不重命名，避免把用户当前目录或仓库根整体改掉；
+    隐藏文件和隐藏目录不进入递归，防止误改 ``.git`` 等。
+    """
+    targets: list[NameTarget] = []
+    seen: set[str] = set()
+
+    def add(path: Path, is_dir: bool) -> None:
+        key = _path_key(path)
+        if key in seen:
+            return
+        seen.add(key)
+        targets.append(NameTarget(path=path, is_dir=is_dir))
+
+    for raw in inputs:
+        path = Path(raw)
+        if path.is_dir():
+            found = 0
+            errors: list[OSError] = []
+
+            def on_error(exc: OSError) -> None:
+                errors.append(exc)
+
+            for root, dirs, files in os.walk(
+                path, topdown=True, onerror=on_error, followlinks=False
+            ):
+                root_path = Path(root)
+                dirs[:] = sorted(
+                    (name for name in dirs if not name.startswith(".")),
+                    key=str.lower,
+                )
+                files = sorted(
+                    (name for name in files if not name.startswith(".")),
+                    key=str.lower,
+                )
+                for name in dirs:
+                    add(root_path / name, True)
+                    found += 1
+                for name in files:
+                    child = root_path / name
+                    if child.is_file() or child.is_symlink():
+                        add(child, False)
+                        found += 1
+            if errors:
+                first = errors[0]
+                detail = first.strerror or str(first)
+                raise TranslateError(
+                    f"遍历目录失败：{first.filename or path}；{detail}"
+                ) from first
+            if found == 0:
+                raise TranslateError(f"目录中没有可重命名的文件或子目录：{path}")
+        elif path.is_file() or path.is_symlink():
+            add(path, False)
+        else:
+            raise TranslateError(f"路径不存在或不是文件/目录：{path}")
+
+    if not targets:
+        raise TranslateError("没有可重命名的文件或目录")
+    return targets
+
+
+def plan_name_renames(targets: list[NameTarget]) -> list[NameRename]:
+    """生成并校验只改名计划；不触碰文件内容。"""
+    renames: list[NameRename] = []
+    new_keys: dict[str, NameRename] = {}
+    old_keys = {_path_key(target.path) for target in targets}
+    moved_old: set[str] = set()
+
+    for target in targets:
+        if target.translated_name is None:
+            raise TranslateError(f"缺少译名：{target.path}")
+        old = target.path
+        if target.is_dir:
+            new_name = sanitize_filename_stem(target.translated_name, "")
+        else:
+            base = sanitize_filename_stem(target.translated_name, old.suffix)
+            new_name = f"{base}{old.suffix}" if base else ""
+        if not new_name:
+            raise TranslateError(f"译名为空或不可用：{old}")
+        if new_name == old.name:
+            continue
+        new_path = old.with_name(new_name)
+        key = _path_key(new_path)
+        if key in new_keys:
+            raise TranslateError(
+                f"译名冲突：{new_keys[key].old} 与 {old} 都会变成 {new_path}"
+            )
+        rename = NameRename(old=old, new=new_path)
+        new_keys[key] = rename
+        moved_old.add(_path_key(old))
+        renames.append(rename)
+
+    for rename in renames:
+        key = _path_key(rename.new)
+        if key in old_keys and key not in moved_old:
+            raise TranslateError(
+                f"译名会占用未移动的源名称：{rename.old} → {rename.new}；"
+                "请调整译名或先移动同名目标"
+            )
+        if rename.new.exists() and key not in moved_old:
+            raise TranslateError(
+                f"目标名称已存在：{rename.new}；请调整译名或先移动同名目标"
+            )
+    return renames
+
+
+def _rename_temp(path: Path) -> Path:
+    for _ in range(10):
+        candidate = path.with_name(f".vanitas-rename-{uuid.uuid4().hex}")
+        if not candidate.exists():
+            return candidate
+    raise TranslateError(f"无法生成临时文件名：{path}")
+
+
+def apply_name_renames(renames: list[NameRename]) -> None:
+    """按深度从深到浅、每层两阶段重命名，支持交换与纯大小写变化。"""
+    groups: dict[int, list[NameRename]] = {}
+    for rename in renames:
+        groups.setdefault(len(rename.old.parts), []).append(rename)
+
+    for depth in sorted(groups, reverse=True):
+        group = sorted(groups[depth], key=lambda item: str(item.old).lower())
+        staged: list[tuple[NameRename, Path]] = []
+        try:
+            for rename in group:
+                temp = _rename_temp(rename.old)
+                rename.old.rename(temp)
+                staged.append((rename, temp))
+        except OSError as exc:
+            for rename, temp in reversed(staged):
+                try:
+                    temp.rename(rename.old)
+                except OSError:
+                    pass
+            raise TranslateError(
+                f"重命名失败：{exc.filename or exc}；已尝试回滚当前层"
+            ) from exc
+
+        completed: list[tuple[NameRename, Path]] = []
+        try:
+            for rename, temp in staged:
+                temp.rename(rename.new)
+                completed.append((rename, temp))
+        except OSError as exc:
+            for rename, temp in reversed(completed):
+                try:
+                    rename.new.rename(temp)
+                except OSError:
+                    pass
+            for rename, temp in reversed(staged):
+                try:
+                    if temp.exists():
+                        temp.rename(rename.old)
+                except OSError:
+                    pass
+            raise TranslateError(
+                f"重命名失败：{exc.filename or exc}；已尝试回滚当前层"
+            ) from exc
+
+
 def plan_translation_outputs(
     sources: list[TranslationSource],
     settings: TranslateSettings,
     out_dir: Path | None,
+    *,
+    output_suffix: str | None = None,
 ) -> list[TranslationPlan]:
     """计算输出路径并在写盘前拦截冲突，避免静默覆盖。
 
     --out-dir 存在时，目录输入保留相对层级；直接指定的文件仍平铺在输出根。
+    output_suffix 为 None 时使用 settings.output_suffix；传空串可用于“译名不加 .zh”。
     """
+    suffix = settings.output_suffix if output_suffix is None else output_suffix
     plans: list[TranslationPlan] = []
     targets: dict[str, TranslationSource] = {}
     source_keys = {_path_key(item.path) for item in sources}
@@ -878,7 +1065,7 @@ def plan_translation_outputs(
         target = output_path(
             source.path,
             target_dir,
-            settings.output_suffix,
+            suffix,
             source.translated_stem,
         )
         key = _path_key(target)
@@ -907,6 +1094,7 @@ def translate_file(
     *,
     out_dir: Path | None = None,
     output_stem: str | None = None,
+    output_suffix: str | None = None,
     on_segment: Callable[[int, int], None] | None = None,
     window_size: int = 1,
     max_window_chars: int = 250,
@@ -949,7 +1137,10 @@ def translate_file(
         )
 
     target = output_path(
-        source, out_dir, settings.output_suffix, output_stem
+        source,
+        out_dir,
+        settings.output_suffix if output_suffix is None else output_suffix,
+        output_stem,
     )
     try:
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -64,6 +64,12 @@ class NamingClient(FakeClient):
                 content = "时钟"
             elif "Station" in name:
                 content = "车站"
+            elif "English Dir" in name:
+                content = "中文目录"
+            elif "Clip" in name:
+                content = "片段"
+            elif "cover" in name:
+                content = "封面"
             else:
                 content = "译名"
             return {"choices": [{"message": {"content": content}}]}
@@ -180,9 +186,9 @@ class CliSmokeTests(unittest.TestCase):
                     ]
                 )
         self.assertEqual(code, 0, err)
-        self.assertTrue((out_dir / "时钟.zh.md").is_file())
-        self.assertFalse((out_dir / "The Clock.zh.md").exists())
-        self.assertIn("The Clock.md → 时钟.zh.md", err)
+        self.assertTrue((out_dir / "时钟.md").is_file())
+        self.assertFalse((out_dir / "时钟.zh.md").exists())
+        self.assertIn("The Clock.md → 时钟.md", err)
 
     def test_translate_filename_directory_names(self) -> None:
         source_dir = self.dir / "src"
@@ -204,8 +210,8 @@ class CliSmokeTests(unittest.TestCase):
                     ]
                 )
         self.assertEqual(code, 0, err)
-        self.assertTrue((out_dir / "时钟.zh.md").is_file())
-        self.assertTrue((out_dir / "车站.zh.md").is_file())
+        self.assertTrue((out_dir / "时钟.md").is_file())
+        self.assertTrue((out_dir / "车站.md").is_file())
 
     def test_translate_filename_collision_is_rejected(self) -> None:
         source_dir = self.dir / "src"
@@ -228,7 +234,49 @@ class CliSmokeTests(unittest.TestCase):
                 )
         self.assertEqual(code, 5)
         self.assertIn("输出路径冲突", err)
-        self.assertFalse((out_dir / "译名.zh.md").exists())
+        self.assertFalse((out_dir / "译名.md").exists())
+
+    def test_translate_filename_only_renames_media_without_content(self) -> None:
+        root = self.dir / "media"
+        folder = root / "English Dir"
+        folder.mkdir(parents=True)
+        clip = folder / "Clip.mp4"
+        clip.write_bytes(b"\x00\x01\xff")
+        cover = folder / "cover.jpg"
+        cover.write_bytes(b"\xff\xd8\xff")
+        with clean_env():
+            with mock.patch.object(
+                cli, "_ensure_engine", return_value=(NamingClient(), 4060)
+            ):
+                code, out, err = run(
+                    ["translate", str(root), "--translate-filename-only"]
+                )
+        self.assertEqual(code, 0, err)
+        target_dir = root / "中文目录"
+        self.assertTrue((target_dir / "片段.mp4").is_file())
+        self.assertTrue((target_dir / "封面.jpg").is_file())
+        self.assertEqual((target_dir / "片段.mp4").read_bytes(), b"\x00\x01\xff")
+        self.assertFalse(folder.exists())
+        self.assertIn("完成，重命名 3 项", out)
+
+    def test_translate_filename_only_rejects_out_dir(self) -> None:
+        source = self.dir / "clip.mp3"
+        source.write_bytes(b"\x00")
+        out_dir = self.dir / "out"
+        with clean_env():
+            with mock.patch.object(cli, "_ensure_engine") as engine:
+                code, _out, err = run(
+                    [
+                        "translate",
+                        str(source),
+                        "--translate-filename-only",
+                        "--out-dir",
+                        str(out_dir),
+                    ]
+                )
+        self.assertEqual(code, 4)
+        self.assertIn("不支持 --out-dir", err)
+        engine.assert_not_called()
 
     def test_translate_missing_file_exit_5(self) -> None:
         with clean_env():
@@ -252,6 +300,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("--preset", out)
         self.assertIn("--translate-name", out)
+        self.assertIn("--translate-filename-only", out)
 
     def test_translate_unknown_preset_exit_4(self) -> None:
         with clean_env():

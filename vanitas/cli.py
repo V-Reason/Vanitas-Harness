@@ -128,12 +128,19 @@ def _build_parser() -> argparse.ArgumentParser:
     translate_cmd.add_argument(
         "--out-dir", default=None, help="输出目录；目录输入会保留相对层级，默认与原文件同目录"
     )
-    translate_cmd.add_argument(
+    translate_mode = translate_cmd.add_mutually_exclusive_group()
+    translate_mode.add_argument(
         "--translate-name",
         "--translate-filename",
         dest="translate_name",
         action="store_true",
-        help="先用翻译模型把源文件名主体译成中文，再拼输出后缀与扩展名",
+        help="翻译文件名（不加 .zh）并翻译文件内容",
+    )
+    translate_mode.add_argument(
+        "--translate-filename-only",
+        dest="translate_name_only",
+        action="store_true",
+        help="只原地翻译文件名/目录名，不翻译内容；支持任意文件类型，不加 .zh",
     )
     translate_cmd.add_argument("--jobs", type=int, default=1, help="并发数；引擎为 -np 1，实际串行")
     translate_cmd.add_argument(
@@ -406,6 +413,24 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
     if out_dir is not None and out_dir.exists() and not out_dir.is_dir():
         print(palette.err(f"输出路径不是目录：{out_dir}"), file=sys.stderr)
         return 4
+    if args.translate_name_only:
+        if out_dir is not None:
+            print(
+                palette.err("--translate-filename-only 为原地重命名，不支持 --out-dir"),
+                file=sys.stderr,
+            )
+            return 4
+        return _cmd_translate_names(
+            config,
+            args,
+            palette,
+            model,
+            profile,
+            preset_name,
+            task_template,
+            effective,
+        )
+    content_suffix = "" if args.translate_name else None
     try:
         sources = translate.collect_translate_inputs(
             [_resolve_cli_path(raw) for raw in args.inputs],
@@ -418,7 +443,9 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
     plans: list[translate.TranslationPlan] = []
     if not args.translate_name:
         try:
-            plans = translate.plan_translation_outputs(sources, effective, out_dir)
+            plans = translate.plan_translation_outputs(
+                sources, effective, out_dir, output_suffix=content_suffix
+            )
         except TranslateError as exc:
             print(palette.err(str(exc)), file=sys.stderr)
             return 5
@@ -458,7 +485,9 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
             translated.append(replace(source, translated_stem=stem))
         sources = translated
         try:
-            plans = translate.plan_translation_outputs(sources, effective, out_dir)
+            plans = translate.plan_translation_outputs(
+                sources, effective, out_dir, output_suffix=content_suffix
+            )
         except TranslateError as exc:
             print(palette.err(str(exc)), file=sys.stderr)
             return 5
@@ -484,6 +513,7 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                 effective,
                 out_dir=plan.out_dir,
                 output_stem=plan.source.translated_stem,
+                output_suffix=content_suffix,
                 window_size=window_size,
                 max_window_chars=max_window_chars,
             )
@@ -521,6 +551,75 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
             file=sys.stderr,
         )
         return 5
+    return 0
+
+
+def _cmd_translate_names(
+    config: AppConfig,
+    args: argparse.Namespace,
+    palette: Palette,
+    model: ModelSpec,
+    profile,
+    preset_name: str,
+    task_template: str,
+    settings: TranslateSettings,
+) -> int:
+    try:
+        targets = translate.collect_name_targets(
+            [_resolve_cli_path(raw) for raw in args.inputs]
+        )
+    except TranslateError as exc:
+        print(palette.err(str(exc)), file=sys.stderr)
+        return 5
+    chat, _port = _translate_chat(
+        config,
+        model,
+        profile,
+        palette,
+        task_template=task_template,
+        translate_settings=settings,
+    )
+    translate_filename = getattr(chat, "translate_filename", None)
+    translate_dirname = getattr(chat, "translate_dirname", None)
+    if not callable(translate_filename) or not callable(translate_dirname):
+        print(
+            palette.err("当前翻译引擎不支持文件名/目录名翻译"),
+            file=sys.stderr,
+        )
+        return 5
+    print(
+        palette.meta(
+            f"{model.display} · 档位 {profile.key} · 预设 {preset_name}"
+            f" · {len(targets)} 个名称"
+        )
+    )
+    translated: list[translate.NameTarget] = []
+    for target in targets:
+        try:
+            name = (
+                translate_dirname(target.path.name)
+                if target.is_dir
+                else translate_filename(target.path.name)
+            )
+        except (EngineError, TranslateError) as exc:
+            print(
+                palette.err(f"{target.path.name}：名称翻译失败：{exc}"),
+                file=sys.stderr,
+            )
+            return 5
+        translated.append(replace(target, translated_name=name))
+    try:
+        renames = translate.plan_name_renames(translated)
+        translate.apply_name_renames(renames)
+    except TranslateError as exc:
+        print(palette.err(str(exc)), file=sys.stderr)
+        return 5
+    if not renames:
+        print(palette.ok("没有需要重命名的名称"))
+        return 0
+    for rename in renames:
+        print(palette.ok(f"{rename.old.name} → {rename.new.name}"))
+    print(palette.ok(f"完成，重命名 {len(renames)} 项"))
     return 0
 
 

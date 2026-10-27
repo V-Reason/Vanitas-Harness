@@ -16,12 +16,16 @@ if str(ROOT) not in sys.path:
 from vanitas.config import TranslateSettings  # noqa: E402
 from vanitas.errors import EngineError, TranslateError  # noqa: E402
 from vanitas.translate import (  # noqa: E402
+    NameTarget,
     TranslationEngine,
     TranslationOptions,
+    apply_name_renames,
     chunk_text,
+    collect_name_targets,
     collect_translate_inputs,
     parse_srt,
     parse_window_response,
+    plan_name_renames,
     plan_translation_outputs,
     rebuild_srt,
     sanitize_filename_stem,
@@ -505,8 +509,10 @@ class InputDiscoveryTests(unittest.TestCase):
         source = collect_translate_inputs([self.dir / "The Clock.md"], SETTINGS)
         source = [replace(source[0], translated_stem="时钟")]
         out_dir = self.dir / "out"
-        plans = plan_translation_outputs(source, SETTINGS, out_dir)
-        self.assertEqual(plans[0].target, out_dir / "时钟.zh.md")
+        plans = plan_translation_outputs(
+            source, SETTINGS, out_dir, output_suffix=""
+        )
+        self.assertEqual(plans[0].target, out_dir / "时钟.md")
 
     def test_plan_rejects_colliding_outputs(self) -> None:
         first = self.dir / "first"
@@ -540,6 +546,94 @@ class InputDiscoveryTests(unittest.TestCase):
         self.assertEqual(
             self.relative(sources), ["A.md", "b.md", "sub/C.md", "sub/z.md"]
         )
+
+
+class NameOnlyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+
+    def write(self, name: str, data: bytes = b"x") -> Path:
+        path = self.dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return path
+
+    def test_collect_accepts_arbitrary_suffixes_but_skips_hidden(self) -> None:
+        self.write("Clip.mp4", b"\x00\x01")
+        self.write("cover.JPG", b"\xff\xd8")
+        self.write("sub/track.wav", b"RIFF")
+        self.write(".hidden.mp3")
+        self.write(".git/config")
+
+        targets = collect_name_targets([self.dir])
+        relative = {
+            (target.path.relative_to(self.dir).as_posix(), target.is_dir)
+            for target in targets
+        }
+        self.assertEqual(
+            relative,
+            {
+                ("Clip.mp4", False),
+                ("cover.JPG", False),
+                ("sub", True),
+                ("sub/track.wav", False),
+            },
+        )
+
+    def test_explicit_arbitrary_file_is_accepted(self) -> None:
+        source = self.write("sound.flac", b"fLaC")
+        targets = collect_name_targets([source])
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].path, source)
+        self.assertFalse(targets[0].is_dir)
+
+    def test_plan_keeps_file_suffix_and_replaces_directory_name(self) -> None:
+        file_path = self.write("Clip.mp4")
+        dir_path = self.write("sub/track.wav").parent
+        renames = plan_name_renames(
+            [
+                NameTarget(file_path, False, "片段"),
+                NameTarget(dir_path, True, "子目录"),
+            ]
+        )
+        by_old = {rename.old: rename.new for rename in renames}
+        self.assertEqual(by_old[file_path], file_path.with_name("片段.mp4"))
+        self.assertEqual(by_old[dir_path], dir_path.with_name("子目录"))
+
+    def test_plan_rejects_translated_name_collision(self) -> None:
+        first = self.write("one.mp3")
+        second = self.write("two.mp3")
+        with self.assertRaisesRegex(TranslateError, "译名冲突"):
+            plan_name_renames(
+                [
+                    NameTarget(first, False, "同名"),
+                    NameTarget(second, False, "同名"),
+                ]
+            )
+
+    def test_plan_rejects_existing_unmoved_target(self) -> None:
+        source = self.write("one.mp3")
+        self.write("目标.mp3")
+        with self.assertRaisesRegex(TranslateError, "已存在"):
+            plan_name_renames([NameTarget(source, False, "目标")])
+
+    def test_apply_renames_nested_file_and_directory(self) -> None:
+        source = self.write("English Dir/Clip.mp4", b"\x00\x01\x02")
+        directory = source.parent
+        renames = plan_name_renames(
+            [
+                NameTarget(directory, True, "中文目录"),
+                NameTarget(source, False, "片段"),
+            ]
+        )
+        apply_name_renames(renames)
+
+        target = self.dir / "中文目录" / "片段.mp4"
+        self.assertTrue(target.is_file())
+        self.assertEqual(target.read_bytes(), b"\x00\x01\x02")
+        self.assertFalse((self.dir / "English Dir").exists())
 
 
 class FakeTranslationClient:
