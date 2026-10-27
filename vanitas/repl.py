@@ -919,7 +919,7 @@ class Repl:
         loop = getattr(self, "loop", None)
         if loop is not None:
             loop._recent.clear()
-            loop._last_failed_signatures.clear()
+            loop._failed_signatures.clear()
             loop._stagnation_reason = ""
             loop.steps = 0
             loop.parse_retries = 0

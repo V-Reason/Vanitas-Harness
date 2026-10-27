@@ -135,7 +135,11 @@ class StagnationTests(unittest.TestCase):
             '<tool_call>[{"action":"patch_file","parameters":'
             '{"path":"missing.py","search":"a","replace":"b"}}]</tool_call>'
         )
-        answers = iter([turn(bad), turn(bad), turn("done")])
+        read = (
+            '<tool_call>[{"action":"list_dir","parameters":'
+            '{"path":"."}}]</tool_call>'
+        )
+        answers = iter([turn(bad), turn(read), turn(bad), turn("done")])
         confirm = mock.Mock(return_value=True)
 
         def converse(_text, _feedback, _stream):
@@ -155,8 +159,28 @@ class StagnationTests(unittest.TestCase):
         )
         self.assertEqual(confirm.call_count, 1)
         self.assertIn("不再二次确认", out + err)
-        self.assertIn("已失败", out + err)
-        self.assertIsNotNone(self.loop._last_failed_signatures)
+        self.assertIn("此前已失败", out + err)
+        self.assertIsNotNone(self.loop._failed_signatures)
+
+    def test_batch_round_oscillation_is_detected(self) -> None:
+        patches = [
+            action("patch_file", path=f"a{i}.txt", search="a", replace="b")
+            for i in range(7)
+        ]
+        reads = [
+            action(
+                "read_file_range",
+                path=f"a{i}.txt",
+                start_line=1,
+                end_line=10,
+            )
+            for i in range(7)
+        ]
+        result = False
+        for round_actions in (patches, reads, patches, reads):
+            result = self.loop._stagnates(round_actions)
+        self.assertTrue(result)
+        self.assertEqual(self.loop._stagnation_reason, "批次震荡")
 
 
 class DeletePathTests(unittest.TestCase):

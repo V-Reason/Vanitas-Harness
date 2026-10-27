@@ -624,7 +624,11 @@ def patch_file(
     target = _require_path(path, root)
     try:
         if not target.is_file():
-            raise ToolDenied(f"目标文件不存在：{path}")
+            raise ToolDenied(
+                f"目标文件不存在：{path}。"
+                "若目标是重命名或改扩展名，请改用 move_file(src, dst)；"
+                "patch_file 只修改已有文件的内容。"
+            )
         size = target.stat().st_size
         if size > max_bytes:
             raise ToolDenied(
@@ -646,7 +650,8 @@ def patch_file(
     if count == 0:
         raise ToolDenied(
             f"未在文件 {path} 中找到完全匹配的代码片段。"
-            "请先调用 read_file_range 核对最新内容。"
+            "请先调用 read_file_range 核对最新内容；"
+            "若目标是重命名或改扩展名，请改用 move_file(src, dst)。"
         )
     if count > 1:
         raise ToolDenied(

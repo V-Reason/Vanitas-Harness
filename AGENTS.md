@@ -108,7 +108,7 @@
 # 1) 语法
 Get-ChildItem vanitas\*.py, tests\test_*.py | ForEach-Object { python -m py_compile $_.FullName }
 
-# 2) 单测（当前 352 例）
+# 2) 单测（当前 353 例）
 python -m unittest discover -s tests
 python -m unittest tests.test_agent_parser
 
@@ -148,7 +148,8 @@ python -m vanitas stop
 - AgentTools 新增 `patch_file`、`read_file_range`、`grep_workspace`；全部走 `_require_path`。`patch_file` 需确认，另两项只读自动放行；大文件优先 `read_file_range`/`grep_workspace`，小改优先 `patch_file`，多文件必须单轮动作数组。
 - `delete_path` 递归删除文件/目录，`delete_file` 为兼容别名；工作区根目录、父级与越界路径硬拒绝，符号链接只删链接本身。`/undo`/`/pop`/`/rollback` 回滚最近一轮并释放 tokens。
 - 提示符常驻 `[ctx: N% | Xk/Yk]`，`/status` 展示视窗进度条、GPU/进程、TTFT/tps 与 Agent 步数；会话超 65% 时自动折叠旧 `<tool_result>` 观测，动作签名与最近两轮保留。
-- 停滞熔断覆盖连续、A-B 乒乓、A-B-C 周期与 6 步内同签名 ≥3 次；上一批失败的同参数动作下一次不二次确认、直接回填错误。
+- 停滞熔断覆盖连续、A-B 乒乓、A-B-C 周期、6 步内同签名 ≥3 次，以及批次级重复/乒乓；失败签名在本轮内持久保留，即使中间穿插只读读取，原参数再提交也不二次确认、直接回填错误。
+- 重命名/改扩展名只允许 `move_file(src,dst)`；`patch_file` 只改内容。Prompt 明确禁止用 `patch_file` 绕文件名变更。
 - 可配扩展：`settings.defaults`（四模式默认模型）、`agent.max_parse_retries/stagnation_limit/feedback_head_lines/feedback_tail_lines`、`tools.max_capture_bytes`、`repl.ctx_warn_pct/ctx_danger_pct/status_bar_width`。默认值保持 2/3/20/40、512 KiB、60/80/20。
 - CLI 相对路径（`translate` 输入/`--out-dir`、`batch` 的 JSONL、`--system`、`--config-dir`）统一按 `VANITAS_ORIG_CWD` 解析；`vanitas.bat` 切仓库根不影响用户在启动目录使用相对路径。
 - 并发（`-np 1`）、长上下文质量、持续压测、TTY 交互、`--foreground`、`.md/.txt` 真机翻译、5xx 重试路径尚未验证。
