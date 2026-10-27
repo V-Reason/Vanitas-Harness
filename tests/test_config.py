@@ -68,10 +68,10 @@ class ConfigTests(unittest.TestCase):
     def test_repo_config_loads(self) -> None:
         with clean_env():
             config = load_config()
-        self.assertEqual(len(config.models), 3)
+        self.assertEqual(len(config.models), 4)
         self.assertEqual(
             [config.effective_port(model) for model in config.models],
-            [4060, 4061, 4062],
+            [4060, 4063, 4061, 4062],
         )
         qwen = config.model("qwen7b")
         self.assertEqual(qwen.shards, 2)
@@ -79,6 +79,16 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(qwen.alias, "qwen2.5-7b-instruct-q6_k")
         self.assertEqual(config.resolve_profile(qwen).key, "1")
         self.assertEqual(config.model_by_role("translate").id, "hymt")
+        self.assertEqual(config.model_by_role("general").id, "qwen_coder")
+        coder = config.model("qwen_coder")
+        self.assertEqual(coder.shards, 1)
+        self.assertEqual(coder.repeat_penalty, 1.05)
+        self.assertEqual(
+            [coder.profiles[key].ctx for key in coder.profile_keys],
+            [8192, 16384, 32768],
+        )
+        self.assertEqual(coder.profiles["1"].kv_k, "q8_0")
+        self.assertEqual(coder.profiles["2"].kv_k, "q4_0")
         self.assertTrue(config.models[0].template_kwargs["enable_thinking"] is False)
         self.assertEqual(qwen.repeat_penalty, 1.1)
 
@@ -325,7 +335,7 @@ class ConfigTests(unittest.TestCase):
                 self.load()
 
     def test_shard_entry_must_be_first(self) -> None:
-        self.models["models"][0]["path"] = "models/qwen2.5-7b-instruct-q6_k-00002-of-00002.gguf"
+        self.models["models"][1]["path"] = "models/qwen2.5-7b-instruct-q6_k-00002-of-00002.gguf"
         self.write_models()
         with clean_env():
             with self.assertRaises(ConfigError) as ctx:

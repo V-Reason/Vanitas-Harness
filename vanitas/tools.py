@@ -384,48 +384,65 @@ def _execute(
     )
 
 
+def _execute_shell(config: AppConfig, command: str, cwd: Path) -> ExecResult:
+    """用户 `/exec` 的原生 shell 执行；只保留超时与 512 KiB 抓取上限。"""
+    timeout = config.settings.request.timeout_sec
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(cwd),
+            capture_output=True,
+            timeout=timeout,
+            shell=True,
+            creationflags=_NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ToolDenied(f"命令超过 {timeout:.0f}s 未结束，已终止：{command}") from exc
+    except OSError as exc:
+        raise ToolDenied(f"命令启动失败：{exc.strerror or exc}") from exc
+    raw_stdout = completed.stdout or b""
+    raw_stderr = completed.stderr or b""
+    stdout_bytes, stdout_truncated, stdout_omitted = _truncate_bytes(raw_stdout)
+    stderr_bytes, stderr_truncated, stderr_omitted = _truncate_bytes(raw_stderr)
+    stdout = _decode(stdout_bytes)
+    stderr = _decode(stderr_bytes)
+    if stdout_truncated:
+        stdout = _append_capture_warning(stdout, "标准输出", stdout_omitted)
+    if stderr_truncated:
+        stderr = _append_capture_warning(stderr, "标准错误", stderr_omitted)
+    return ExecResult(
+        command=command,
+        exit_code=completed.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
 def run_exec(
     config: AppConfig,
     command: str,
     *,
     confirm: Callable[[str], str] | None = None,
 ) -> ExecResult:
-    """手动 `/exec`：保持逐次确认与仓库根边界，不复用 Agent 的只读策略。"""
+    """人类用户的 `/exec`：原生 shell，无白名单/目录限制；AgentTools 不受影响。"""
     if not command.strip():
         raise ToolDenied("用法：/exec <命令>")
-    tokens = split_command(command)
     settings = config.settings.tools
-    if _destructive_verb(tokens, settings.destructive_commands) is not None:
-        targets = _is_destructive_command(tokens, settings.destructive_commands)
-        if not targets:
-            if not any(token in _HELP_SWITCHES for token in tokens):
-                raise ToolDenied("安全限制：破坏性命令必须显式指定目标路径")
-        else:
-            outside = [
-                path for path in targets if not _is_safe_path(path, config.base_dir)
-            ]
-            if outside:
-                raise ToolDenied(
-                    "安全限制：禁止修改或删除工作目录之外的文件/目录；"
-                    f"越界路径：{'；'.join(outside)}"
-                )
     if not settings.exec_enabled:
         raise ToolDenied(
             "本地命令执行已关闭；如需启用，把 config\\settings.json 的 "
             "tools.exec_enabled 改为 true 后重试"
-        )
-    if not is_whitelisted(command, settings.manual_exec_prefixes):
-        raise ToolDenied(
-            f"命令不在兼容白名单内：{command}；"
-            f"允许的前缀：{'；'.join(settings.manual_exec_prefixes)}"
         )
     if settings.exec_require_confirm:
         answer = (confirm or _ask)(f"执行本地命令？\n  {command}\n[y/N] ")
         if answer.strip().lower() not in {"y", "yes", "是"}:
             raise ToolDenied(_CANCEL_MESSAGE)
 
-    argv = resolve_argv(command)
-    return _execute(config, command, argv, config.base_dir)
+    original = os.environ.get("VANITAS_ORIG_CWD") or os.getcwd()
+    cwd = Path(original).expanduser()
+    if not cwd.is_dir():
+        cwd = Path.cwd()
+    return _execute_shell(config, command, cwd)
 
 
 # --------------------------------------------------------------------------- #

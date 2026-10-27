@@ -255,8 +255,8 @@ def _cmd_chat(config: AppConfig, args: argparse.Namespace, palette: Palette) -> 
 
 def _cmd_agent(config: AppConfig, args: argparse.Namespace, palette: Palette) -> int:
     verbose = bool(getattr(args, "verbose", False))
-    # Agent 默认使用 role=light 的 minicpm；vanitas chat 仍保持 role=general。
-    model = _resolve_model(config, getattr(args, "model", None), "light")
+    # Agent 与 chat 默认都使用 role=general 的首个模型（qwen_coder）。
+    model = _resolve_model(config, getattr(args, "model", None), "general")
     profile = config.resolve_profile(model, getattr(args, "profile", None))
     return agent_mod.run_agent(
         config,

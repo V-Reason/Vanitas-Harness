@@ -30,6 +30,7 @@ class Session:
     created_at: str = field(
         default_factory=lambda: datetime.now().isoformat(timespec="seconds")
     )
+    is_dirty: bool = False
 
     # ------------------------------------------------------------------ #
     # 消息
@@ -37,16 +38,20 @@ class Session:
 
     def add_user(self, content: str) -> None:
         self.messages.append({"role": "user", "content": content})
+        self.is_dirty = True
 
     def add_assistant(self, content: str) -> None:
         self.messages.append({"role": "assistant", "content": content})
+        self.is_dirty = True
 
     def pop_last_user(self) -> None:
         if self.messages and self.messages[-1]["role"] == "user":
             self.messages.pop()
+            self.is_dirty = True
 
     def clear_messages(self) -> None:
         self.messages.clear()
+        self.is_dirty = False
 
     def api_messages(self) -> list[dict]:
         if self.system.strip():
@@ -70,6 +75,8 @@ class Session:
                 if self.messages:
                     self.messages.pop(0)
                 break
+        if dropped:
+            self.is_dirty = True
         return dropped
 
     # ------------------------------------------------------------------ #
@@ -131,6 +138,7 @@ class Session:
             )
         except OSError as exc:
             raise ConfigError(f"会话保存失败：{target}；{exc.strerror or exc}") from exc
+        self.is_dirty = False
         return target
 
     @classmethod

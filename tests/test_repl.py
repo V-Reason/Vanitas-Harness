@@ -48,10 +48,12 @@ class ReplCompletionTests(unittest.TestCase):
 
     def test_model_and_profile_arguments(self) -> None:
         ids = [item[0] for item in self.repl._completion_candidates("/model ")]
-        self.assertEqual(ids, ["qwen7b", "minicpm", "hymt"])
+        self.assertEqual(ids, ["qwen_coder", "qwen7b", "minicpm", "hymt"])
 
         prefix = self.repl._completion_candidates("/model qw")
-        self.assertEqual([item[0] for item in prefix], ["qwen7b"])
+        self.assertEqual(
+            [item[0] for item in prefix], ["qwen_coder", "qwen7b"]
+        )
         self.assertEqual(prefix[0][1], -2)
 
         profiles = [
@@ -78,7 +80,7 @@ class ReplCompletionTests(unittest.TestCase):
         completions = list(completer.get_completions(Document(), None))
         self.assertEqual(
             [item.text for item in completions],
-            ["qwen7b", "minicpm", "hymt"],
+            ["qwen_coder", "qwen7b", "minicpm", "hymt"],
         )
 
 
@@ -151,7 +153,10 @@ class ReplPromptTests(unittest.TestCase):
 
 class ReplSwitchTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
         self.config = load_config()
+        self.config.preferences.path = Path(self._tmp.name) / "preferences.json"
         self.repl = Repl(self.config, palette=Palette({}, enabled=False))
 
     def test_switch_not_ready_stops_and_starts(self) -> None:
@@ -196,7 +201,7 @@ class ReplSwitchTests(unittest.TestCase):
             mock.patch.object(Repl, "_probe") as probe,
             mock.patch.object(repl_mod.launcher, "stop_all") as stop,
         ):
-            _value, out, _err = quiet_run(lambda: self.repl._cmd_model("qwen7b"))
+            _value, out, _err = quiet_run(lambda: self.repl._cmd_model("qwen_coder"))
         probe.assert_not_called()
         stop.assert_not_called()
         self.assertIn("已经是当前模型", out)

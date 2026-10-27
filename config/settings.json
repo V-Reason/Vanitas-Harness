@@ -21,7 +21,9 @@
     "max_context_tokens": 8192,
     "stream": true,
     "context_reserve_tokens": 512,
-    "min_output_tokens": 256
+    "min_output_tokens": 256,
+    "idle_timeout_sec": 600,
+    "watchdog_interval_sec": 10
   },
   "chat": {
     "temperature": 0.2
