@@ -765,7 +765,7 @@ class TranslationEngineTests(unittest.TestCase):
         self.assertNotIn("alpha", latest)
 
     def test_translate_filename_uses_model_and_sanitizes(self) -> None:
-        client = FilenameTranslationClient(content="文件名：“时钟.md”")
+        client = FilenameTranslationClient(content="文件名：时钟.md")
         engine = self.make_engine(client)
 
         self.assertEqual(engine.translate_filename("The Clock.md"), "时钟")
@@ -802,7 +802,7 @@ class TranslationEngineTests(unittest.TestCase):
 
     def test_translate_filename_preserves_marker_without_stalling(self) -> None:
         engine = self.make_engine(
-            FilenameTranslationClient(content="文件名：报告_临时")
+            FilenameTranslationClient(content="文件名：报告[[K0]]")
         )
         result = engine.translate_filename_result("report_临时.md")
         self.assertEqual(result.name, "报告_临时")
@@ -822,11 +822,48 @@ class TranslationEngineTests(unittest.TestCase):
                 self.assertIsNone(result.fallback_reason)
                 self.assertEqual(client.calls, [])
 
+    def test_translate_filename_restores_decorative_symbols(self) -> None:
+        client = FilenameTranslationClient(
+            content="文件名：[[K0]] [[K1]]序幕[[K2]][[K3]][[K4]]"
+        )
+        engine = self.make_engine(client)
+        result = engine.translate_filename_result("① (プロローグ)…!.wav")
+        self.assertEqual(result.name, "① (序幕)…!")
+        self.assertIsNone(result.fallback_reason)
+
+    def test_translate_filename_restores_trailing_symbols(self) -> None:
+        client = FilenameTranslationClient(
+            content="文件名：03_用游泳锻炼的私处榨出精液[[K0]][[K1]]"
+        )
+        engine = self.make_engine(client)
+        result = engine.translate_filename_result(
+            "03_水泳で鍛えたおまんこでザーメン搾り♪..wav"
+        )
+        self.assertEqual(result.name, "03_用游泳锻炼的私处榨出精液♪.")
+        self.assertIsNone(result.fallback_reason)
+
+    def test_translate_filename_pure_chinese_and_technical_skip_model(self) -> None:
+        for name in ("情侣日常", "私密掏耳", "大購入特典", "wav"):
+            with self.subTest(name=name):
+                client = FilenameTranslationClient(content="不应调用")
+                engine = self.make_engine(client)
+                result = engine.translate_filename_result(name + ".wav")
+                self.assertEqual(result.name, name)
+                self.assertIsNone(result.fallback_reason)
+                self.assertEqual(client.calls, [])
+
+    def test_translate_filename_overlong_result_falls_back(self) -> None:
+        client = FilenameTranslationClient(content="长" * 120)
+        engine = self.make_engine(client)
+        result = engine.translate_filename_result("The Clock.md")
+        self.assertEqual(result.name, "The Clock")
+        self.assertIn("过长", result.fallback_reason or "")
+
     def test_translate_filename_retries_when_code_is_lost(self) -> None:
         client = FilenameTranslationClient(
             responses=[
                 ("文件名：纽约市_笔记", "stop"),
-                ("文件名：NYC_笔记", "stop"),
+                ("文件名：[[K0]]_笔记", "stop"),
             ]
         )
         engine = self.make_engine(client)
@@ -845,7 +882,7 @@ class TranslationEngineTests(unittest.TestCase):
         engine = self.make_engine(client)
         result = engine.translate_filename_result("NYC_notes.md")
         self.assertEqual(result.name, "NYC_notes")
-        self.assertIn("NYC", result.fallback_reason or "")
+        self.assertIn("占位符", result.fallback_reason or "")
         self.assertEqual(len(client.calls), 2)
 
     def test_translate_filename_falls_back_on_truncation(self) -> None:
@@ -938,14 +975,15 @@ class TranslationEngineTests(unittest.TestCase):
         self.assertEqual(sanitize_translation_output("你好……。", "hello"), "你好……")
         self.assertEqual(sanitize_translation_output("你好——。", "hello"), "你好——")
 
-    def test_sanitize_filename_stem_strips_quotes_prefix_and_extension(self) -> None:
-        self.assertEqual(sanitize_filename_stem("文件名：“时钟.md”", ".md"), "时钟")
+    def test_sanitize_filename_stem_preserves_quotes_and_strips_prefix(self) -> None:
+        self.assertEqual(sanitize_filename_stem("文件名：时钟.md", ".md"), "时钟")
+        self.assertEqual(sanitize_filename_stem("“时钟”", ".md"), "“时钟”")
         self.assertEqual(sanitize_filename_stem("《雨の駅》.srt", ".srt"), "《雨の駅》")
 
     def test_sanitize_filename_stem_replaces_invalid_characters(self) -> None:
         self.assertEqual(
             sanitize_filename_stem("雨/车站？", ".md"),
-            "雨_车站",
+            "雨_车站？",
         )
         self.assertEqual(sanitize_filename_stem("...", ".md"), "")
 
@@ -959,10 +997,9 @@ class TranslationEngineTests(unittest.TestCase):
             "你好_世界",
         )
 
-    def test_sanitize_filename_stem_limits_length(self) -> None:
+    def test_sanitize_filename_stem_leaves_length_to_restore_step(self) -> None:
         cleaned = sanitize_filename_stem("长" * 120, ".md")
-        self.assertEqual(len(cleaned), 80)
-        self.assertEqual(cleaned, "长" * 80)
+        self.assertEqual(len(cleaned), 120)
 
     def test_synthetic_test_ja_quotes_are_preserved(self) -> None:
         source_blocks = [

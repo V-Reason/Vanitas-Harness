@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import unicodedata
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
@@ -40,15 +41,16 @@ FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)\n```$", re.DOTALL)
 QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’", "「": "」", "『": "』"}
 QUOTE_CHARS = frozenset(QUOTE_PAIRS) | frozenset(QUOTE_PAIRS.values())
 FILENAME_PROMPT = (
-    "翻译下面的文件名主体。只输出结果，不要解释、不要加引号。\n"
+    "翻译下面的文件名主体。[[K0]]、[[K1]] 等占位符必须原样保留。"
+    "只输出结果，不要解释、不要加引号。\n"
     "文件名：{name}"
 )
 FILENAME_SYSTEM_PROMPT = (
     "你是文件名翻译器。只翻译文件名中的普通英文/日文词，已有中文保持原样。"
-    "编号/编码、缩写、版本号、下划线和刻意标记（如 _临时、[草稿]）原样保留。"
+    "[[K0]]、[[K1]] 等占位符代表必须原样保留的编号或符号，输出时原样保留。"
     "示例：Hello_World → 你好_世界；Chapter_01 → 第01章；"
-    "photos_2024 → 照片_2024；report_临时 → 报告_临时；"
-    "RJ401457_临时 → RJ401457_临时；The Clock → 时钟。"
+    "photos_2024 → 照片_2024；トラック① → 曲目①；"
+    "report_临时 → 报告_临时；The Clock → 时钟。"
     "只输出文件名主体，不解释、不加引号。"
 )
 FILENAME_MAX_TOKENS = 96
@@ -62,6 +64,7 @@ FILENAME_PREFIX = re.compile(
 FILENAME_EXPLANATION = re.compile(
     r"(?:翻译|译文|译名|file name)\s*[:：]\s*", re.IGNORECASE
 )
+FILENAME_PLACEHOLDER = re.compile(r"\[\[K(\d+)\]\]")
 FILENAME_TOKEN = re.compile(r"[A-Za-z0-9+#&]+")
 FILENAME_CODE_ID = re.compile(
     r"(?<![A-Za-z0-9])[A-Za-z]{1,4}\d{2,}(?![A-Za-z0-9])"
@@ -73,9 +76,11 @@ FILENAME_CODE_HYPHEN = re.compile(
     r"(?<![A-Za-z0-9])[A-Za-z]{1,4}[-_]\d+(?![A-Za-z0-9])"
 )
 FILENAME_CODE_NUMERIC = re.compile(r"(?<!\d)\d{2,}(?:[-_/.]\d{2,})+(?!\d)")
-FILENAME_PROTECTED_MARKER = re.compile(
-    r"(?:[_#\-]+[\u4e00-\u9fff]{1,8}|"
-    r"[\[\【\(（《][\u4e00-\u9fff]{1,8}[\]\】\)）《》])"
+FILENAME_MARKER = re.compile(
+    r"(?i)_(?:临时|final|draft|temp|copy|old|new|备份|草稿|保留)"
+)
+FILENAME_TECHNICAL_STEMS = frozenset(
+    {"wav", "mp3", "mp4", "png", "jpg", "jpeg", "flac", "m4a", "txt"}
 )
 
 
@@ -115,6 +120,12 @@ class TranslationPlan:
         if parent in (Path(), Path(".")):
             return self.source.path.name
         return (parent / self.source.path.name).as_posix()
+
+
+@dataclass(frozen=True)
+class NameMask:
+    text: str
+    literals: list[str]
 
 
 @dataclass(frozen=True)
@@ -202,12 +213,22 @@ def sanitize_translation_output(raw_text: str, source_text: str) -> str:
     return text
 
 
-def _protected_name_fragments(stem: str) -> list[str]:
-    fragments: list[str] = []
+def _is_mask_symbol(char: str) -> bool:
+    """遮罩装饰符号，但保留下划线/点/连字符作为文件名分隔符。"""
+    if "\u2460" <= char <= "\u2473":  # ①..⑳
+        return True
+    if char in "_.-" or char.isalnum() or char.isspace():
+        return False
+    category = unicodedata.category(char)
+    return category.startswith("P") or category.startswith("S")
 
-    def add(fragment: str) -> None:
-        if fragment and fragment not in fragments:
-            fragments.append(fragment)
+
+def _mask_name_literals(stem: str) -> NameMask:
+    spans: list[tuple[int, int, str]] = []
+
+    def add_span(start: int, end: int, text: str) -> None:
+        if start < end:
+            spans.append((start, end, text))
 
     for pattern in (
         FILENAME_CODE_ID,
@@ -216,30 +237,67 @@ def _protected_name_fragments(stem: str) -> list[str]:
         FILENAME_CODE_NUMERIC,
     ):
         for match in pattern.finditer(stem):
-            add(match.group(0))
-    for token in FILENAME_TOKEN.findall(stem):
+            add_span(match.start(), match.end(), match.group(0))
+    for token_match in FILENAME_TOKEN.finditer(stem):
+        token = token_match.group(0)
         letters = [char for char in token if char.isalpha()]
         uppercase = sum(1 for char in letters if char.isupper())
         has_internal_upper = any(char.isupper() for char in token[1:])
         if uppercase >= 2 or has_internal_upper or any(
             char in "+#&" for char in token
         ):
-            add(token)
-    for match in FILENAME_PROTECTED_MARKER.finditer(stem):
-        add(match.group(0))
-    return fragments
+            add_span(token_match.start(), token_match.end(), token)
+    for match in FILENAME_MARKER.finditer(stem):
+        add_span(match.start(), match.end(), match.group(0))
+    leading_dots = re.match(r"^\.+", stem)
+    if leading_dots:
+        add_span(0, leading_dots.end(), leading_dots.group(0))
+    trailing_dots = re.search(r"\.+$", stem)
+    if trailing_dots:
+        add_span(trailing_dots.start(), trailing_dots.end(), trailing_dots.group(0))
+    for index, char in enumerate(stem):
+        if _is_mask_symbol(char):
+            add_span(index, index + 1, char)
+
+    spans.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+    selected: list[tuple[int, int, str]] = []
+    for start, end, text in spans:
+        if selected and start < selected[-1][1]:
+            continue
+        selected.append((start, end, text))
+
+    pieces: list[str] = []
+    literals: list[str] = []
+    cursor = 0
+    for start, end, text in selected:
+        pieces.append(stem[cursor:start])
+        pieces.append(f"[[K{len(literals)}]]")
+        literals.append(text)
+        cursor = end
+    pieces.append(stem[cursor:])
+    return NameMask(text="".join(pieces), literals=literals)
 
 
-def _remainder_after_protection(stem: str, fragments: list[str]) -> str:
-    remainder = stem
-    for fragment in sorted(fragments, key=len, reverse=True):
-        remainder = remainder.replace(fragment, " ")
-    return remainder
-
-
-def _has_translatable_text(stem: str, fragments: list[str]) -> bool:
-    remainder = _remainder_after_protection(stem, fragments)
+def _has_translatable_text(masked: str) -> bool:
+    remainder = FILENAME_PLACEHOLDER.sub(" ", masked)
     return bool(re.search(r"[A-Za-z]{2,}|[\u3040-\u30ff]", remainder))
+
+
+def _placeholder_failure(text: str, literals: list[str]) -> str | None:
+    expected = [f"[[K{index}]]" for index in range(len(literals))]
+    for token in expected:
+        if text.count(token) != 1:
+            return f"占位符缺失或重复：{token}"
+    found = FILENAME_PLACEHOLDER.findall(text)
+    if len(found) != len(expected):
+        return "出现未知占位符"
+    return None
+
+
+def _restore_literals(text: str, literals: list[str]) -> str:
+    for index, literal in enumerate(literals):
+        text = text.replace(f"[[K{index}]]", literal, 1)
+    return text
 
 
 def _strip_filename_explanation(raw: str) -> str:
@@ -252,37 +310,25 @@ def _strip_filename_explanation(raw: str) -> str:
     return text
 
 
-def _name_failure(stem: str, translated: str) -> str | None:
-    if not translated:
-        return "结果为空"
-    fragments = _protected_name_fragments(stem)
-    missing = [fragment for fragment in fragments if fragment not in translated]
-    if missing:
-        return "缺少受保护片段：" + "、".join(missing)
-    if translated == stem and _has_translatable_text(stem, fragments):
-        return "模型未翻译普通词"
-    return None
-
-
 def sanitize_filename_stem(raw: str, source_suffix: str = "") -> str:
     """把模型输出收敛成安全的单段文件名（不含扩展名）。"""
-    text = sanitize_translation_output(raw, "")
+    text = raw.strip()
+    for _ in range(3):
+        match = FENCE_RE.match(text)
+        if not match:
+            break
+        text = match.group(1).strip()
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return ""
     text = _strip_filename_explanation(lines[0])
     text = FILENAME_PREFIX.sub("", text)
-    text = text.strip(" \t\"'“”‘’「」『』")
     if source_suffix and text.lower().endswith(source_suffix.lower()):
         text = text[: -len(source_suffix)]
-        text = text.strip(" \t\"'“”‘’「」『』")
     text = FILENAME_INVALID_CHARS.sub("_", text)
-    text = re.sub(r"\s+", " ", text)
-    text = text.strip(" 。！？!?；;，,、").rstrip(" .")
-    if not text.strip("_"):
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text or text in {".", ".."} or not text.strip("._- "):
         return ""
-    if len(text) > FILENAME_MAX_CHARS:
-        text = text[:FILENAME_MAX_CHARS].rstrip(" .")
     return text
 
 
@@ -345,13 +391,15 @@ class TranslationEngine:
         stem = name.strip()
         if not stem:
             raise TranslateError(f"名称为空，无法翻译：{label!r}")
-        fragments = _protected_name_fragments(stem)
-        if not _has_translatable_text(stem, fragments):
+        if stem.lower() in FILENAME_TECHNICAL_STEMS:
+            return NameTranslation(stem)
+        mask = _mask_name_literals(stem)
+        if not _has_translatable_text(mask.text):
             return NameTranslation(stem)
 
         reason = ""
         for attempt in range(FILENAME_MAX_RETRIES + 1):
-            result = self._call_name(stem, reason if attempt else "")
+            result = self._call_name(mask.text, reason if attempt else "")
             choices = result.get("choices") or []
             finish_reason = ""
             if choices and isinstance(choices[0], dict):
@@ -363,18 +411,25 @@ class TranslationEngine:
             translated = sanitize_filename_stem(
                 _strip_filename_explanation(raw), source_suffix
             )
-            reason = _name_failure(stem, translated) or ""
-            if not reason:
-                return NameTranslation(translated)
+            if not translated:
+                reason = "结果为空"
+                continue
+            reason = _placeholder_failure(translated, mask.literals) or ""
+            if reason:
+                continue
+            restored = _restore_literals(translated, mask.literals)
+            if len(restored) > FILENAME_MAX_CHARS:
+                reason = "译名过长"
+                continue
+            return NameTranslation(restored)
         return NameTranslation(stem, reason or "模型输出不可用")
 
-    def _call_name(self, stem: str, correction: str) -> dict:
-        user_content = FILENAME_PROMPT.format(name=stem)
+    def _call_name(self, masked: str, correction: str) -> dict:
+        user_content = FILENAME_PROMPT.format(name=masked)
         if correction:
             user_content += (
                 f"\n上一次结果不可用：{correction}。"
-                "请重新翻译，完整保留编号/专名/刻意标记，"
-                "只输出文件名主体。"
+                "请重新翻译，完整保留所有占位符，只输出文件名主体。"
             )
         messages: list[dict] = [
             {"role": "system", "content": FILENAME_SYSTEM_PROMPT},
