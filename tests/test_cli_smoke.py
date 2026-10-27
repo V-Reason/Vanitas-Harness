@@ -22,7 +22,12 @@ from vanitas.config import DEFAULT_THEME, load_config  # noqa: E402
 from vanitas.errors import GuardError  # noqa: E402
 from vanitas.ui import Palette  # noqa: E402
 
-ENV_KEYS = ("VANITAS_PORT", "VANITAS_PROFILE", "VANITAS_CONFIG_DIR")
+ENV_KEYS = (
+    "VANITAS_PORT",
+    "VANITAS_PROFILE",
+    "VANITAS_CONFIG_DIR",
+    "VANITAS_ORIG_CWD",
+)
 
 
 @contextmanager
@@ -209,6 +214,35 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("chat=qwen7b", out)
         self.assertIn("translate=hymt", out)
         self.assertIn("batch=qwen7b", out)
+
+    def test_translate_resolves_relative_paths_against_invocation_cwd(self) -> None:
+        source = self.dir / "a.srt"
+        source.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nHello\n",
+            encoding="utf-8",
+        )
+        out_dir = self.dir / "out"
+        outcome = mock.Mock()
+        outcome.source = source
+        outcome.output = out_dir / "a.zh.srt"
+        outcome.segments = 1
+        outcome.failures = []
+        with clean_env(VANITAS_ORIG_CWD=str(self.dir)):
+            with mock.patch.object(
+                cli, "_translate_chat", return_value=(FakeClient(), 0)
+            ):
+                with mock.patch.object(
+                    cli.translate,
+                    "translate_file",
+                    return_value=outcome,
+                ) as translate_file:
+                    code, _out, err = run(
+                        ["translate", "a.srt", "--out-dir", "out"]
+                    )
+        self.assertEqual(code, 0, err)
+        call = translate_file.call_args
+        self.assertEqual(call.args[1].resolve(), source.resolve())
+        self.assertEqual(call.kwargs["out_dir"].resolve(), out_dir.resolve())
 
     def test_translate_two_files_get_independent_compact_stats(self) -> None:
         first = self.dir / "a.srt"

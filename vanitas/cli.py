@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -140,6 +141,26 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _invocation_cwd() -> Path:
+    """调用方原始工作目录；vanitas.bat 会切到仓库根，必须优先读透传值。"""
+    raw = os.environ.get("VANITAS_ORIG_CWD")
+    if raw:
+        candidate = Path(raw).expanduser()
+        try:
+            if candidate.is_dir():
+                return candidate.resolve()
+        except OSError:
+            pass
+    return Path.cwd()
+
+
+def _resolve_cli_path(raw: str | Path) -> Path:
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = _invocation_cwd() / path
+    return path
+
+
 def _resolve_model(
     config: AppConfig, model_id: str | None, mode: str
 ) -> ModelSpec:
@@ -260,7 +281,8 @@ def _cmd_chat(config: AppConfig, args: argparse.Namespace, palette: Palette) -> 
         palette=palette,
         verbose=verbose,
     )
-    repl.configure(system=args.system, task=args.task)
+    system = _resolve_cli_path(args.system) if args.system else None
+    repl.configure(system=str(system) if system else None, task=args.task)
     return repl.run()
 
 
@@ -268,11 +290,13 @@ def _cmd_agent(config: AppConfig, args: argparse.Namespace, palette: Palette) ->
     verbose = bool(getattr(args, "verbose", False))
     model = _resolve_model(config, getattr(args, "model", None), "agent")
     profile = config.resolve_profile(model, getattr(args, "profile", None))
+    system_arg = getattr(args, "system", None)
+    system = str(_resolve_cli_path(system_arg)) if system_arg else None
     return agent_mod.run_agent(
         config,
         model,
         profile.key,
-        system=getattr(args, "system", None),
+        system=system,
         palette=palette,
         verbose=verbose,
     )
@@ -335,7 +359,7 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
     max_window_chars = int(preset_info.get("max_window_chars", 250))
     model = _resolve_model(config, args.model, "translate")
     profile = config.resolve_profile(model, args.profile)
-    out_dir = Path(args.out_dir).expanduser() if args.out_dir else None
+    out_dir = _resolve_cli_path(args.out_dir) if args.out_dir else None
     monitor = TranslationMonitor(
         stream=sys.stderr,
         enabled=palette.enabled,
@@ -353,7 +377,7 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
     print(palette.meta(f"{model.display} · 档位 {profile.key}"))
     failures = 0
     for raw in args.inputs:
-        source = Path(raw).expanduser()
+        source = _resolve_cli_path(raw)
         # 每个文件独立计时/计量；reset 也负责清掉上一文件的看板。
         monitor.reset()
         try:
@@ -426,7 +450,7 @@ def _translate_chat(
 
 
 def _cmd_batch(config: AppConfig, args: argparse.Namespace, palette: Palette) -> int:
-    tasks = Path(args.tasks).expanduser()
+    tasks = _resolve_cli_path(args.tasks)
     if not tasks.is_file():
         print(palette.err(f"批处理文件不存在：{tasks}"), file=sys.stderr)
         return 4
@@ -504,7 +528,10 @@ def main(argv: list[str] | None = None) -> int:
         print(palette.hint(USAGE), file=sys.stderr)
         return 4
     try:
-        config = load_config(args.config_dir)
+        config_dir = (
+            _resolve_cli_path(args.config_dir) if args.config_dir else None
+        )
+        config = load_config(config_dir)
         palette = _make_palette(config)
         handler = HANDLERS.get(args.command)
         if handler is None:
