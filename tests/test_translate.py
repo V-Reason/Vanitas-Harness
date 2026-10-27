@@ -857,7 +857,7 @@ class TranslationEngineTests(unittest.TestCase):
         client = FilenameTranslationClient(
             responses=[
                 (masked, "stop"),
-                ("[[K0]]最初是温柔提升敏感度[[K1]]吧唧吧唧呼呼声", "stop"),
+                ("[[K0]]最初是温柔提升敏感度[[K1]]是吧唧吧唧呼呼声", "stop"),
             ]
         )
         engine = self.make_engine(client)

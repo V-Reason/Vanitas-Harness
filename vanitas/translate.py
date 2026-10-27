@@ -83,6 +83,9 @@ FILENAME_MARKER = re.compile(
 FILENAME_TECHNICAL_STEMS = frozenset(
     {"wav", "mp3", "mp4", "png", "jpg", "jpeg", "flac", "m4a", "txt"}
 )
+FILENAME_SYMBOL_CONNECTOR = re.compile(
+    r"([♪♡❤💗✩★☆])(?:是|则|就)(?=[一-鿿])"
+)
 
 
 @dataclass
@@ -419,6 +422,7 @@ class TranslationEngine:
             if reason:
                 continue
             restored = _restore_literals(translated, mask.literals)
+            restored = FILENAME_SYMBOL_CONNECTOR.sub(r"\1", restored)
             if len(restored) > FILENAME_MAX_CHARS:
                 reason = "译名过长"
                 continue
