@@ -1,6 +1,12 @@
 {
   "version": 1,
   "host": "127.0.0.1",
+  "defaults": {
+    "agent": "qwen_coder",
+    "chat": "qwen7b",
+    "translate": "hymt",
+    "batch": "qwen7b"
+  },
   "request": {
     "timeout_sec": 60,
     "max_retries": 3,
@@ -26,7 +32,10 @@
     "watchdog_interval_sec": 10,
     "context_collapse_ratio": 0.65,
     "context_collapse_keep_rounds": 2,
-    "context_collapse_min_chars": 1000
+    "context_collapse_min_chars": 1000,
+    "ctx_warn_pct": 60,
+    "ctx_danger_pct": 80,
+    "status_bar_width": 20
   },
   "chat": {
     "temperature": 0.2
@@ -35,6 +44,10 @@
     "max_steps": 10,
     "max_batch_actions": 100,
     "max_feedback_chars": 8000,
+    "max_parse_retries": 2,
+    "stagnation_limit": 3,
+    "feedback_head_lines": 20,
+    "feedback_tail_lines": 40,
     "auto_actions": ["read_file", "read_file_range", "grep_workspace", "list_dir", "run_shell_ro"],
     "confirm_actions": ["write_file", "patch_file", "delete_file", "delete_path", "move_file"],
     "action_aliases": {
@@ -50,6 +63,7 @@
     "max_range_lines": 400,
     "max_grep_results": 50,
     "max_grep_file_bytes": 1048576,
+    "max_capture_bytes": 524288,
     "grep_ignore_dirs": [".git", "__pycache__", ".venv", "node_modules"],
     "move_illegal_chars": "#<>\"|?*",
     "manual_exec_prefixes": ["echo", "dir", "type", "python --version", "git status", "git log", "git diff", "del", "erase", "ren", "rename", "copy", "move"],
