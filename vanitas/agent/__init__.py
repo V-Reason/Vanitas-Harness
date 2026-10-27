@@ -49,8 +49,19 @@ from .parser import (
     _repair_path_escapes,
     extract_tool_calls,
 )
+from .failed import FailedSignatures
 from .policy import _needs_confirmation
-from .stagnation import evaluate_stagnation
+from .stagnation import (
+    BatchPingPongDetector,
+    BatchRepeatDetector,
+    ContinuousDetector,
+    DEFAULT_DETECTORS,
+    PingPongDetector,
+    RecentRepeatDetector,
+    StagnationDetector,
+    StagnationView,
+    evaluate_stagnation,
+)
 from .stream import _AgentAnswerStream
 
 __all__ = [
@@ -98,4 +109,13 @@ __all__ = [
     "run_agent",
     "_run_action",
     "_run_actions",
+    "FailedSignatures",
+    "StagnationView",
+    "StagnationDetector",
+    "ContinuousDetector",
+    "PingPongDetector",
+    "RecentRepeatDetector",
+    "BatchRepeatDetector",
+    "BatchPingPongDetector",
+    "DEFAULT_DETECTORS",
 ]

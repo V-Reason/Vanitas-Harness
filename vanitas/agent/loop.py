@@ -16,6 +16,7 @@ from ..repl import Repl
 from ..tools import AgentTools
 from ..ui import Palette
 from .actions import AgentAction, _action_signature, _describe, _summary
+from .failed import FailedSignatures
 from .feedback import _parse_error_feedback, _shell_detail, wrap_tool_result
 from .parser import _parse_actions
 from .policy import _needs_confirmation
@@ -91,7 +92,7 @@ def _run_actions(
     *,
     max_feedback_chars: int,
     palette: Palette,
-    failed_sink: dict[tuple[str, str], str] | None = None,
+    failed_sink: FailedSignatures | None = None,
     head_lines: int = 20,
     tail_lines: int = 40,
 ) -> str:
@@ -111,9 +112,9 @@ def _run_actions(
         if failed_sink is not None:
             signature = _action_signature(action)
             if ok:
-                failed_sink.pop(signature, None)
+                failed_sink.record_success(signature)
             else:
-                failed_sink[signature] = detail
+                failed_sink.record_failure(signature, detail)
         results.append((action, ok, detail))
 
     if len(results) == 1:
@@ -181,7 +182,7 @@ class AgentLoop:
         self.parse_retries = 0
         self.stagnation_hits = 0
         self._stagnation_reason = ""
-        self._failed_signatures: dict[tuple[str, str], str] = {}
+        self._failed_signatures = FailedSignatures()
         self._rounds: deque[tuple[str, ...]] = deque(maxlen=6)
 
     @property
@@ -294,14 +295,7 @@ class AgentLoop:
                 )
                 return
 
-            blocked = [
-                (
-                    action,
-                    self._failed_signatures[_action_signature(action)],
-                )
-                for action in actions
-                if _action_signature(action) in self._failed_signatures
-            ]
+            blocked = self._failed_signatures.block(actions)
             if blocked:
                 summary = "；".join(
                     f"{_summary(action)}（{reason[:200]}）"
