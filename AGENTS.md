@@ -6,6 +6,20 @@
 
 ---
 
+## 模块目录
+
+```text
+vanitas\
+├── agent\      actions / parser / stream / policy / stagnation / failed / feedback / loop
+├── config\     schema / loader / preferences
+├── context\    session / budget / collapse
+├── repl\       commands / watchdog / status / lifecycle / loop
+├── tools\      sandbox / runner / fs / shell / exec
+└── cli.py / chat.py / engine.py / guard.py / launcher.py / metrics.py / ui.py 等
+```
+
+---
+
 ## 1. 角色与模式路由
 
 默认身份：单机 Python 工具的首席工程师。按任务意图显式选择模式，并在回复开头用 5 行看板声明：
@@ -84,6 +98,9 @@
 | 自动工具循环 | 仅允许 `vanitas agent` 的受控闭环：单动作与只读数组自动执行，写/删/移动 `write_file/delete_file/move_file` 必须确认；含修改的数组统一打印清单并只弹一次 `[y/N]`；沙盒根为原 CWD，步数上限由 `settings.agent.max_steps` 控制（默认 10）。`/exec` 仍手动逐次确认。禁止后台队列、无人值守循环与绕过确认的钩子 |
 | 单实例 | 一次只允许一个 `llama-server`；启动新模型前由守卫回收旧实例 |
 | 评测脚本 | `tests\multi_model_benchmark.py` 的既有参数与退出码契约不得破坏 |
+| 项目白名单 | `python verify.py` 只允许在 `settings.tools.project_prefixes` 中出现；不得回填到 `readonly_shell_prefixes` 的通用默认值 |
+| Agent FSM 契约 | `AgentLoop.run` 的钩子参数、`AgentLoop.__init__` 的关键字参数、`AgentLoop` 对外可读写属性（`_recent` / `_rounds` / `_failed_signatures` / `_stagnation_reason` / `steps` / `parse_retries` / `stagnation_hits`）为跨批次契约，改动需在新批次任务书内显式声明 |
+| 配置字段校验 | `settings.json` 出现未知字段（含 `exec_whitelist`）会触发 `ConfigError`；添加新字段必须同步更新 `vanitas/config/schema.py::*_FIELDS` 与 `vanitas/config/loader.py::_load_*` |
 
 ---
 
@@ -147,7 +164,7 @@ python -m vanitas stop
 - 人类 `/exec`/`!` 使用原生 `shell=True`，不再受 `manual_exec_prefixes`/目录限制；`AgentTools.run_shell_ro` 的只读白名单与 `is_inside_workspace` 边界完全不变。
 - AgentTools 新增 `patch_file`、`read_file_range`、`grep_workspace`；全部走 `_require_path`。`patch_file` 需确认，另两项只读自动放行；大文件优先 `read_file_range`/`grep_workspace`，小改优先 `patch_file`，多文件必须单轮动作数组。
 - `delete_path` 递归删除文件/目录，`delete_file` 为兼容别名；工作区根目录、父级与越界路径硬拒绝，符号链接只删链接本身。`/undo`/`/pop`/`/rollback` 回滚最近一轮并释放 tokens。
-- 提示符常驻 `[ctx: N% | Xk/Yk]`，`/status` 展示视窗进度条、GPU/进程、TTFT/tps 与 Agent 步数；会话超 65% 时自动折叠旧 `<tool_result>` 观测，动作签名与最近两轮保留。
+- 提示符常驻 `[ctx: N%]`，`/status` 默认 4 行紧凑、`-v` 展示视窗进度条、GPU/进程、TTFT/tps 与 Agent 步数；会话超 65% 时自动折叠旧 `<tool_result>` 观测，动作签名与最近两轮保留。
 - 停滞熔断覆盖连续、A-B 乒乓、A-B-C 周期、6 步内同签名 ≥3 次，以及批次级重复/乒乓；失败签名在本轮内持久保留，即使中间穿插只读读取，原参数再提交也不二次确认、直接回填错误。
 - 重命名/改扩展名只允许 `move_file(src,dst)`；`patch_file` 只改内容。Prompt 明确禁止用 `patch_file` 绕文件名变更。
 - 可配扩展：`settings.defaults`（四模式默认模型）、`agent.max_parse_retries/stagnation_limit/feedback_head_lines/feedback_tail_lines`、`tools.max_capture_bytes`、`repl.ctx_warn_pct/ctx_danger_pct/status_bar_width`。默认值保持 2/3/20/40、512 KiB、60/80/20。
