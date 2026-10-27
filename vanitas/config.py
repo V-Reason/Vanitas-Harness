@@ -11,6 +11,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from .errors import ConfigError
@@ -77,6 +78,8 @@ REPL_FIELDS = frozenset(
         "stream",
         "context_reserve_tokens",
         "min_output_tokens",
+        "idle_timeout_sec",
+        "watchdog_interval_sec",
     }
 )
 CHAT_FIELDS = frozenset({"temperature"})
@@ -314,6 +317,8 @@ class ReplSettings:
     stream: bool
     context_reserve_tokens: int = 512
     min_output_tokens: int = 256
+    idle_timeout_sec: float = 600.0
+    watchdog_interval_sec: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -414,12 +419,105 @@ class Settings:
     ui: UiSettings
 
 
+PREFERENCES_VERSION = 1
+
+
+@dataclass
+class Preferences:
+    """跨会话偏好；损坏或缺失时回落到空状态，不阻断启动。"""
+
+    path: Path = field(
+        default_factory=lambda: Path.home() / ".vanitas" / "preferences.json"
+    )
+    last_used_model: str = ""
+    preferred_profiles: dict[str, str] = field(default_factory=dict)
+    last_updated: str = ""
+
+    @classmethod
+    def load(cls, path: Path | str | None = None) -> "Preferences":
+        target = (
+            Path(path).expanduser()
+            if path is not None
+            else Path.home() / ".vanitas" / "preferences.json"
+        )
+        empty = cls(path=target)
+        if not target.is_file():
+            return empty
+        try:
+            raw = target.read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except (OSError, json.JSONDecodeError):
+            return empty
+        if not isinstance(data, dict) or data.get("version") != PREFERENCES_VERSION:
+            return empty
+        last_model = data.get("last_used_model", "")
+        preferred: dict[str, str] = {}
+        raw_preferred = data.get("preferred_profiles")
+        if isinstance(raw_preferred, dict):
+            for model_id, key in raw_preferred.items():
+                if (
+                    isinstance(model_id, str)
+                    and isinstance(key, str)
+                    and model_id.strip()
+                    and key.strip()
+                ):
+                    preferred[model_id.strip()] = key.strip()
+        updated = data.get("last_updated", "")
+        return cls(
+            path=target,
+            last_used_model=last_model.strip() if isinstance(last_model, str) else "",
+            preferred_profiles=preferred,
+            last_updated=updated if isinstance(updated, str) else "",
+        )
+
+    def profile_for(self, model_id: str) -> str | None:
+        return self.preferred_profiles.get(model_id)
+
+    def set_profile(self, model_id: str, profile_key: str) -> Path:
+        self.preferred_profiles[model_id] = profile_key
+        return self.save()
+
+    def remember_model(self, model_id: str) -> Path:
+        self.last_used_model = model_id
+        return self.save()
+
+    def save(self) -> Path:
+        target = Path(self.path).expanduser()
+        self.last_updated = datetime.now().isoformat(timespec="seconds")
+        payload = {
+            "version": PREFERENCES_VERSION,
+            "last_used_model": self.last_used_model,
+            "preferred_profiles": dict(sorted(self.preferred_profiles.items())),
+            "last_updated": self.last_updated,
+        }
+        temp = target.with_name(target.name + ".tmp")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temp.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temp, target)
+        except OSError as exc:
+            raise ConfigError(
+                f"偏好保存失败：{target}；{exc.strerror or exc}"
+            ) from exc
+        finally:
+            if temp.exists():
+                try:
+                    temp.unlink()
+                except OSError:
+                    pass
+        return target
+
+
 @dataclass(frozen=True)
 class AppConfig:
     base_dir: Path
     config_dir: Path
     models: tuple
     settings: Settings
+    preferences: Preferences = field(default_factory=Preferences)
 
     def model(self, model_id: str) -> ModelSpec:
         for item in self.models:
@@ -441,7 +539,12 @@ class AppConfig:
         return model.port
 
     def resolve_profile(self, model: ModelSpec, key: str | None = None) -> ProfileSpec:
-        chosen = (key or os.environ.get("VANITAS_PROFILE") or model.default_profile).strip()
+        chosen = (key or "").strip()
+        if not chosen:
+            chosen = (os.environ.get("VANITAS_PROFILE") or "").strip()
+        if not chosen:
+            preferred = self.preferences.profile_for(model.id)
+            chosen = preferred if preferred in model.profiles else model.default_profile
         profile = model.profiles.get(chosen)
         if profile is None:
             available = "、".join(model.profile_keys)
@@ -1095,6 +1198,16 @@ def _load_settings(document: dict) -> Settings:
         if "min_output_tokens" in repl
         else 256
     )
+    idle_timeout = (
+        _as_number(repl, "idle_timeout_sec", "settings.repl", minimum=0.0)
+        if "idle_timeout_sec" in repl
+        else 600.0
+    )
+    watchdog_interval = (
+        _as_number(repl, "watchdog_interval_sec", "settings.repl", minimum=0.1)
+        if "watchdog_interval_sec" in repl
+        else 10.0
+    )
     repl_settings = ReplSettings(
         history_file=Path(os.path.expanduser(history_raw)),
         max_context_tokens=_as_int(
@@ -1103,6 +1216,8 @@ def _load_settings(document: dict) -> Settings:
         stream=_as_bool(repl, "stream", "settings.repl"),
         context_reserve_tokens=context_reserve,
         min_output_tokens=min_output,
+        idle_timeout_sec=idle_timeout,
+        watchdog_interval_sec=watchdog_interval,
     )
 
     chat_settings = _load_chat(document.get("chat"))
@@ -1242,7 +1357,11 @@ def _load_settings(document: dict) -> Settings:
     )
 
 
-def load_config(config_dir: Path | str | None = None, base_dir: Path | None = None) -> AppConfig:
+def load_config(
+    config_dir: Path | str | None = None,
+    base_dir: Path | None = None,
+    preferences_path: Path | str | None = None,
+) -> AppConfig:
     """读取并校验配置。
 
     优先级：显式参数 > 环境变量 VANITAS_CONFIG_DIR > <仓库根>/config。
@@ -1266,5 +1385,9 @@ def load_config(config_dir: Path | str | None = None, base_dir: Path | None = No
     models = _load_models(models_doc, root)
     settings = _load_settings(settings_doc)
     return AppConfig(
-        base_dir=root, config_dir=directory, models=models, settings=settings
+        base_dir=root,
+        config_dir=directory,
+        models=models,
+        settings=settings,
+        preferences=Preferences.load(preferences_path),
     )
