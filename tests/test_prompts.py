@@ -113,7 +113,11 @@ class PromptTests(unittest.TestCase):
         self.assertIn("【截断防御】", text)
         self.assertIn("如果写入内容过长", text)
         self.assertIn("【严禁前置闲聊】", text)
-        self.assertIn("【修改文件必须且只能调用 write_file】", text)
+        self.assertIn("【修改文件必须调用 write_file 或 patch_file】", text)
+        self.assertIn("patch_file", text)
+        self.assertIn("read_file_range", text)
+        self.assertIn("grep_workspace", text)
+        self.assertIn("多动作原子批处理军规", text)
         self.assertIn("git apply", text)
 
     def test_agent_continue_template_loads(self) -> None:
