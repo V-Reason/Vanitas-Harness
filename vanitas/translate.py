@@ -262,7 +262,10 @@ def postprocess_cue_text(zh_text: str, src_text: str) -> str:
     if not original:
         return ""
 
-    text = zh_text.translate(TRADITIONAL_TO_SIMPLIFIED_MAP)
+    text = WINDOW_ID_ANY_RE.sub("", zh_text).strip()
+    if not text:
+        return original
+    text = text.translate(TRADITIONAL_TO_SIMPLIFIED_MAP)
     if not SOURCE_HAS_BRACKETS_RE.search(src_text):
         stripped = STAGING_BRACKETS_RE.sub("", text)
         if stripped.strip():

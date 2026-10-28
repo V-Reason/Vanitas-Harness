@@ -1611,6 +1611,12 @@ class PostprocessTests(unittest.TestCase):
             "第一行\n第二行",
         )
 
+    def test_window_id_removed_at_cue_boundary(self) -> None:
+        self.assertEqual(
+            postprocess_cue_text("你好 [#12]", "hello"),
+            "你好",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
