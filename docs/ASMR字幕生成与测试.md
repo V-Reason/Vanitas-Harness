@@ -268,9 +268,11 @@ python scripts\qc_srt.py --source-dir "<ASMR_ROOT>\SRT" `
   --zh-dir "<ASMR_ROOT>\SRT"
 ```
 
-- error：cue 数/序号/时间轴不一致、`[#N]` 泄漏、不同原文同长译文；
-- warn：空 cue、开头标点、残留假名、繁体、`您` 计数；
-- `--json` 供批处理门禁，`--strict` 让 warn 也返回 `1`。
+- error（阻断）：cue 数/序号/时间轴不一致、`[#N]` 泄漏、不同原文同长/覆盖译文；
+- actionable（默认不阻断）：ASR 疑词、亲昵语境“您”、未授权动作括号、译文长度异常、非幻觉空译、假名残留；
+- silent（静默计数）：繁体、行首标点，由翻译后处理覆盖，不再逐条刷 warning；
+- `--json` 输出 `summary` 与 `flagged_cues`，`files`/`errors`/`warnings` 保留兼容；`--strict` 让 actionable 也返回 `1`。
+- 终端只打印紧凑 `- 原文/+ 译文/? 建议` Diff，不再输出 Markdown 表格。
 
 ## 7. ASMR 提示词优化 backlog
 
@@ -296,7 +298,7 @@ python scripts\qc_srt.py --source-dir "<ASMR_ROOT>\SRT" `
 3. `<asr_repair_protocol>` 增加：音近错词按上下文修复，无法确定时保留最保守语义；不把泛指动作/拟声词具体化为工具；拟声词不音译成无意义人名。
 4. `<sfx_and_staging_rules>` 的第二人称规则改为“按关系与场景选择”，不再写死“默认你”。
 
-同时新增翻译窗口结构守卫：窗口译文正文出现 `[#N]`、非空原文对应空译文，或不同原文得到相同长译文时，整窗回退逐句；逐句结果全局清理 `[#N]`。
+同时新增翻译窗口结构守卫：窗口译文正文出现 `[#N]`、非空原文对应空译文，或不同原文得到相同长译文时，整窗回退逐句；逐句结果在 cue 边界清理 `[#N]`（不是全局删除批次编号）。
 
 ### 7.3 质量检查结果
 
@@ -351,9 +353,19 @@ warn 5 条：
 4. 用上下文统一自由交谈的 `美咲`/`箱川`/`诺亚` 写法，不把专名写进提示词；
 5. 再跑提示词 candidate 与 20 条/文件抽检。
 
+### 7.7 实体引擎、静默后处理与 QC 三层（2026-10-29）
+
+- **P0 修复**：旧 `sanitize_translation_output()` 全局删除 `[#N]`，导致 `TranslationEngine` 的批次响应在 `parse_window_response` 前就丢掉编号；实测 2-cue 窗口会发 3 次请求（1 批次 + 2 逐句），两条 cue 都被写成 `译一译二`。已删除全局清洗，编号只在 cue 边界由 `strip_window_id_prefix()`/`postprocess_cue_text()` 清理；新增批次编号保留与单句多编号拒绝回归测试。
+- **静默后处理**：`postprocess_cue_text()` 做简繁转换、行首 `，、；：。！？` 清理、`……。`/`~。` 等重复句号清理、原文无括号时剥离虚构动作括号；保留开头 `……`/`——`、原文已有括号，清洗为空时保留清洗前文本。只改正文，不动序号/时间轴。
+- **实体引擎**：`DynamicEntityEngine` 从全篇片假名、敬称名、3–4 字汉字块共同前缀提种子，停用表过滤普通词/拟声词；变体按包含/首字近似/编辑距离聚类。`capture_translations()` 仅在源行以实体开头且后接标点、译文前 2–4 字后接标点时高置信锁定，其余存前文示例；`get_query_context()` 注入变体/锁定名/示例；`enforce_locks()` 只清未翻译日文专名。仅 `window_size>1`（ASMR W=6）启用，且叠加滑动前文而不是替换。
+- **Prompt**：新增 `<sensory_immersion>`（贴耳体感、体感具象、动作本土化、拟声画面、跨行语流），保留 `<asmr_domain_lexicon>`、ASR 容错、计数/IO 与多行编号项规则；`お騒がせ` 仍保留“给您添麻烦”的敬语例外。
+- **QC**：`scripts/qc_srt.py` 三层分流；终端紧凑 Diff；`--json` 含 `summary`+`flagged_cues`；默认仅 error 返回 `1`，`--strict` actionable 也返回 `1`。
+- **测试**：新增 34 例，总数 **485 例**；非 guard 472 例全绿（1 例 skip）；`test_guard.test_ok_single_file` 因本机 4062 被 HY-MT2 占用仍失败，未停服。
+- **未验证**：未跑真实 696-cue 全量；未验证 HY-MT2 对新增 Prompt/实体上下文的长文本遵循度与显存/耗时；`您` 启发式、批次 `finish_reason=length` 拆分、真实 TTY 的 QC 观感未验收。
+
 ## 8. 下一步
 
-1. 用 20×2 新格式重跑 `私密掏耳①`，统一 `_6` 的空格问题；
+1. 用 20×2 新格式重跑 `私密掏耳①`，统一 `_6` 的空格问题；先跑一次真实 696-cue 回归，确认实体 Prompt 的收益与 token 成本；
 2. 跑首轮 8 个样本；
 3. 每个文件记录 cue 数、最长条、外语/数字/循环、10 条抽检；
 4. 8 个通过后，再扩到 20 个回归集；
