@@ -196,6 +196,8 @@ def sanitize_translation_output(raw_text: str, source_text: str) -> str:
     - 先剥 Markdown 代码围栏（无论 source 是否有引号）；
     - source 含任何对白引号时，正文原样返回，不删任何引号；
     - source 无引号时，循环剥离成对的外层 ASCII/中文引号；不配对保留。
+    - 不在这里删除 ``[#N]``：批次响应必须保留窗口编号，编号由调用方在
+      cue 边界用 ``strip_window_id_prefix`` / 后处理清理。
     """
     text = raw_text.strip()
     if not text:
@@ -205,8 +207,6 @@ def sanitize_translation_output(raw_text: str, source_text: str) -> str:
         if not match:
             break
         text = match.group(1).strip()
-    # 编号只属于窗口协议，不应出现在译文正文；行首残留标点也一并清掉。
-    text = WINDOW_ID_ANY_RE.sub("", text).strip()
     text = text.lstrip("，、；：").lstrip()
     # 省略号/破折号已经承担句末语气，后面再追加句号属于重复标点。
     text = re.sub(r"(……|——)。", r"\1", text)

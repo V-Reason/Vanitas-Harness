@@ -33,6 +33,7 @@ from vanitas.translate import (  # noqa: E402
     sanitize_translation_output,
     strip_window_id_prefix,
     translate_file,
+    translate_srt,
 )
 
 SETTINGS = TranslateSettings(
@@ -511,6 +512,67 @@ class TranslateTests(unittest.TestCase):
             ["译一", "译二", "译三", "译四"],
         )
 
+    def test_batch_window_preserves_ids_through_engine(self) -> None:
+        client = ScriptedTranslationClient(["[#1] 译一\n[#2] 译二"])
+        engine = TranslationEngine(
+            client,
+            ROOT / "config" / "prompts",
+            "",
+            options=translation_options(),
+            task_template="translate_asmr",
+        )
+        failures = []
+        output = translate_srt(
+            engine,
+            "1\n00:00:01,000 --> 00:00:02,000\nこんにちは\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\nさようなら\n",
+            chunk_chars=800,
+            source="batch.srt",
+            eol="\n",
+            failures=failures,
+            window_size=2,
+        )
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(
+            [block.text for block, _ in parse_srt(output, "\n")],
+            ["译一", "译二"],
+        )
+        self.assertEqual(failures, [])
+
+    def test_single_fallback_rejects_multi_id_after_engine(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                "[#1] 译一",
+                "[#1] 译一\n[#2] 译二",
+                "[#1] 译一\n[#2] 译二",
+            ]
+        )
+        engine = TranslationEngine(
+            client,
+            ROOT / "config" / "prompts",
+            "",
+            options=translation_options(),
+            task_template="translate_asmr",
+        )
+        failures = []
+        output = translate_srt(
+            engine,
+            "1\n00:00:01,000 --> 00:00:02,000\nこんにちは\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\nさようなら\n",
+            chunk_chars=800,
+            source="fallback.srt",
+            eol="\n",
+            failures=failures,
+            window_size=2,
+        )
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(len(failures), 2)
+        self.assertTrue(all("续写" in item.reason for item in failures))
+        self.assertEqual(
+            [block.text for block, _ in parse_srt(output, "\n")],
+            ["こんにちは", "さようなら"],
+        )
+
     def test_translate_file_with_asmr_preset_end_to_end(self) -> None:
         source = ROOT / "tests" / "fixtures" / "sample_asmr.srt"
         raw = source.read_bytes()
@@ -874,6 +936,25 @@ class NameOnlyTests(unittest.TestCase):
         self.assertFalse((self.dir / "English Dir").exists())
 
 
+class ScriptedTranslationClient:
+    """按顺序返回脚本内容，用于验证批次编号与回退边界。"""
+
+    def __init__(self, contents: list[str]) -> None:
+        self.contents = list(contents)
+        self.calls: list[str] = []
+
+    def chat(self, messages, *, max_tokens, temperature=0.2):
+        self.calls.append(str(messages[-1]["content"]))
+        content = self.contents.pop(0) if self.contents else ""
+        return {
+            "choices": [
+                {"message": {"content": content}, "finish_reason": "stop"}
+            ],
+            "usage": {"completion_tokens": 1},
+            "timings": {"predicted_n": 1},
+        }
+
+
 class FakeTranslationClient:
     def __init__(self, *, truncate_over: int | None = None) -> None:
         self.calls: list[dict] = []
@@ -1229,10 +1310,14 @@ class TranslationEngineTests(unittest.TestCase):
         self.assertEqual(sanitize_translation_output("你好……。", "hello"), "你好……")
         self.assertEqual(sanitize_translation_output("你好——。", "hello"), "你好——")
 
-    def test_sanitize_strips_window_id_and_leading_punctuation(self) -> None:
+    def test_sanitize_strips_leading_punctuation_but_keeps_window_ids(self) -> None:
         self.assertEqual(
             sanitize_translation_output("，[#12] 你好", "hello"),
-            "你好",
+            "[#12] 你好",
+        )
+        self.assertEqual(
+            sanitize_translation_output("[#1] 你好\n[#2] 再见", "hello"),
+            "[#1] 你好\n[#2] 再见",
         )
         self.assertEqual(
             sanitize_translation_output("，我们要不要一起看看呢？", "hello"),
