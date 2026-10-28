@@ -42,6 +42,36 @@ BOM = b"\xef\xbb\xbf"
 FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)\n```$", re.DOTALL)
 QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’", "「": "」", "『": "』"}
 QUOTE_CHARS = frozenset(QUOTE_PAIRS) | frozenset(QUOTE_PAIRS.values())
+
+# --------------------------------------------------------------------------- #
+# 确定性静默后处理（0 Token / 无模型调用）
+# --------------------------------------------------------------------------- #
+
+TRADITIONAL_TO_SIMPLIFIED = {
+    "妳": "你", "話": "话", "會": "会", "個": "个", "這": "这",
+    "們": "们", "來": "来", "時": "时", "說": "说", "現": "现",
+    "實": "实", "體": "体", "為": "为", "與": "与", "從": "从",
+    "對": "对", "開": "开", "關": "关", "頭": "头", "間": "间",
+    "問": "问", "題": "题", "點": "点", "還": "还", "麼": "么",
+    "樣": "样", "過": "过", "讓": "让", "給": "给", "帶": "带",
+    "嗎": "吗", "讀": "读", "寫": "写", "聽": "听", "覺": "觉",
+    "愛": "爱", "戀": "恋", "臉": "脸", "頰": "颊", "專": "专",
+    "輯": "辑", "潔": "洁", "謝": "谢", "請": "请", "誰": "谁",
+    "後": "后", "裡": "里", "裏": "里", "氣": "气", "溫": "温",
+    "觸": "触", "撫": "抚", "動": "动", "變": "变", "極": "极",
+    "樂": "乐", "響": "响", "臺": "台", "灣": "湾",
+}
+TRADITIONAL_TO_SIMPLIFIED_MAP = str.maketrans(TRADITIONAL_TO_SIMPLIFIED)
+TRADITIONAL_CHARS = frozenset(TRADITIONAL_TO_SIMPLIFIED)
+
+SOURCE_HAS_BRACKETS_RE = re.compile(r"[（(【\[]")
+STAGING_BRACKETS_RE = re.compile(
+    r"[（(](?:在)?(?:[左右双]?耳[边後后畔旁]|轻抚|抚摸|轻吻|深吻|轻舔|亲吻|"
+    r"衣物摩擦声|呼吸声)[^）)]*[）)]"
+)
+REPEATED_PUNCT_RE = re.compile(r"([…—~～♡❤♪])。")
+LEADING_INVALID_PUNCT_RE = re.compile(r"^[，、；：。！？!?\s]+")
+
 FILENAME_PROMPT = (
     "翻译下面的文件名主体。[[K0]]、[[K1]] 等占位符必须原样保留。"
     "只输出结果，不要解释、不要加引号。\n"
@@ -220,6 +250,31 @@ def sanitize_translation_output(raw_text: str, source_text: str) -> str:
             break
         text = text[1:-1].strip()
     return text
+
+
+def postprocess_cue_text(zh_text: str, src_text: str) -> str:
+    """cue 级确定性清洗：简繁、行首标点、重复句号、未授权动作括号。
+
+    只改字幕正文，不碰序号/时间轴；不调用模型。清洗结果为空时保留清洗前
+    文本，避免把非空原文静默写成空字幕；这类残留交给 QC 提示。
+    """
+    original = zh_text.strip()
+    if not original:
+        return ""
+
+    text = zh_text.translate(TRADITIONAL_TO_SIMPLIFIED_MAP)
+    if not SOURCE_HAS_BRACKETS_RE.search(src_text):
+        stripped = STAGING_BRACKETS_RE.sub("", text)
+        if stripped.strip():
+            text = stripped
+
+    lines = [
+        LEADING_INVALID_PUNCT_RE.sub("", line, count=1)
+        for line in text.splitlines()
+    ]
+    text = "\n".join(lines).strip()
+    text = REPEATED_PUNCT_RE.sub(r"\1", text).strip()
+    return text or original
 
 
 def _is_mask_symbol(char: str) -> bool:
@@ -981,7 +1036,7 @@ def translate_srt(
                 failures=failures,
             )
             if result is not None:
-                subtitle.text = result
+                subtitle.text = postprocess_cue_text(result, subtitle.text)
             # 失败时保留原文，继续下一条
             done += 1
             if on_segment is not None:
@@ -1029,8 +1084,9 @@ def translate_srt(
                     ok = False
                 if ok:
                     for _block_index, subtitle in window:
-                        subtitle.text = strip_window_id_prefix(
-                            aligned[subtitle.index]
+                        subtitle.text = postprocess_cue_text(
+                            strip_window_id_prefix(aligned[subtitle.index]),
+                            subtitle.text,
                         )
                 else:
                     fallback = True
@@ -1051,7 +1107,7 @@ def translate_srt(
                     failures=failures,
                 )
                 if result is not None:
-                    subtitle.text = result
+                    subtitle.text = postprocess_cue_text(result, subtitle.text)
 
         done += len(window)
         if on_segment is not None:

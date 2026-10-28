@@ -28,6 +28,7 @@ from vanitas.translate import (  # noqa: E402
     recover_window_response,
     plan_name_renames,
     plan_translation_outputs,
+    postprocess_cue_text,
     rebuild_srt,
     sanitize_filename_stem,
     sanitize_translation_output,
@@ -572,6 +573,59 @@ class TranslateTests(unittest.TestCase):
             [block.text for block, _ in parse_srt(output, "\n")],
             ["こんにちは", "さようなら"],
         )
+
+    def test_batch_postprocess_cleans_traditional_and_staging(self) -> None:
+        client = ScriptedTranslationClient(
+            ["[#1] ，妳的話我會聽\n[#2] （在耳后）喜欢你哦"]
+        )
+        engine = TranslationEngine(
+            client,
+            ROOT / "config" / "prompts",
+            "",
+            options=translation_options(),
+            task_template="translate_asmr",
+        )
+        failures = []
+        output = translate_srt(
+            engine,
+            "1\n00:00:01,000 --> 00:00:02,000\n好きだよ\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\n大好きだよ\n",
+            chunk_chars=800,
+            source="postprocess.srt",
+            eol="\n",
+            failures=failures,
+            window_size=2,
+        )
+        self.assertEqual(
+            [block.text for block, _ in parse_srt(output, "\n")],
+            ["你的话我会听", "喜欢你哦"],
+        )
+        self.assertEqual(failures, [])
+
+    def test_single_cue_postprocess_cleans_traditional(self) -> None:
+        client = ScriptedTranslationClient(["，妳的話我會聽"])
+        engine = TranslationEngine(
+            client,
+            ROOT / "config" / "prompts",
+            "",
+            options=translation_options(),
+            task_template="translate_asmr",
+        )
+        failures = []
+        output = translate_srt(
+            engine,
+            "1\n00:00:01,000 --> 00:00:02,000\n大好きだよ\n",
+            chunk_chars=800,
+            source="single.srt",
+            eol="\n",
+            failures=failures,
+            window_size=1,
+        )
+        self.assertEqual(
+            [block.text for block, _ in parse_srt(output, "\n")],
+            ["你的话我会听"],
+        )
+        self.assertEqual(failures, [])
 
     def test_translate_file_with_asmr_preset_end_to_end(self) -> None:
         source = ROOT / "tests" / "fixtures" / "sample_asmr.srt"
@@ -1371,6 +1425,63 @@ class TranslationEngineTests(unittest.TestCase):
                 sanitize_translation_output(translated, source), translated
             )
             self.assertEqual(translated.count("“"), translated.count("”"))
+
+
+class PostprocessTests(unittest.TestCase):
+    def test_traditional_to_simplified_cleaner(self) -> None:
+        self.assertEqual(
+            postprocess_cue_text("妳的話我會聽", "好きだよ"),
+            "你的话我会听",
+        )
+
+    def test_leading_punctuation_cleanup_keeps_ellipsis(self) -> None:
+        self.assertEqual(postprocess_cue_text("，你好", "hello"), "你好")
+        self.assertEqual(postprocess_cue_text("……喜欢你", "hello"), "……喜欢你")
+
+    def test_repeated_punctuation_cleanup(self) -> None:
+        self.assertEqual(
+            postprocess_cue_text("好舒服……。", "hello"),
+            "好舒服……",
+        )
+        self.assertEqual(postprocess_cue_text("呼~。", "hello"), "呼~")
+
+    def test_unauthorized_staging_brackets_stripped(self) -> None:
+        self.assertEqual(
+            postprocess_cue_text("（在耳后）喜欢你哦", "好きだよ"),
+            "喜欢你哦",
+        )
+        self.assertEqual(
+            postprocess_cue_text("（在双耳边）喜欢你哦", "好きだよ"),
+            "喜欢你哦",
+        )
+        self.assertEqual(
+            postprocess_cue_text("（在耳后），喜欢你哦", "好きだよ"),
+            "喜欢你哦",
+        )
+
+    def test_source_brackets_preserved(self) -> None:
+        self.assertEqual(
+            postprocess_cue_text("（在双耳边）喜欢你哦", "(両耳) 好きだよ"),
+            "（在双耳边）喜欢你哦",
+        )
+
+    def test_staging_only_translation_keeps_original(self) -> None:
+        self.assertEqual(
+            postprocess_cue_text("（在耳后）", "好きだよ"),
+            "（在耳后）",
+        )
+
+    def test_normal_parentheses_preserved(self) -> None:
+        self.assertEqual(
+            postprocess_cue_text("（笑）喜欢你", "好きだよ"),
+            "（笑）喜欢你",
+        )
+
+    def test_multiline_cleaning_preserves_lines(self) -> None:
+        self.assertEqual(
+            postprocess_cue_text("，第一行\n，第二行", "hello"),
+            "第一行\n第二行",
+        )
 
 
 if __name__ == "__main__":
