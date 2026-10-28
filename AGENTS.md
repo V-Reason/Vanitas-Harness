@@ -123,7 +123,7 @@ vanitas\
 
 ```powershell
 # 1) 语法
-Get-ChildItem vanitas\*.py, tests\test_*.py | ForEach-Object { python -m py_compile $_.FullName }
+Get-ChildItem vanitas\*.py, tests\test_*.py, scripts\*.py | ForEach-Object { python -m py_compile $_.FullName }
 
 # 2) 单测（当前 485 例）
 python -m unittest discover -s tests
@@ -132,6 +132,7 @@ python -m unittest tests.test_agent_parser
 # 3) 静态红线
 Select-String -Path vanitas\*.py -Pattern '8080|8081|8082'                        # 期望空
 Select-String -Path vanitas\*.py -Pattern 'import (psutil|requests|httpx|rich|click)'  # 期望空
+Select-String -Path scripts\*.py -Pattern 'import (psutil|requests|httpx|rich|click|jieba|opencc)'  # 期望空
 Select-String -Path vanitas\*.py -Pattern '提示：'                                 # 期望空：提示行统一为 ·
 Select-String -Path vanitas\*.py -Pattern '\[GUARD-'                              # 期望空：旧守卫标签已移除
 Select-String -Path vanitas\*.py -Pattern '\[(SERVE|LAUNCH|META|HINT|ERROR|STATUS|STOP)\]'  # 期望空：旧 CLI 标签已移除
