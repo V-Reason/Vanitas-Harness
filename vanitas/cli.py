@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -32,7 +33,8 @@ from .errors import (
     TranslateError,
     VanitasError,
 )
-from .monitor import TranslationMonitor
+from .metrics import format_duration
+from .monitor import FileReport, TranslationMonitor, TranslationReport
 from .progress import Spinner
 from .repl import Repl
 from .ui import Palette, resolve_enabled
@@ -74,10 +76,12 @@ def _make_palette(config: AppConfig) -> Palette:
     return Palette(asdict(config.settings.ui.theme), enabled)
 
 
-def _add_verbose(parser: argparse.ArgumentParser) -> None:
+def _add_verbose(
+    parser: argparse.ArgumentParser, help_text: str = VERBOSE_HELP
+) -> None:
     # SUPPRESS 让子命令不覆盖顶层 -v：`vanitas -v serve` 与 `vanitas serve -v` 等价
     parser.add_argument(
-        "-v", "--verbose", action="store_true", default=argparse.SUPPRESS, help=VERBOSE_HELP
+        "-v", "--verbose", action="store_true", default=argparse.SUPPRESS, help=help_text
     )
 
 
@@ -153,6 +157,7 @@ def _build_parser() -> argparse.ArgumentParser:
             " | asmr（ASMR）| general（旧版 4K/5）"
         ),
     )
+    _add_verbose(translate_cmd, "显示完整逐文件报告")
 
     batch_cmd = sub.add_parser("batch", help="按 JSONL 批量执行任务")
     batch_cmd.add_argument("tasks", help="tasks.jsonl 路径")
@@ -523,65 +528,158 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
         except TranslateError as exc:
             print(palette.err(str(exc)), file=sys.stderr)
             return 5
+    verbose = bool(getattr(args, "verbose", False))
+    output_hint = f"输出 {out_dir}" if out_dir is not None else "输出 同源目录"
     print(
         palette.meta(
             f"{model.display} · 档位 {profile.key} · 预设 {preset_name}"
-            f" · {len(plans)} 个文件"
+            f" · {len(plans)} 个文件 · {output_hint}"
         )
     )
-    failures = name_failures
-    for plan in plans:
-        source = plan.source.path
-        # 每个文件独立计时/计量；reset 也负责清掉上一文件的看板。
-        monitor.reset()
-        # 滑动上下文是文档级状态，不能把上一文件的标题/人称带进下一文件。
-        reset_history = getattr(chat, "reset_history", None)
-        if callable(reset_history):
-            reset_history()
-        try:
-            outcome = translate.translate_file(
-                chat,
-                source,
-                effective,
-                out_dir=plan.out_dir,
-                output_stem=plan.source.translated_stem,
-                output_suffix=content_suffix,
-                window_size=window_size,
-                max_window_chars=max_window_chars,
-            )
-        except TranslateError as exc:
-            print(palette.err(f"{plan.label}：{exc}"), file=sys.stderr)
-            failures += 1
-            if monitor.segments:
-                monitor.finish()
-            continue
-        finally:
-            # 成功、失败与意外异常都先擦掉看板，避免残行。
-            monitor.clear()
-        output = outcome.output or plan.target
-        target = output.name
-        if out_dir is not None:
+    report = TranslationReport()
+    total = len(plans)
+    current_index = 0
+    current_started = 0.0
+    interrupted = False
+    batch_started = time.perf_counter()
+    try:
+        for index, plan in enumerate(plans, start=1):
+            current_index = index
+            current_started = time.perf_counter()
+            source = plan.source.path
+            monitor.begin_file(index, total, plan.label)
+            # 滑动上下文是文档级状态，不能把上一文件的标题/人称带进下一文件。
+            reset_history = getattr(chat, "reset_history", None)
+            if callable(reset_history):
+                reset_history()
+            will_overwrite = plan.target.exists()
+            outcome = None
+            error = None
             try:
-                target = output.relative_to(out_dir).as_posix()
-            except ValueError:
-                pass
-        monitor.print_line(
-            palette.ok(f"{plan.label} → {target} · {outcome.segments} 段")
-        )
-        for failure in outcome.failures:
-            print(
-                palette.err(
-                    f"{plan.label} {failure.segment}：{failure.reason}"
-                ),
-                file=sys.stderr,
+                outcome = translate.translate_file(
+                    chat,
+                    source,
+                    effective,
+                    out_dir=plan.out_dir,
+                    output_stem=plan.source.translated_stem,
+                    output_suffix=content_suffix,
+                    window_size=window_size,
+                    max_window_chars=max_window_chars,
+                    on_segment=monitor.set_segment_progress,
+                )
+            except TranslateError as exc:
+                error = str(exc)
+            finally:
+                # 成功、失败、中断与意外异常都先擦掉看板，避免残行。
+                monitor.clear()
+            elapsed = max(0.0, time.perf_counter() - current_started)
+            tokens = monitor.tokens
+            zh_chars = monitor.zh_chars
+            if error is not None:
+                monitor.print_line(
+                    palette.err(
+                        f"[{index}/{total}] {plan.label} · 失败：{error}"
+                        f" · {format_duration(elapsed)}"
+                    )
+                )
+                report.add(
+                    FileReport(
+                        index=index,
+                        total=total,
+                        label=plan.label,
+                        output="—",
+                        segments=0,
+                        elapsed_s=elapsed,
+                        tokens=tokens,
+                        zh_chars=zh_chars,
+                        error=error,
+                    )
+                )
+                current_index = 0
+                continue
+            output = outcome.output or plan.target
+            target = output.name
+            if out_dir is not None:
+                try:
+                    target = output.relative_to(out_dir).as_posix()
+                except ValueError:
+                    pass
+            flags: list[str] = []
+            if outcome.failures:
+                flags.append(f"{len(outcome.failures)} 段失败")
+            if will_overwrite:
+                flags.append("覆盖")
+            suffix = " · " + " · ".join(flags) if flags else ""
+            message = (
+                f"[{index}/{total}] {plan.label} → {target}"
+                f" · {outcome.segments} 段 · {format_duration(elapsed)}{suffix}"
             )
-        failures += len(outcome.failures)
-        monitor.finish()
-    if failures:
+            if outcome.failures:
+                monitor.print_line(palette.warn(message))
+            else:
+                monitor.print_line(palette.ok(message))
+            report.add(
+                FileReport(
+                    index=index,
+                    total=total,
+                    label=plan.label,
+                    output=target,
+                    segments=outcome.segments,
+                    elapsed_s=elapsed,
+                    tokens=tokens,
+                    zh_chars=zh_chars,
+                    failures=tuple(
+                        f"{failure.segment}：{failure.reason}"
+                        for failure in outcome.failures
+                    ),
+                    overwrote=will_overwrite,
+                )
+            )
+            current_index = 0
+    except KeyboardInterrupt:
+        interrupted = True
+        if current_index:
+            elapsed = max(0.0, time.perf_counter() - current_started)
+            monitor.clear()
+            report.add(
+                FileReport(
+                    index=current_index,
+                    total=total,
+                    label=plan.label,
+                    output="—",
+                    segments=0,
+                    elapsed_s=elapsed,
+                    tokens=monitor.tokens,
+                    zh_chars=monitor.zh_chars,
+                    error="用户中断",
+                    interrupted=True,
+                )
+            )
+    total_elapsed = max(0.0, time.perf_counter() - batch_started)
+    print(
+        "\n".join(
+            report.render(
+                palette,
+                verbose=verbose,
+                elapsed_s=total_elapsed,
+                out_dir=out_dir,
+            )
+        )
+    )
+    if name_failures:
         print(
-            palette.warn(f"完成，{failures} 处失败，失败段保留原文"),
+            palette.warn(f"文件名翻译失败 {name_failures} 处"),
             file=sys.stderr,
         )
+    if interrupted:
+        print(
+            palette.warn("已中断，未完成的文件未写出"),
+            file=sys.stderr,
+        )
+        return 1
+    if name_failures:
+        return 5
+    if any(item.status in ("partial", "failed") for item in report.items):
         return 5
     return 0
 
@@ -648,6 +746,7 @@ def _cmd_translate_names(
     translated: list[translate.NameTarget] = []
     total = len(targets)
     name_errors = 0
+    name_fallbacks = 0
     for index, target in enumerate(targets, start=1):
         kind = "目录名" if target.is_dir else "文件名"
         label = f"{kind} {index}/{total} {target.path.name}"
@@ -671,6 +770,7 @@ def _cmd_translate_names(
             )
             continue
         if result.fallback_reason:
+            name_fallbacks += 1
             print(
                 palette.warn(
                     f"保留原名：{label}（{result.fallback_reason}）"
@@ -684,10 +784,12 @@ def _cmd_translate_names(
     except TranslateError as exc:
         print(palette.err(str(exc)), file=sys.stderr)
         return 5
-    if not renames:
-        print(palette.ok("没有需要重命名的名称"))
-    else:
-        print(palette.ok(f"完成，重命名 {len(renames)} 项"))
+    print(
+        palette.ok(
+            f"名称翻译完成 · 共 {len(targets)} 项 · 重命名 {len(renames)}"
+            f" · 保留原名 {name_fallbacks} · 失败 {name_errors}"
+        )
+    )
     return 5 if name_errors else 0
 
 

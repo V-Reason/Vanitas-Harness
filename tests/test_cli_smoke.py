@@ -277,7 +277,8 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("目录名 1/3", err)
         self.assertIn("文件名 2/3", err)
         self.assertIn("文件名 3/3", err)
-        self.assertIn("完成，重命名 3 项", out)
+        self.assertIn("名称翻译完成", out)
+        self.assertIn("重命名 3", out)
 
     def test_translate_filename_only_continues_after_fallback(self) -> None:
         root = self.dir / "media"
@@ -601,7 +602,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(chat.reset_history.call_count, 2)
 
-    def test_translate_two_files_get_independent_compact_stats(self) -> None:
+    def test_translate_two_files_get_index_and_single_report(self) -> None:
         first = self.dir / "a.srt"
         first.write_text(
             "1\n00:00:01,000 --> 00:00:02,000\nHello\n",
@@ -618,21 +619,209 @@ class CliSmokeTests(unittest.TestCase):
             with mock.patch.object(
                 cli, "_ensure_engine", return_value=(FakeClient(), 4060)
             ):
-                code, _out, err = run(
+                code, out, err = run(
                     ["translate", str(first), str(second), "--out-dir", str(out_dir)]
                 )
         self.assertEqual(code, 0, err)
-        summaries = [
-            line
-            for line in err.splitlines()
-            if re.match(r"^\d+ 段 · \d+ 字 · ", line)
-        ]
-        self.assertEqual(len(summaries), 2, err)
-        self.assertTrue(summaries[0].startswith("1 段"))
-        self.assertTrue(summaries[1].startswith("2 段"))
+        self.assertIn("正在翻译 a.srt", err)
+        self.assertIn("[1/2]", err)
+        self.assertIn("[2/2]", err)
+        self.assertIn("翻译完成", out)
+        self.assertEqual(out.count("翻译完成"), 1)
+        self.assertIn("[1/2]", out)
+        self.assertIn("[2/2]", out)
+        self.assertNotRegex(err, r"^\d+ 段 · \d+ 字 · ")
         self.assertNotIn("翻译任务已完成", err)
         self.assertNotIn("统计段数", err)
         self.assertNotIn("累计汉字", err)
+
+    def test_translate_partial_failure_reports_warn_and_exit_5(self) -> None:
+        source = self.dir / "a.srt"
+        source.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nHello\n",
+            encoding="utf-8",
+        )
+        outcome = mock.Mock()
+        outcome.source = source
+        outcome.output = self.dir / "a.zh.srt"
+        outcome.segments = 2
+        outcome.failures = [
+            mock.Mock(segment="line 2", reason="模型返回空内容")
+        ]
+        with clean_env():
+            with (
+                mock.patch.object(
+                    cli, "_ensure_engine", return_value=(FakeClient(), 4060)
+                ),
+                mock.patch.object(
+                    cli.translate, "translate_file", return_value=outcome
+                ),
+            ):
+                code, out, err = run(["translate", str(source)])
+        self.assertEqual(code, 5, err)
+        self.assertIn("⚠", err)
+        self.assertIn("1 段失败", err)
+        self.assertIn("部分失败 1", out)
+        self.assertIn("失败明细", out)
+        self.assertIn("line 2：模型返回空内容", out)
+
+    def test_translate_file_error_continues_and_reports(self) -> None:
+        first = self.dir / "a.srt"
+        first.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nHello\n",
+            encoding="utf-8",
+        )
+        second = self.dir / "b.srt"
+        second.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nBye\n",
+            encoding="utf-8",
+        )
+        outcome = mock.Mock()
+        outcome.source = second
+        outcome.output = self.dir / "b.zh.srt"
+        outcome.segments = 1
+        outcome.failures = []
+
+        def fake_translate(_chat, path, _settings, **_kwargs):
+            if Path(path).name == "a.srt":
+                raise cli.TranslateError("读取失败")
+            return outcome
+
+        with clean_env():
+            with (
+                mock.patch.object(
+                    cli, "_ensure_engine", return_value=(FakeClient(), 4060)
+                ),
+                mock.patch.object(
+                    cli.translate, "translate_file", side_effect=fake_translate
+                ),
+            ):
+                code, out, err = run(
+                    ["translate", str(first), str(second)]
+                )
+        self.assertEqual(code, 5, err)
+        self.assertIn("✗ [1/2]", err)
+        self.assertIn("读取失败", err)
+        self.assertIn("✓ [2/2]", err)
+        self.assertIn("失败 1", out)
+
+    def test_translate_marks_existing_output_as_overwrite(self) -> None:
+        source = self.dir / "a.srt"
+        source.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nHello\n",
+            encoding="utf-8",
+        )
+        (self.dir / "a.zh.srt").write_text("old\n", encoding="utf-8")
+        outcome = mock.Mock()
+        outcome.source = source
+        outcome.output = self.dir / "a.zh.srt"
+        outcome.segments = 1
+        outcome.failures = []
+        with clean_env():
+            with (
+                mock.patch.object(
+                    cli, "_ensure_engine", return_value=(FakeClient(), 4060)
+                ),
+                mock.patch.object(
+                    cli.translate, "translate_file", return_value=outcome
+                ),
+            ):
+                code, out, err = run(["translate", str(source)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("覆盖", err)
+        self.assertIn("覆盖 1", out)
+
+    def test_translate_verbose_shows_all_report_rows(self) -> None:
+        names = [f"{index}.srt" for index in range(1, 14)]
+        for name in names:
+            (self.dir / name).write_text(
+                f"1\n00:00:01,000 --> 00:00:02,000\n{name}\n",
+                encoding="utf-8",
+            )
+        outcome = mock.Mock()
+        outcome.source = self.dir / names[0]
+        outcome.output = self.dir / "1.zh.srt"
+        outcome.segments = 1
+        outcome.failures = []
+        with clean_env():
+            with (
+                mock.patch.object(
+                    cli, "_ensure_engine", return_value=(FakeClient(), 4060)
+                ),
+                mock.patch.object(
+                    cli.translate, "translate_file", return_value=outcome
+                ),
+            ):
+                code, out, err = run(
+                    ["translate", *[str(self.dir / name) for name in names], "-v"]
+                )
+        self.assertEqual(code, 0, err)
+        self.assertIn("[1/13]", out)
+        self.assertIn("[13/13]", out)
+
+    def test_translate_keyboard_interrupt_reports_partial_batch(self) -> None:
+        first = self.dir / "a.srt"
+        first.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nHello\n",
+            encoding="utf-8",
+        )
+        second = self.dir / "b.srt"
+        second.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nBye\n",
+            encoding="utf-8",
+        )
+
+        def fake_translate(_chat, _path, _settings, **_kwargs):
+            raise KeyboardInterrupt
+
+        with clean_env():
+            with (
+                mock.patch.object(
+                    cli, "_ensure_engine", return_value=(FakeClient(), 4060)
+                ),
+                mock.patch.object(
+                    cli.translate, "translate_file", side_effect=fake_translate
+                ),
+            ):
+                code, out, err = run(
+                    ["translate", str(first), str(second)]
+                )
+        self.assertEqual(code, 1, err)
+        self.assertIn("翻译中断", out)
+        self.assertIn("中断 1", out)
+        self.assertIn("已中断", err)
+
+    def test_translate_wires_on_segment_callback(self) -> None:
+        source = self.dir / "a.srt"
+        source.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nHello\n",
+            encoding="utf-8",
+        )
+        outcome = mock.Mock()
+        outcome.source = source
+        outcome.output = self.dir / "a.zh.srt"
+        outcome.segments = 1
+        outcome.failures = []
+        seen: list[tuple[int, int]] = []
+
+        def fake_translate(_chat, _path, _settings, **kwargs):
+            callback = kwargs["on_segment"]
+            callback(1, 4)
+            seen.append((1, 4))
+            return outcome
+
+        with clean_env():
+            with (
+                mock.patch.object(
+                    cli, "_ensure_engine", return_value=(FakeClient(), 4060)
+                ),
+                mock.patch.object(
+                    cli.translate, "translate_file", side_effect=fake_translate
+                ),
+            ):
+                code, _out, err = run(["translate", str(source)])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(seen, [(1, 4)])
 
     def test_translate_directory_recursively_preserves_tree(self) -> None:
         source_dir = self.dir / "src"

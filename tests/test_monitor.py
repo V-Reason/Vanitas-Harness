@@ -15,7 +15,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from vanitas.metrics import SegmentStat  # noqa: E402
-from vanitas.monitor import TranslationMonitor, _display_width  # noqa: E402
+from vanitas.monitor import (  # noqa: E402
+    FileReport,
+    TranslationMonitor,
+    TranslationReport,
+    _display_width,
+)
 from vanitas.config import DEFAULT_THEME  # noqa: E402
 from vanitas.ui import Palette  # noqa: E402
 
@@ -195,6 +200,160 @@ class MonitorTests(unittest.TestCase):
         )
         monitor.print_line("\x1b[32mok\x1b[0m")
         self.assertEqual(stream.getvalue(), "ok\n")
+
+    def test_begin_file_draws_header_with_index_and_progress(self) -> None:
+        stream = io.StringIO()
+        monitor = make_monitor(stream, enabled=True)
+        with mock.patch(
+            "vanitas.monitor.shutil.get_terminal_size",
+            return_value=os.terminal_size((80, 24)),
+        ):
+            monitor.begin_file(2, 6, "a.srt")
+        text = ANSI_RE.sub("", stream.getvalue()).replace("\r", "")
+        self.assertIn("[2/6] a.srt", text)
+        self.assertIn("准备中", text)
+        self.assertIn("00分00秒", text)
+
+    def test_segment_progress_updates_header(self) -> None:
+        stream = io.StringIO()
+        monitor = make_monitor(stream, enabled=True)
+        with mock.patch(
+            "vanitas.monitor.shutil.get_terminal_size",
+            return_value=os.terminal_size((80, 24)),
+        ):
+            monitor.begin_file(1, 3, "a.srt")
+            monitor.set_segment_progress(12, 56)
+        text = ANSI_RE.sub("", stream.getvalue()).replace("\r", "")
+        self.assertIn("[1/3] a.srt", text)
+        self.assertIn("12/56 段 · 21%", text)
+
+    def test_begin_file_header_respects_terminal_width(self) -> None:
+        stream = io.StringIO()
+        monitor = make_monitor(stream, enabled=True)
+        with mock.patch(
+            "vanitas.monitor.shutil.get_terminal_size",
+            return_value=os.terminal_size((40, 8)),
+        ):
+            monitor.begin_file(1, 2, "很长的文件名" * 10)
+        visible = ANSI_RE.sub("", stream.getvalue()).replace("\r", "")
+        for line in visible.splitlines():
+            if line:
+                self.assertLessEqual(_display_width(line), 39)
+
+    def test_clear_collapses_panel_without_blank_gap(self) -> None:
+        stream = io.StringIO()
+        monitor = make_monitor(stream, enabled=True, capacity=5)
+        with mock.patch(
+            "vanitas.monitor.shutil.get_terminal_size",
+            return_value=os.terminal_size((80, 24)),
+        ):
+            monitor.begin_file(1, 2, "a.srt")
+            monitor.record(stat("one", "一"))
+            monitor.print_line("✓ done")
+        visible = ANSI_RE.sub("", stream.getvalue()).replace("\r", "")
+        self.assertIn("✓ done", visible)
+        # 擦除后必须回到面板顶部并清到屏幕末尾；否则完成行前会留下 N 行空白。
+        self.assertIn("\x1b[J", stream.getvalue())
+        self.assertEqual(monitor._drawn, 0)
+
+    def test_non_tty_begin_file_prints_one_plain_line(self) -> None:
+        stream = io.StringIO()
+        monitor = make_monitor(stream, enabled=False)
+        monitor.begin_file(1, 3, "a.srt")
+        self.assertEqual(
+            stream.getvalue(), "· [1/3] 正在翻译 a.srt\n"
+        )
+        self.assertNotIn("\x1b[", stream.getvalue())
+
+    def test_report_renders_success_partial_and_failure(self) -> None:
+        report = TranslationReport()
+        report.add(
+            FileReport(
+                index=1,
+                total=3,
+                label="a.srt",
+                output="a.zh.srt",
+                segments=10,
+                elapsed_s=2.0,
+                tokens=20,
+                zh_chars=30,
+            )
+        )
+        report.add(
+            FileReport(
+                index=2,
+                total=3,
+                label="b.srt",
+                output="—",
+                segments=0,
+                elapsed_s=1.0,
+                error="写入失败",
+            )
+        )
+        report.add(
+            FileReport(
+                index=3,
+                total=3,
+                label="c.srt",
+                output="c.zh.srt",
+                segments=5,
+                elapsed_s=1.0,
+                failures=("line 2：空内容",),
+                overwrote=True,
+            )
+        )
+        text = "\n".join(
+            report.render(
+                Palette({}, enabled=False),
+                width=100,
+                elapsed_s=4.0,
+                out_dir=Path("out"),
+            )
+        )
+        self.assertIn("翻译完成 · 3 个文件 · 15 段 · 30 字", text)
+        self.assertIn("成功 1 · 部分失败 1 · 失败 1 · 中断 0 · 覆盖 1", text)
+        self.assertIn("1 段失败", text)
+        self.assertIn("失败明细", text)
+        self.assertIn("line 2：空内容", text)
+        self.assertIn("写入失败", text)
+        self.assertIn("输出：out", text)
+
+    def test_report_compact_mode_hides_success_rows_over_limit(self) -> None:
+        report = TranslationReport()
+        for index in range(1, 13):
+            report.add(
+                FileReport(
+                    index=index,
+                    total=13,
+                    label=f"{index}.srt",
+                    output=f"{index}.zh.srt",
+                    segments=1,
+                    elapsed_s=0.1,
+                )
+            )
+        report.add(
+            FileReport(
+                index=13,
+                total=13,
+                label="13.srt",
+                output="13.zh.srt",
+                segments=1,
+                elapsed_s=0.1,
+                error="boom",
+            )
+        )
+        text = "\n".join(
+            report.render(Palette({}, enabled=False), width=100)
+        )
+        self.assertNotIn("[1/13]", text)
+        self.assertIn("[13/13]", text)
+        self.assertIn("-v 查看全部 13", text)
+        verbose = "\n".join(
+            report.render(
+                Palette({}, enabled=False), width=100, verbose=True
+            )
+        )
+        self.assertIn("[1/13]", verbose)
 
 
 if __name__ == "__main__":
