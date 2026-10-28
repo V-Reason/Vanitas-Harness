@@ -76,7 +76,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn("请直接回答", text)
         self.assertNotIn("复述", text)
 
-    def test_task_translate_asmr_contract(self) -> None:
+    def test_asmr_prompt_contract(self) -> None:
         text = prompts.load_task(self.prompt_dir, "translate_asmr")
         self.assertIn("{input}", text)
         self.assertIn("{context_history}", text)
@@ -86,6 +86,24 @@ class PromptTests(unittest.TestCase):
         self.assertIn("チュッ", text)
         self.assertIn("はぁ", text)
         self.assertIn("[#序号]", text)
+
+    def test_asmr_prompt_has_general_language_and_window_guard(self) -> None:
+        text = prompts.load_task(self.prompt_dir, "translate_asmr")
+        for phrase in (
+            "<language_and_voice>",
+            "默认使用简体中文",
+            "第二人称按人物关系",
+            "全篇复用",
+            "任何位置不得出现",
+            "不借用相邻行内容",
+            "不要把泛指动作或拟声词具体化",
+            "不音译成无意义的人名",
+        ):
+            self.assertIn(phrase, text)
+        # 提示词保持通用：不写死单部音频才出现的规则/专名。
+        self.assertNotIn("禁止您", text)
+        self.assertNotIn("美咲日和", text)
+        self.assertNotIn("箱川诺亚", text)
 
     def test_task_agent_enforces_sandbox_and_tool_priority(self) -> None:
         text = prompts.load_task(self.prompt_dir, "agent")

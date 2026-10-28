@@ -14,6 +14,7 @@ import unicodedata
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable
 
@@ -32,7 +33,7 @@ SENTENCE_ENDERS = "。！？!?；;"
 BLOCK_SEP = re.compile(r"(\r?\n[ \t]*\r?\n)")
 SRT_TIME = re.compile(r"^\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}")
 WINDOW_ID_RE = re.compile(r"^\[#(\d+)\]\s*(.*)$")
-WINDOW_ID_PREFIX_RE = re.compile(r"^(?:\[#\d+\]\s*)+")
+WINDOW_ID_ANY_RE = re.compile(r"\s*\[#\d+\]\s*")
 ASR_HALLUCINATION_PATTERNS = re.compile(
     r"(?:ご視聴ありがとうございました|チャンネル登録|高評価|ベルマーク|Thank you for watching|Please subscribe|Sous-titres)",
     re.IGNORECASE,
@@ -204,6 +205,9 @@ def sanitize_translation_output(raw_text: str, source_text: str) -> str:
         if not match:
             break
         text = match.group(1).strip()
+    # 编号只属于窗口协议，不应出现在译文正文；行首残留标点也一并清掉。
+    text = WINDOW_ID_ANY_RE.sub("", text).strip()
+    text = text.lstrip("，、；：").lstrip()
     # 省略号/破折号已经承担句末语气，后面再追加句号属于重复标点。
     text = re.sub(r"(……|——)。", r"\1", text)
     if _has_dialogue_quotes(source_text):
@@ -815,8 +819,119 @@ def recover_window_response(
 
 
 def strip_window_id_prefix(text: str) -> str:
-    """去掉回退译文行首误带的 [#N]；不触碰正文中间的内容。"""
-    return WINDOW_ID_PREFIX_RE.sub("", text.strip()).lstrip()
+    """删除译文任意位置误带的 [#N]；编号不应进入正文。"""
+    return WINDOW_ID_ANY_RE.sub("", text.strip()).strip()
+
+
+def _normalize_for_compare(text: str) -> str:
+    """去掉空白与常见断句符号，用于检测“不同原文、相同译文”的窗口错位。"""
+    return re.sub(r"[\s。！？，、…—]+", "", text)
+
+
+def _source_texts_are_similar(left: str, right: str) -> bool:
+    """短句/同义改写不触发重复检测，避免把正常近义句误判为错位。"""
+    if not left or not right:
+        return False
+    return SequenceMatcher(None, left, right).ratio() >= 0.75
+
+
+def _window_translation_is_suspicious(
+    window: list[tuple[int, Subtitle]],
+    aligned: dict[str, str],
+) -> bool:
+    """检测结构完整但语义明显错位的窗口，避免把相邻行译文写进当前 cue。
+
+    三类信号：
+    1. 正文残留 [#N]；
+    2. 非空原文对应空译文；
+    3. 不同原文得到完全相同且足够长的译文（合法重复短句不触发）。
+    """
+    pairs: list[tuple[str, str]] = []
+    for _index, subtitle in window:
+        translation = aligned.get(subtitle.index, "")
+        if WINDOW_ID_ANY_RE.search(translation):
+            return True
+        if subtitle.text.strip() and not translation.strip():
+            return True
+        pairs.append((_normalize_for_compare(subtitle.text), translation))
+
+    for left in range(len(pairs)):
+        source_left, translation_left = pairs[left]
+        normalized_left = _normalize_for_compare(translation_left)
+        if len(normalized_left) < 8 or len(source_left) < 4:
+            continue
+        for right in range(left + 1, len(pairs)):
+            source_right, translation_right = pairs[right]
+            if source_left == source_right or len(source_right) < 4:
+                continue
+            if _source_texts_are_similar(source_left, source_right):
+                continue
+            normalized_right = _normalize_for_compare(translation_right)
+            if normalized_left == normalized_right:
+                return True
+            # 相邻行部分重叠：一个译文完整包含另一个，或两者高度相似，通常是把下一行内容并进来了。
+            if len(normalized_left) >= 8 and len(normalized_right) >= 8 and (
+                normalized_left in normalized_right
+                or normalized_right in normalized_left
+                or SequenceMatcher(None, normalized_left, normalized_right).ratio()
+                >= 0.8
+            ):
+                return True
+    return False
+
+
+def _translate_single_cue(
+    chat: Callable[[str], str],
+    subtitle: Subtitle,
+    *,
+    source: str,
+    failures: list[TranslationFailure],
+) -> str | None:
+    """窗口回退时按“单编号窗口”重译，避免无编号裸文本被模型续写多行。"""
+    prompt = f"[#{subtitle.index}] {subtitle.text}"
+    try:
+        raw = chat(prompt)
+    except (EngineError, TranslateError) as exc:
+        failures.append(
+            TranslationFailure(
+                source=source,
+                segment=f"line {subtitle.index}",
+                reason=str(exc),
+            )
+        )
+        return None
+
+    ok, aligned, _missing = parse_window_response(raw, [subtitle.index])
+    if not ok:
+        ok, aligned, _missing = recover_window_response(raw, [subtitle.index])
+    if ok:
+        return strip_window_id_prefix(aligned[subtitle.index])
+
+    cleaned = strip_window_id_prefix(raw)
+    if not cleaned:
+        failures.append(
+            TranslationFailure(
+                source=source,
+                segment=f"line {subtitle.index}",
+                reason="单句回退返回空译文",
+            )
+        )
+        return None
+    # 没有编号却返回多个编号/多行，说明模型仍在续写相邻行；宁可保留原文，不写入错位内容。
+    source_lines = len([line for line in subtitle.text.splitlines() if line.strip()])
+    leaked_ids = WINDOW_ID_ANY_RE.findall(raw)
+    if len(leaked_ids) > 1 or (
+        source_lines <= 1 and len([line for line in cleaned.splitlines() if line.strip()]) > 2
+    ):
+        failures.append(
+            TranslationFailure(
+                source=source,
+                segment=f"line {subtitle.index}",
+                reason="单句回退疑似续写相邻行，已保留原文",
+            )
+        )
+        return None
+    return cleaned
 
 
 def translate_srt(
@@ -910,6 +1025,8 @@ def translate_srt(
                     ok, aligned, _missing = recover_window_response(
                         batch_output, expected_ids
                     )
+                if ok and _window_translation_is_suspicious(window, aligned):
+                    ok = False
                 if ok:
                     for _block_index, subtitle in window:
                         subtitle.text = strip_window_id_prefix(
@@ -922,17 +1039,19 @@ def translate_srt(
 
         if fallback:
             # 硬熔断：该窗口原地回退为逐句串行，绝不采用部分对齐结果
+            reset_history = getattr(chat, "reset_history", None)
             for _block_index, subtitle in window:
-                result = _translate_chunks(
+                # 单句回退不继承上一句的滑动上下文，避免模型续写相邻行。
+                if callable(reset_history):
+                    reset_history()
+                result = _translate_single_cue(
                     chat,
-                    subtitle.text,
-                    chunk_chars=chunk_chars,
+                    subtitle,
                     source=source,
-                    label=f"line {subtitle.index}",
                     failures=failures,
                 )
                 if result is not None:
-                    subtitle.text = strip_window_id_prefix(result)
+                    subtitle.text = result
 
         done += len(window)
         if on_segment is not None:

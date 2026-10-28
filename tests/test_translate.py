@@ -31,6 +31,7 @@ from vanitas.translate import (  # noqa: E402
     rebuild_srt,
     sanitize_filename_stem,
     sanitize_translation_output,
+    strip_window_id_prefix,
     translate_file,
 )
 
@@ -322,6 +323,22 @@ class TranslateTests(unittest.TestCase):
             ["译一", "译二", "译三", "译四"],
         )
 
+    def test_translate_srt_rejects_multiline_single_fallback(self) -> None:
+        source = self.write("multiline-fallback.srt", self._windowed_srt())
+
+        def chat(prompt: str) -> str:
+            if "\n" in prompt:
+                return "[#1] 不完整"
+            return "第一行\n第二行\n第三行"
+
+        outcome = translate_file(chat, source, SETTINGS, window_size=2)
+        self.assertEqual(len(outcome.failures), 4)
+        translated = outcome.output.read_text(encoding="utf-8")
+        self.assertEqual(
+            [block.text for block, _ in parse_srt(translated, "\n")],
+            ["一", "二", "三", "四"],
+        )
+
     def test_translate_srt_fallback_strips_window_id_prefix(self) -> None:
         source = self.write("fallback-ids.srt", self._windowed_srt())
 
@@ -344,6 +361,155 @@ class TranslateTests(unittest.TestCase):
             ["译一", "译二", "译三", "译四"],
         )
         self.assertNotIn("[#", translated)
+
+    def test_strip_window_id_prefix_removes_inline_ids(self) -> None:
+        self.assertEqual(
+            strip_window_id_prefix("译文 [#12] 内容 [#13]"),
+            "译文内容",
+        )
+        self.assertEqual(strip_window_id_prefix("[#1] 开头"), "开头")
+
+    def test_translate_srt_rejects_inline_window_id_and_falls_back(self) -> None:
+        source = self.write("inline-id.srt", self._windowed_srt())
+        batch_calls = 0
+        single_calls = 0
+
+        def chat(prompt: str) -> str:
+            nonlocal batch_calls, single_calls
+            if "\n" in prompt:
+                batch_calls += 1
+                return "[#1] 译一\n[#2] 译二 [#1]"
+            single_calls += 1
+            return f"译{prompt}"
+
+        outcome = translate_file(chat, source, SETTINGS, window_size=2)
+        self.assertEqual(outcome.failures, [])
+        self.assertEqual(batch_calls, 2)
+        self.assertEqual(single_calls, 4)
+        translated = outcome.output.read_text(encoding="utf-8")
+        self.assertNotIn("[#", translated)
+        self.assertEqual(
+            [block.text for block, _ in parse_srt(translated, "\n")],
+            ["译一", "译二", "译三", "译四"],
+        )
+
+    def test_translate_srt_rejects_duplicate_translation_for_distinct_sources(self) -> None:
+        source = self.write(
+            "duplicate.srt",
+            "1\n00:00:01,000 --> 00:00:02,000\n"
+            "今日はとても楽しかったです\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\n"
+            "明日の予定を確認します\n",
+        )
+        batch_calls = 0
+        single_calls = 0
+
+        def chat(prompt: str) -> str:
+            nonlocal batch_calls, single_calls
+            if "\n" in prompt:
+                batch_calls += 1
+                return "[#1] 这是完全相同的一条长译文\n[#2] 这是完全相同的一条长译文"
+            single_calls += 1
+            return f"译{prompt}"
+
+        outcome = translate_file(chat, source, SETTINGS, window_size=2)
+        self.assertEqual(outcome.failures, [])
+        self.assertEqual(batch_calls, 1)
+        self.assertEqual(single_calls, 2)
+        translated = outcome.output.read_text(encoding="utf-8")
+        self.assertIn("译今日はとても楽しかったです", translated)
+        self.assertIn("译明日の予定を確認します", translated)
+
+    def test_translate_srt_rejects_partial_translation_overlap(self) -> None:
+        source = self.write(
+            "overlap.srt",
+            "1\n00:00:01,000 --> 00:00:02,000\n今回初めて割と音だけ\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\nを楽しむ部分が\n",
+        )
+        batch_calls = 0
+        single_calls = 0
+
+        def chat(prompt: str) -> str:
+            nonlocal batch_calls, single_calls
+            if "\n" in prompt:
+                batch_calls += 1
+                return (
+                    "[#1] 这次是第一次，单纯享受声音的部分可真多呢。\n"
+                    "[#2] 享受声音的部分可真多呢。"
+                )
+            single_calls += 1
+            return f"译{prompt}"
+
+        outcome = translate_file(chat, source, SETTINGS, window_size=2)
+        self.assertEqual(outcome.failures, [])
+        self.assertEqual(batch_calls, 1)
+        self.assertEqual(single_calls, 2)
+
+    def test_translate_srt_accepts_repeated_short_source_lines(self) -> None:
+        source = self.write(
+            "repeat.srt",
+            "1\n00:00:01,000 --> 00:00:02,000\n好き\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\n好き\n",
+        )
+        batch_calls = 0
+
+        def chat(prompt: str) -> str:
+            nonlocal batch_calls
+            if "\n" in prompt:
+                batch_calls += 1
+                return "[#1] 喜欢你\n[#2] 喜欢你"
+            return "喜欢你"
+
+        outcome = translate_file(chat, source, SETTINGS, window_size=2)
+        self.assertEqual(outcome.failures, [])
+        self.assertEqual(batch_calls, 1)
+        translated = outcome.output.read_text(encoding="utf-8")
+        self.assertEqual(
+            [block.text for block, _ in parse_srt(translated, "\n")],
+            ["喜欢你", "喜欢你"],
+        )
+
+    def test_translate_srt_accepts_similar_source_lines_with_same_translation(self) -> None:
+        source = self.write(
+            "similar.srt",
+            "1\n00:00:01,000 --> 00:00:02,000\nもうやれやれみたいな感じで\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\nやれやれみたいな感じが\n",
+        )
+        batch_calls = 0
+
+        def chat(prompt: str) -> str:
+            nonlocal batch_calls
+            if "\n" in prompt:
+                batch_calls += 1
+                return "[#1] 好像有种“真是的”的感觉。\n[#2] 好像有种“真是的”的感觉。"
+            return "好像有种“真是的”的感觉。"
+
+        outcome = translate_file(chat, source, SETTINGS, window_size=2)
+        self.assertEqual(outcome.failures, [])
+        self.assertEqual(batch_calls, 1)
+
+    def test_translate_srt_rejects_empty_translation_for_nonempty_source(self) -> None:
+        source = self.write("empty-window.srt", self._windowed_srt())
+        batch_calls = 0
+        single_calls = 0
+
+        def chat(prompt: str) -> str:
+            nonlocal batch_calls, single_calls
+            if "\n" in prompt:
+                batch_calls += 1
+                return "[#1] \n[#2] 译二"
+            single_calls += 1
+            return f"译{prompt}"
+
+        outcome = translate_file(chat, source, SETTINGS, window_size=2)
+        self.assertEqual(outcome.failures, [])
+        self.assertEqual(batch_calls, 2)
+        self.assertEqual(single_calls, 4)
+        translated = outcome.output.read_text(encoding="utf-8")
+        self.assertEqual(
+            [block.text for block, _ in parse_srt(translated, "\n")],
+            ["译一", "译二", "译三", "译四"],
+        )
 
     def test_translate_file_with_asmr_preset_end_to_end(self) -> None:
         source = ROOT / "tests" / "fixtures" / "sample_asmr.srt"
@@ -1062,6 +1228,16 @@ class TranslationEngineTests(unittest.TestCase):
     def test_sanitize_removes_period_after_ellipsis(self) -> None:
         self.assertEqual(sanitize_translation_output("你好……。", "hello"), "你好……")
         self.assertEqual(sanitize_translation_output("你好——。", "hello"), "你好——")
+
+    def test_sanitize_strips_window_id_and_leading_punctuation(self) -> None:
+        self.assertEqual(
+            sanitize_translation_output("，[#12] 你好", "hello"),
+            "你好",
+        )
+        self.assertEqual(
+            sanitize_translation_output("，我们要不要一起看看呢？", "hello"),
+            "我们要不要一起看看呢？",
+        )
 
     def test_sanitize_filename_stem_preserves_quotes_and_strips_prefix(self) -> None:
         self.assertEqual(sanitize_filename_stem("文件名：时钟.md", ".md"), "时钟")
