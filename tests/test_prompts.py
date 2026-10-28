@@ -105,6 +105,26 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("美咲日和", text)
         self.assertNotIn("箱川诺亚", text)
 
+    def test_asmr_prompt_has_sensory_and_crossline_rules(self) -> None:
+        text = prompts.load_task(self.prompt_dir, "translate_asmr")
+        for phrase in (
+            "<sensory_immersion>",
+            "贴耳",
+            "化掉",
+            "麻酥酥",
+            "热气呼到耳边",
+            "让人上瘾",
+            "扑倒",
+            "使坏",
+            "接续助词",
+            "不预支",
+            "原文没有任何括号",
+        ):
+            self.assertIn(phrase, text)
+        self.assertEqual(
+            prompts.placeholders(text), {"input", "context_history"}
+        )
+
     def test_task_agent_enforces_sandbox_and_tool_priority(self) -> None:
         text = prompts.load_task(self.prompt_dir, "agent")
         self.assertIn("当前工作目录：{cwd}", text)
