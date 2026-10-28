@@ -12,7 +12,7 @@ import re
 import time
 import unicodedata
 import uuid
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -403,6 +403,376 @@ def _clip(text: str, limit: int) -> str:
     return compact[: max(0, limit - 1)] + "…"
 
 
+# --------------------------------------------------------------------------- #
+# 文档级实体倒排索引（无模型调用、无第三方依赖）
+# --------------------------------------------------------------------------- #
+
+KATAKANA_ENTITY_RE = re.compile(r"[\u30a1-\u30f6\u30fc]{2,8}")
+HONORIFIC_NAME_RE = re.compile(
+    r"([\u4e00-\u9fa5\u30a1-\u30f6\u30fc]{1,5})"
+    r"(?:ちゃん|さん|くん|様|さま|先生|先輩)"
+)
+KANJI_CHUNK_RE = re.compile(r"[\u4e00-\u9fa5]{2,4}")
+ENTITY_HONORIFIC_SUFFIXES = ("ちゃん", "さん", "くん", "様", "さま", "先生", "先輩")
+
+# 噪声停用表：只过滤普通词/拟声词，不是译名词表。
+ENTITY_STOPWORDS = frozenset(
+    {
+        "赤", "客", "お客", "姉", "兄", "皆", "奥", "旦那", "彼", "彼女",
+        "子", "猫", "犬", "店員", "店長", "先生", "先輩", "友達", "家族",
+        "母", "父", "妹", "弟", "おばあ", "おじい", "大丈", "本当", "今日",
+        "明日", "昨日", "自分", "相手", "時間", "場所", "一緒", "最後",
+        "最初", "全部", "全然", "普通", "最近", "今度", "今回", "来週",
+        "先週", "今年", "去年", "毎日", "気持", "気分", "身体", "頭",
+        "チュッ", "チュッチュ", "クチュ", "ジュル", "レロ", "コト", "コツン",
+        "ドキドキ", "ゴクッ", "オイル", "ローション", "テスト", "カフェ",
+        "ホテル", "マッサージ", "ラブラブ",
+    }
+)
+
+ENTITY_MAX_CLUSTERS = 12
+ENTITY_MAX_VARIANTS = 8
+ENTITY_MAX_EXAMPLES = 2
+ENTITY_EXAMPLE_CHARS = 80
+ENTITY_CONTEXT_CHARS = 1200
+
+
+def _common_prefix(values: set[str]) -> str:
+    items = list(values)
+    if not items:
+        return ""
+    prefix = items[0]
+    for item in items[1:]:
+        limit = min(len(prefix), len(item))
+        index = 0
+        while index < limit and prefix[index] == item[index]:
+            index += 1
+        prefix = prefix[:index]
+        if not prefix:
+            return ""
+    return prefix
+
+
+def _edit_distance(left: str, right: str) -> int:
+    if left == right:
+        return 0
+    previous = list(range(len(right) + 1))
+    for i, left_char in enumerate(left, 1):
+        current = [i]
+        for j, right_char in enumerate(right, 1):
+            current.append(
+                min(
+                    previous[j] + 1,
+                    current[j - 1] + 1,
+                    previous[j - 1] + (0 if left_char == right_char else 1),
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def _seed_related(left: str, right: str) -> bool:
+    if left == right or left in right or right in left:
+        return True
+    if left[:1] != right[:1]:
+        return False
+    if len(left) >= 3 and len(right) >= 3:
+        if SequenceMatcher(None, left, right).ratio() >= 0.75:
+            return True
+    return abs(len(left) - len(right)) <= 1 and _edit_distance(left, right) <= 1
+
+
+def _base_of_variant(variant: str) -> str:
+    for suffix in ENTITY_HONORIFIC_SUFFIXES:
+        if variant.endswith(suffix) and len(variant) > len(suffix):
+            return variant[: -len(suffix)]
+    return variant
+
+
+class DynamicEntityEngine:
+    """文档级实体索引：种子召回变体，首发锁定 + 前文示例注入。
+
+    设计目标是“宁漏不错”：片假名/敬称名/共同前缀汉字变体才进入索引；
+    锁定只接受“源行以实体开头且后接标点、译文前 2–4 字后接标点”的高置信
+    场景，其余只保存前文示例。``enforce_locks`` 只清理未翻译的日文专名，
+    不假装能确定性替换中文译名变体。
+    """
+
+    def __init__(self, raw_cues: list[str]) -> None:
+        self.canonical_map: dict[str, str] = {}
+        self.locked_translations: dict[str, str] = {}
+        self.examples: dict[str, list[tuple[str, str]]] = {}
+        self._variants: dict[str, set[str]] = {}
+        self._canonical_order: list[str] = []
+        self._build_index(raw_cues)
+
+    # ------------------------------------------------------------------ #
+    # 索引
+    # ------------------------------------------------------------------ #
+
+    def _build_index(self, raw_cues: list[str]) -> None:
+        katakana_counts: Counter[str] = Counter()
+        honorific_counts: Counter[str] = Counter()
+        honorific_forms: dict[str, str] = {}
+        kanji_counts: Counter[str] = Counter()
+        all_counts: Counter[str] = Counter()
+        first_seen: dict[str, int] = {}
+
+        for index, text in enumerate(raw_cues):
+            for match in KATAKANA_ENTITY_RE.finditer(text):
+                term = match.group(0)
+                katakana_counts[term] += 1
+                all_counts[term] += 1
+                first_seen.setdefault(term, index)
+            for match in HONORIFIC_NAME_RE.finditer(text):
+                name = match.group(1)
+                full = match.group(0)
+                if name in ENTITY_STOPWORDS:
+                    continue
+                honorific_counts[name] += 1
+                honorific_forms[full] = name
+                all_counts[name] += 1
+                all_counts[full] += 1
+                first_seen.setdefault(name, index)
+                first_seen.setdefault(full, index)
+            for match in KANJI_CHUNK_RE.finditer(text):
+                term = match.group(0)
+                kanji_counts[term] += 1
+                all_counts[term] += 1
+                first_seen.setdefault(term, index)
+
+        seeds: dict[str, int] = {}
+        for term, count in katakana_counts.items():
+            if count >= 2 and term not in ENTITY_STOPWORDS:
+                seeds[term] = max(seeds.get(term, 0), count)
+        for term, count in honorific_counts.items():
+            weighted = count * 2
+            if weighted >= 2 and term not in ENTITY_STOPWORDS:
+                seeds[term] = max(seeds.get(term, 0), weighted)
+
+        prefix_groups: dict[str, set[str]] = {}
+        for term in kanji_counts:
+            if len(term) >= 3:
+                prefix_groups.setdefault(term[:2], set()).add(term)
+        for prefix, variants in prefix_groups.items():
+            if len(variants) < 2 or prefix in ENTITY_STOPWORDS:
+                continue
+            common = _common_prefix(variants)
+            if len(common) < 2 or common in ENTITY_STOPWORDS:
+                continue
+            seeds[common] = max(
+                seeds.get(common, 0),
+                sum(kanji_counts[item] for item in variants),
+            )
+
+        if not seeds:
+            return
+
+        clusters: list[set[str]] = []
+        for term in sorted(seeds, key=lambda item: (-seeds[item], -len(item), item)):
+            related = [
+                cluster
+                for cluster in clusters
+                if any(_seed_related(term, other) for other in cluster)
+            ]
+            merged = {term}
+            for cluster in related:
+                merged |= cluster
+                clusters.remove(cluster)
+            clusters.append(merged)
+
+        candidate_terms = (
+            set(katakana_counts) | set(kanji_counts) | set(honorific_forms)
+        )
+        cluster_for: dict[str, str] = {}
+        cluster_scores: dict[str, int] = {}
+        for cluster in clusters:
+            canonical = min(
+                cluster,
+                key=lambda item: (len(item), -seeds.get(item, 0), item),
+            )
+            variants = set(cluster)
+            for term in candidate_terms:
+                if term == canonical or canonical in term:
+                    variants.add(term)
+            for full, name in honorific_forms.items():
+                if name == canonical:
+                    variants.add(full)
+            self._variants[canonical] = variants
+            for term in variants:
+                cluster_for[term] = canonical
+            cluster_scores[canonical] = sum(
+                all_counts[term] for term in variants
+            )
+            first_seen[canonical] = min(
+                (first_seen.get(term, 10**9) for term in variants),
+                default=10**9,
+            )
+
+        kept = sorted(
+            cluster_scores,
+            key=lambda item: (
+                -cluster_scores[item],
+                first_seen.get(item, 10**9),
+                item,
+            ),
+        )[:ENTITY_MAX_CLUSTERS]
+        kept_set = set(kept)
+        self._variants = {
+            canonical: variants
+            for canonical, variants in self._variants.items()
+            if canonical in kept_set
+        }
+        for term, canonical in cluster_for.items():
+            if canonical in kept_set:
+                self.canonical_map[term] = canonical
+        self._canonical_order = kept
+
+    # ------------------------------------------------------------------ #
+    # 查询 / 捕捉 / 收敛
+    # ------------------------------------------------------------------ #
+
+    def get_query_context(self, window_text: str) -> str:
+        """按当前窗口原文召回实体；无命中返回空串，由调用方叠加滑动前文。"""
+        blocks: list[tuple[str, str, str]] = []
+        for canonical in self._canonical_order:
+            variants_set = self._variants.get(canonical)
+            if not variants_set:
+                continue
+            if not any(variant in window_text for variant in variants_set):
+                continue
+            variants = sorted(
+                variants_set, key=lambda item: (-len(item), item)
+            )[:ENTITY_MAX_VARIANTS]
+            locked = self.locked_translations.get(canonical, "")
+            examples = self.examples.get(canonical, [])[:ENTITY_MAX_EXAMPLES]
+            if len(variants) <= 1 and not locked and not examples:
+                continue
+            base = [f"- 实体「{canonical}」：{' / '.join(variants)}"]
+            if locked:
+                base.append(f"  已锁定译名：{locked}")
+            with_examples = list(base)
+            for source, translation in examples:
+                with_examples.append(
+                    f"  前文：{_clip(source, ENTITY_EXAMPLE_CHARS)} -> "
+                    f"{_clip(translation, ENTITY_EXAMPLE_CHARS)}"
+                )
+            blocks.append(
+                (canonical, "\n".join(base), "\n".join(with_examples))
+            )
+
+        if not blocks:
+            return ""
+
+        title = (
+            "【本文实体与前文译法（仅供参考；同一实体必须统一译名，"
+            "勿漂移，勿整句照抄）】"
+        )
+        for use_examples in (True, False):
+            lines = [title]
+            total = len(title) + 1
+            for _canonical, without_examples, with_examples in blocks:
+                block = with_examples if use_examples else without_examples
+                if total + len(block) + 1 > ENTITY_CONTEXT_CHARS:
+                    continue
+                lines.append(block)
+                total += len(block) + 1
+            if len(lines) > 1:
+                return "\n".join(lines)
+        return ""
+
+    def capture_translations(
+        self, window_src: list[str], window_zh: list[str]
+    ) -> None:
+        """从完成窗口捕捉前文示例；仅高置信场景写入锁定译名。"""
+        for source, translation in zip(window_src, window_zh):
+            source = source.strip()
+            translation = translation.strip()
+            if not source or not translation:
+                continue
+            hits = [
+                canonical
+                for canonical in self._canonical_order
+                if any(
+                    variant in source
+                    for variant in self._variants.get(canonical, ())
+                )
+            ]
+            if not hits:
+                continue
+            for canonical in hits[:2]:
+                self._add_example(canonical, source, translation)
+            if len(hits) != 1:
+                continue
+            canonical = hits[0]
+            if canonical in self.locked_translations:
+                continue
+            locked = self._extract_locked_name(source, translation, canonical)
+            if locked:
+                self.locked_translations[canonical] = locked
+
+    def enforce_locks(self, zh_text: str) -> str:
+        """把中文译文里未翻译的日文专名收敛到已锁定译名。"""
+        if not zh_text or not self.locked_translations:
+            return zh_text
+        result = zh_text
+        for canonical, locked in sorted(
+            self.locked_translations.items(),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        ):
+            variants = sorted(
+                self._variants.get(canonical, {canonical}),
+                key=len,
+                reverse=True,
+            )
+            for variant in variants:
+                if variant and variant in result:
+                    result = result.replace(variant, locked)
+        return result
+
+    def _add_example(
+        self, canonical: str, source: str, translation: str
+    ) -> None:
+        items = self.examples.setdefault(canonical, [])
+        pair = (source.strip(), translation.strip())
+        if pair in items:
+            return
+        if len(items) < ENTITY_MAX_EXAMPLES:
+            items.append(pair)
+
+    def _extract_locked_name(
+        self, source: str, translation: str, canonical: str
+    ) -> str:
+        stripped_source = source.lstrip()
+        if not stripped_source or stripped_source.startswith(
+            ("（", "(", "【", "[")
+        ):
+            return ""
+        variants = sorted(
+            self._variants.get(canonical, {canonical}),
+            key=len,
+            reverse=True,
+        )
+        matched = ""
+        for variant in variants:
+            if not stripped_source.startswith(variant):
+                continue
+            rest = stripped_source[len(variant):]
+            if not rest or rest[0] in "、，,！!?？…":
+                matched = variant
+                break
+        if not matched or _base_of_variant(matched) != canonical:
+            return ""
+        match = re.match(
+            r"^([\u4e00-\u9fa5]{2,4})(?=[，。！？、；：…—~]|$)",
+            translation,
+        )
+        if not match:
+            return ""
+        return match.group(1)
+
+
 class TranslationEngine:
     """单段翻译管线：滑动上下文、预算门禁、截断重译与统计事件。"""
 
@@ -422,6 +792,7 @@ class TranslationEngine:
         self._options = options
         window = max(0, int(self._options.context_window))
         self._history: deque[tuple[str, str]] = deque(maxlen=window)
+        self._entity_engine: DynamicEntityEngine | None = None
         self._on_stat = on_stat
 
     def __call__(self, text: str) -> str:
@@ -431,8 +802,12 @@ class TranslationEngine:
         return self._translate_once(text, depth=0)
 
     def reset_history(self) -> None:
-        """开始新文档时清空滑动上下文，避免跨文件标题/人称串染。"""
+        """开始新文档时清空滑动上下文；文档级实体锁定表不受影响。"""
         self._history.clear()
+
+    def set_entity_engine(self, engine: DynamicEntityEngine | None) -> None:
+        """绑定文档级实体索引；由 translate_srt 在单文件翻译期间管理。"""
+        self._entity_engine = engine
 
     def translate_filename(self, filename: str) -> str:
         """用翻译模型把文件名主体译成中文；不写入正文上下文。"""
@@ -531,9 +906,19 @@ class TranslationEngine:
         return "\n".join(lines)
 
     def _render(self, text: str) -> tuple[list[dict], int, int]:
+        entity_context = ""
+        if self._entity_engine is not None:
+            entity_context = self._entity_engine.get_query_context(text)
+        history = self._context_text()
+        if entity_context and history == "无前文，故事开端":
+            context = entity_context
+        elif entity_context:
+            context = entity_context + "\n\n【前文】\n" + history
+        else:
+            context = history
         prompt = prompts.render(
             self._template,
-            {"input": text, "context_history": self._context_text()},
+            {"input": text, "context_history": context},
         )
         messages: list[dict] = []
         if self._system.strip():
@@ -1020,6 +1405,9 @@ def translate_srt(
     done = 0
 
     if window_size <= 1:
+        clear_entity = getattr(chat, "set_entity_engine", None)
+        if callable(clear_entity):
+            clear_entity(None)
         for _block_index, subtitle in valid_items:
             if not subtitle.text.strip():
                 # ASR 幻觉已置空：不调用模型，但仍计入已完成段，保持进度与 segments 一致
@@ -1043,83 +1431,109 @@ def translate_srt(
                 on_segment(done, total)
         return rebuild_srt(blocks, eol)
 
-    windows: list[list[tuple[int, Subtitle]]] = []
-    current: list[tuple[int, Subtitle]] = []
-    current_chars = 0
-    for item in translatable:
-        text_len = len(item[1].text)
-        if current and (
-            len(current) >= window_size
-            or current_chars + text_len > max_window_chars
-        ):
+    entity_engine = DynamicEntityEngine(
+        [subtitle.text for _index, subtitle in translatable]
+    )
+    setter = getattr(chat, "set_entity_engine", None)
+    if callable(setter):
+        setter(entity_engine)
+    try:
+        windows: list[list[tuple[int, Subtitle]]] = []
+        current: list[tuple[int, Subtitle]] = []
+        current_chars = 0
+        for item in translatable:
+            text_len = len(item[1].text)
+            if current and (
+                len(current) >= window_size
+                or current_chars + text_len > max_window_chars
+            ):
+                windows.append(current)
+                current = []
+                current_chars = 0
+            current.append(item)
+            current_chars += text_len
+            if len(current) >= window_size:
+                windows.append(current)
+                current = []
+                current_chars = 0
+        if current:
             windows.append(current)
-            current = []
-            current_chars = 0
-        current.append(item)
-        current_chars += text_len
-        if len(current) >= window_size:
-            windows.append(current)
-            current = []
-            current_chars = 0
-    if current:
-        windows.append(current)
 
-    for window in windows:
-        expected_ids = [item[1].index for item in window]
-        fallback = len(set(expected_ids)) != len(expected_ids)
-        if not fallback:
-            batch_prompt = "\n".join(
-                f"[#{item[1].index}] {item[1].text}" for item in window
-            )
-            try:
-                batch_output = chat(batch_prompt)
-                ok, aligned, _missing = parse_window_response(
-                    batch_output, expected_ids
+        for window in windows:
+            expected_ids = [item[1].index for item in window]
+            fallback = len(set(expected_ids)) != len(expected_ids)
+            if not fallback:
+                batch_prompt = "\n".join(
+                    f"[#{item[1].index}] {item[1].text}" for item in window
                 )
-                if not ok:
-                    ok, aligned, _missing = recover_window_response(
+                try:
+                    batch_output = chat(batch_prompt)
+                    ok, aligned, _missing = parse_window_response(
                         batch_output, expected_ids
                     )
-                if ok and _window_translation_is_suspicious(window, aligned):
-                    ok = False
-                if ok:
-                    for _block_index, subtitle in window:
-                        subtitle.text = postprocess_cue_text(
-                            strip_window_id_prefix(aligned[subtitle.index]),
-                            subtitle.text,
+                    if not ok:
+                        ok, aligned, _missing = recover_window_response(
+                            batch_output, expected_ids
                         )
-                else:
+                    if ok and _window_translation_is_suspicious(window, aligned):
+                        ok = False
+                    if ok:
+                        window_sources = [item[1].text for item in window]
+                        staging: list[tuple[Subtitle, str]] = []
+                        for _block_index, subtitle in window:
+                            text = strip_window_id_prefix(
+                                aligned[subtitle.index]
+                            )
+                            text = postprocess_cue_text(text, subtitle.text)
+                            text = entity_engine.enforce_locks(text)
+                            staging.append((subtitle, text))
+                        entity_engine.capture_translations(
+                            window_sources,
+                            [text for _subtitle, text in staging],
+                        )
+                        for subtitle, text in staging:
+                            subtitle.text = entity_engine.enforce_locks(text)
+                    else:
+                        fallback = True
+                except (EngineError, TranslateError):
                     fallback = True
-            except (EngineError, TranslateError):
-                fallback = True
 
-        if fallback:
-            # 硬熔断：该窗口原地回退为逐句串行，绝不采用部分对齐结果
-            reset_history = getattr(chat, "reset_history", None)
-            for _block_index, subtitle in window:
-                # 单句回退不继承上一句的滑动上下文，避免模型续写相邻行。
-                if callable(reset_history):
-                    reset_history()
-                result = _translate_single_cue(
-                    chat,
-                    subtitle,
-                    source=source,
-                    failures=failures,
-                )
-                if result is not None:
-                    subtitle.text = postprocess_cue_text(result, subtitle.text)
+            if fallback:
+                # 硬熔断：该窗口原地回退为逐句串行，绝不采用部分对齐结果
+                reset_history = getattr(chat, "reset_history", None)
+                for _block_index, subtitle in window:
+                    # 单句回退不继承上一句的滑动上下文，避免模型续写相邻行。
+                    if callable(reset_history):
+                        reset_history()
+                    result = _translate_single_cue(
+                        chat,
+                        subtitle,
+                        source=source,
+                        failures=failures,
+                    )
+                    if result is not None:
+                        result = postprocess_cue_text(result, subtitle.text)
+                        result = entity_engine.enforce_locks(result)
+                        entity_engine.capture_translations(
+                            [subtitle.text], [result]
+                        )
+                        result = entity_engine.enforce_locks(result)
+                        subtitle.text = result
 
-        done += len(window)
-        if on_segment is not None:
-            on_segment(done, total)
+            done += len(window)
+            if on_segment is not None:
+                on_segment(done, total)
 
-    if filtered:
-        # 被 ASR 硬清洗的空块不发请求，但要在末尾补齐进度，保证 done==total
-        done += filtered
-        if on_segment is not None:
-            on_segment(done, total)
+        if filtered:
+            # 被 ASR 硬清洗的空块不发请求，但要在末尾补齐进度，保证 done==total
+            done += filtered
+            if on_segment is not None:
+                on_segment(done, total)
 
-    return rebuild_srt(blocks, eol)
+        return rebuild_srt(blocks, eol)
+    finally:
+        if callable(setter):
+            setter(None)
 
 
 def translate_prose(

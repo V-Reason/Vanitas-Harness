@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 from vanitas.config import TranslateSettings  # noqa: E402
 from vanitas.errors import EngineError, TranslateError  # noqa: E402
 from vanitas.translate import (  # noqa: E402
+    DynamicEntityEngine,
     NameTarget,
     TranslationEngine,
     TranslationOptions,
@@ -624,6 +625,42 @@ class TranslateTests(unittest.TestCase):
         self.assertEqual(
             [block.text for block, _ in parse_srt(output, "\n")],
             ["你的话我会听"],
+        )
+        self.assertEqual(failures, [])
+
+    def test_entity_context_injected_into_second_window(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                "[#1] 诺亚，早上好\n[#2] 今天天气真好",
+                "[#3] 诺亚，再见\n[#4] 晚安",
+            ]
+        )
+        engine = TranslationEngine(
+            client,
+            ROOT / "config" / "prompts",
+            "",
+            options=translation_options(),
+            task_template="translate_asmr",
+        )
+        failures = []
+        output = translate_srt(
+            engine,
+            "1\n00:00:01,000 --> 00:00:02,000\nノアちゃん、おはよう\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\n今日はいい天気だね\n\n"
+            "3\n00:00:05,000 --> 00:00:06,000\nノアチップ、またね\n\n"
+            "4\n00:00:07,000 --> 00:00:08,000\nおやすみ\n",
+            chunk_chars=800,
+            source="entity.srt",
+            eol="\n",
+            failures=failures,
+            window_size=2,
+        )
+        self.assertEqual(len(client.calls), 2)
+        self.assertIn("【本文实体", client.calls[1])
+        self.assertIn("已锁定译名：诺亚", client.calls[1])
+        self.assertEqual(
+            [block.text for block, _ in parse_srt(output, "\n")],
+            ["诺亚，早上好", "今天天气真好", "诺亚，再见", "晚安"],
         )
         self.assertEqual(failures, [])
 
@@ -1425,6 +1462,97 @@ class TranslationEngineTests(unittest.TestCase):
                 sanitize_translation_output(translated, source), translated
             )
             self.assertEqual(translated.count("“"), translated.count("”"))
+
+
+class DynamicEntityEngineTests(unittest.TestCase):
+    def test_dynamic_entity_clustering_and_propagation(self) -> None:
+        engine = DynamicEntityEngine(
+            ["ノアちゃん、おはよう", "ノアチップ、またね"]
+        )
+        self.assertEqual(engine.canonical_map.get("ノア"), "ノア")
+        self.assertEqual(engine.canonical_map.get("ノアチップ"), "ノア")
+        engine.capture_translations(
+            ["ノアちゃん、おはよう"], ["诺亚，早上好"]
+        )
+        self.assertEqual(engine.locked_translations.get("ノア"), "诺亚")
+        context = engine.get_query_context("ノアチップ、またね")
+        self.assertIn("已锁定译名：诺亚", context)
+        self.assertIn("ノアチップ", context)
+        self.assertIn("诺亚，早上好", context)
+
+    def test_kanji_variant_prefix_clustering(self) -> None:
+        engine = DynamicEntityEngine(
+            ["美咲日和はどこ？", "美咲希织、大好き"]
+        )
+        self.assertEqual(engine.canonical_map.get("美咲日和"), "美咲")
+        self.assertEqual(engine.canonical_map.get("美咲希织"), "美咲")
+
+    def test_common_words_are_not_entities(self) -> None:
+        engine = DynamicEntityEngine(
+            [
+                "今日はいい天気",
+                "大丈夫",
+                "お客さん、またね",
+                "赤ちゃん、かわいい",
+            ]
+        )
+        for term in ("今日", "大丈夫", "お客", "赤"):
+            self.assertNotIn(term, engine.canonical_map)
+
+    def test_no_entity_context_returns_empty(self) -> None:
+        engine = DynamicEntityEngine(["今日はいい天気", "大丈夫"])
+        self.assertEqual(engine.get_query_context("今日はいい天気"), "")
+
+    def test_capture_does_not_lock_non_leading_name(self) -> None:
+        engine = DynamicEntityEngine(
+            ["ノアちゃん、おはよう", "ノアチップ、またね"]
+        )
+        engine.capture_translations(
+            ["今日はノアちゃんと"], ["今天和诺亚一起"]
+        )
+        self.assertNotIn("ノア", engine.locked_translations)
+        self.assertTrue(engine.examples.get("ノア"))
+
+    def test_capture_does_not_take_whole_line_prefix(self) -> None:
+        engine = DynamicEntityEngine(
+            ["ノアちゃん、おはよう", "ノアチップ、またね"]
+        )
+        engine.capture_translations(
+            ["ノアちゃん、おはよう"], ["诺亚早上好"]
+        )
+        self.assertNotIn("诺亚", engine.locked_translations.values())
+
+    def test_capture_skips_ambiguous_multi_entity_line(self) -> None:
+        engine = DynamicEntityEngine(
+            ["ノアちゃん、おはよう", "美咲さん、こんばんは"]
+        )
+        engine.capture_translations(
+            ["ノアちゃんと美咲さん"], ["诺亚和美咲"]
+        )
+        self.assertNotIn("ノア", engine.locked_translations)
+        self.assertNotIn("美咲", engine.locked_translations)
+
+    def test_kanji_long_variant_does_not_shorten_lock(self) -> None:
+        engine = DynamicEntityEngine(
+            ["美咲日和はどこ？", "美咲希织、大好き"]
+        )
+        engine.capture_translations(
+            ["美咲日和、おはよう"], ["美咲日和，早上好"]
+        )
+        self.assertNotIn("美咲", engine.locked_translations)
+
+    def test_enforce_locks_cleans_untranslated_japanese(self) -> None:
+        engine = DynamicEntityEngine(
+            ["ノアちゃん、おはよう", "ノアチップ、またね"]
+        )
+        engine.capture_translations(
+            ["ノアちゃん、おはよう"], ["诺亚，早上好"]
+        )
+        self.assertEqual(engine.enforce_locks("ノア、再见"), "诺亚、再见")
+        self.assertEqual(
+            engine.enforce_locks("ノアチップ、再见"), "诺亚、再见"
+        )
+        self.assertEqual(engine.enforce_locks("诺亚，再见"), "诺亚，再见")
 
 
 class PostprocessTests(unittest.TestCase):
