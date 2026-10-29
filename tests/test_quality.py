@@ -23,6 +23,7 @@ from vanitas.quality import (  # noqa: E402
     audit_duplicate,
     audit_first_person,
     audit_honorific,
+    audit_negative_question,
     audit_quote_private,
     audit_tag_question,
     audit_translation,
@@ -30,6 +31,7 @@ from vanitas.quality import (  # noqa: E402
     detect_register,
     normalize_compare,
     repair_first_person_name,
+    repair_quote_private,
 )
 
 LONG_A = "这是完全相同的一条长译文"
@@ -390,7 +392,13 @@ class NarrowAuditTests(unittest.TestCase):
         )
 
     def test_quote_private_only_narrow_first_person_modes(self) -> None:
-        for translation in ("让我叫你雫", "我的名字是雫", "让你叫我雫"):
+        for translation in (
+            "让我叫你雫",
+            "我的名字是雫",
+            "让你叫我雫",
+            # 叠词口误“叫我叫”是把引用句写成了第一人称，必须报。
+            "说叫我叫雫就好",
+        ):
             with self.subTest(translation=translation):
                 issues = audit_quote_private(
                     "私のことは雫でいいって", translation, 7
@@ -402,9 +410,8 @@ class NarrowAuditTests(unittest.TestCase):
         for translation in (
             "他说，叫我雫就好",
             "会长说叫她雫就好",
-            # 旧坏译不再是必报夹具：单独“叫我”在语境中可能正确，
-            # 保留为人工/QC residual，不触发自动重译。
-            "说叫我叫雫就好",
+            # 单独“叫我”在语境中可能正确，保留为人工/QC residual，
+            # 不触发自动重译。
         ):
             with self.subTest(translation=translation):
                 self.assertEqual(
@@ -419,6 +426,47 @@ class NarrowAuditTests(unittest.TestCase):
             [],
         )
         self.assertEqual(audit_quote_private("", "", 7), [])
+
+    def test_repair_quote_private_only_for_narrow_quote_source(self) -> None:
+        source = "私のことは雫でいいって"
+        self.assertEqual(
+            repair_quote_private(source, "说叫我叫雫就好"),
+            "说叫我雫就好",
+        )
+        # 普通“叫我”在语境中可能正确，不得顺手改写。
+        self.assertEqual(
+            repair_quote_private(source, "他说，叫我雫就好"),
+            "他说，叫我雫就好",
+        )
+        # 源文没有引用标记“って”时原样返回，避免改普通自我介绍。
+        self.assertEqual(
+            repair_quote_private("私のことは雫でいい", "说叫我叫雫就好"),
+            "说叫我叫雫就好",
+        )
+        # 空输入原样返回。
+        self.assertEqual(repair_quote_private("", ""), "")
+        self.assertEqual(repair_quote_private(source, ""), "")
+        self.assertEqual(
+            repair_quote_private("", "说叫我叫雫就好"), "说叫我叫雫就好"
+        )
+
+    def test_negative_question_keeps_polarity(self) -> None:
+        source = "私のこと、覚えていませんか?"
+        issues = audit_negative_question(source, "你还记得我吗？", 12)
+        self.assertEqual([issue.code for issue in issues], ["negative_question"])
+        self.assertIn("否定", issues[0].hint)
+        self.assertEqual(
+            audit_negative_question(source, "你不记得我了吗？", 12), []
+        )
+        self.assertEqual(
+            audit_negative_question(source, "难道你忘了我吗？", 12), []
+        )
+        # 「〜ませんか」是邀请，不是持续体否定疑问，不报。
+        self.assertEqual(
+            audit_negative_question("一緒に行きませんか", "要不要一起去？", 1),
+            [],
+        )
+        self.assertEqual(audit_negative_question("", "", 1), [])
 
     def test_first_person_requires_absent_source_pronoun_and_cue_word(self) -> None:
         issues = audit_first_person(

@@ -565,6 +565,11 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                     output_suffix=content_suffix,
                     window_size=window_size,
                     max_window_chars=max_window_chars,
+                    join_rules=(
+                        getattr(chat, "join_rules", ())
+                        if window_size > 1
+                        else ()
+                    ),
                     on_segment=monitor.set_segment_progress,
                 )
             except TranslateError as exc:

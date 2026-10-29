@@ -14,31 +14,19 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
-from pathlib import Path
 
+from .cue_boundary import (
+    JoinRule,
+    _match_rule,
+    load_joins,
+    parse_timing,
+)
 from .errors import TranslateError
 from .translate import parse_srt
 
-JOIN_COLUMNS = 3
 MAX_GAP_MS = 1000
 MAX_MERGED_DURATION_MS = 8000
-
-TIMING_RE = re.compile(
-    r"^(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})"
-    r"\s*-->\s*"
-    r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})"
-)
-
-
-@dataclass(frozen=True)
-class JoinRule:
-    """一行合并规则；只在两个 cue 的边界同时命中时使用。"""
-
-    left_tail: str
-    right_head: str
-    replacement: str
 
 
 @dataclass(frozen=True)
@@ -70,88 +58,6 @@ class RepairResult:
         return self.merged > 0
 
 
-def load_joins(path: Path) -> tuple[JoinRule, ...]:
-    """读取 ``left_tail<TAB>right_head<TAB>replacement`` 合并表。
-
-    ``#`` 注释与空行跳过；列数不对、空字段、重复键都带 ``文件:行号``
-    抛 ``TranslateError``，不允许静默丢规则。
-    """
-    path = Path(path)
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError as exc:
-        raise TranslateError(f"{path}: 合并表不存在") from exc
-    except OSError as exc:
-        raise TranslateError(
-            f"{path}: 读取合并表失败：{exc.strerror or exc}"
-        ) from exc
-
-    rules: list[JoinRule] = []
-    seen: dict[tuple[str, str], int] = {}
-    for line_no, line in enumerate(raw.splitlines(), start=1):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        parts = line.split("\t")
-        if len(parts) != JOIN_COLUMNS:
-            raise TranslateError(
-                f"{path}:{line_no}: 合并表必须为 3 列 "
-                "left_tail<TAB>right_head<TAB>replacement"
-            )
-        left_tail, right_head, replacement = (
-            part.strip() for part in parts
-        )
-        if not left_tail or not right_head or not replacement:
-            raise TranslateError(
-                f"{path}:{line_no}: left_tail/right_head/replacement 不能为空"
-            )
-        key = (left_tail, right_head)
-        if key in seen:
-            raise TranslateError(
-                f"{path}:{line_no}: 重复键：{left_tail}<TAB>{right_head}"
-                f"（首次见第 {seen[key]} 行）"
-            )
-        seen[key] = line_no
-        rules.append(
-            JoinRule(
-                left_tail=left_tail,
-                right_head=right_head,
-                replacement=replacement,
-            )
-        )
-    return tuple(rules)
-
-
-def parse_timing(
-    timing: str,
-) -> tuple[int, int, str, str] | None:
-    """解析 ``HH:MM:SS,mmm --> HH:MM:SS,mmm``。
-
-    返回 ``(start_ms, end_ms, start_text, end_text)``；无法解析返回 None。
-    毫秒按右补零解释（`,1` 等价 100ms），与常见 SRT 工具一致。
-    """
-    match = TIMING_RE.match(timing.strip())
-    if match is None:
-        return None
-    start_h, start_m, start_s, start_frac = match.groups()[:4]
-    end_h, end_m, end_s, end_frac = match.groups()[4:]
-    start_ms = (
-        int(start_h) * 3_600_000
-        + int(start_m) * 60_000
-        + int(start_s) * 1000
-        + int(start_frac.ljust(3, "0"))
-    )
-    end_ms = (
-        int(end_h) * 3_600_000
-        + int(end_m) * 60_000
-        + int(end_s) * 1000
-        + int(end_frac.ljust(3, "0"))
-    )
-    start_text = f"{int(start_h):02d}:{start_m}:{start_s},{start_frac.ljust(3, '0')}"
-    end_text = f"{int(end_h):02d}:{end_m}:{end_s},{end_frac.ljust(3, '0')}"
-    return start_ms, end_ms, start_text, end_text
-
-
 def parse_cues(text: str) -> list[AsrCue]:
     """解析 SRT；每个 cue 的多行正文按无空格拼接并压成单行。"""
     raw = text.lstrip("\ufeff")
@@ -179,15 +85,6 @@ def render_srt(cues: list[AsrCue]) -> str:
     if not blocks:
         return ""
     return "\n\n".join(blocks) + "\n"
-
-
-def _match_rule(
-    left: str, right: str, rules: tuple[JoinRule, ...]
-) -> JoinRule | None:
-    for rule in rules:
-        if left.endswith(rule.left_tail) and right.startswith(rule.right_head):
-            return rule
-    return None
 
 
 def _timing_is_monotonic(cues: list[AsrCue]) -> bool:

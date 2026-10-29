@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from vanitas.config import TranslateSettings  # noqa: E402
+from vanitas.cue_boundary import load_joins  # noqa: E402
 from vanitas.errors import EngineError, TranslateError  # noqa: E402
 from vanitas.translate import (  # noqa: E402
     DynamicEntityEngine,
@@ -263,6 +264,38 @@ class TranslateTests(unittest.TestCase):
             [block.text for block, _ in blocks],
             ["译一", "译二", "译三", "译四"],
         )
+
+    def test_short_window_translation_falls_back_to_single_cues(self) -> None:
+        text = (
+            "1\n00:00:01,000 --> 00:00:02,000\n"
+            "体におかけしているタオルがちょっとでも動いたら、本当に許しませんからね\n"
+            "\n"
+            "2\n00:00:03,000 --> 00:00:04,000\n"
+            "許しませんからね\n"
+        )
+        source = self.write("short-window.srt", text)
+        batch_calls = 0
+        single_calls = 0
+
+        def chat(prompt: str) -> str:
+            nonlocal batch_calls, single_calls
+            if "\n" in prompt:
+                batch_calls += 1
+                # 批量把长句压成拟声词；必须整窗回退，不能静默接受。
+                return "[#1] 哒——哒——\n[#2] 好"
+            single_calls += 1
+            if "タオル" in prompt:
+                return "要是搭在身上的毛巾有半点动的话"
+            return "我可不会放过你的哦"
+
+        outcome = translate_file(chat, source, SETTINGS, window_size=2)
+        self.assertEqual(batch_calls, 1)
+        self.assertEqual(single_calls, 2)
+        self.assertEqual(outcome.failures, [])
+        blocks = parse_srt(outcome.output.read_text(encoding="utf-8"), "\n")
+        self.assertEqual(len(blocks), 2)
+        self.assertIn("毛巾", blocks[0][0].text)
+        self.assertIn("放过", blocks[1][0].text)
 
     def test_translate_srt_recovers_reset_window_ids(self) -> None:
         source = self.write("reset-ids.srt", self._windowed_srt())
@@ -883,6 +916,71 @@ class TranslateTests(unittest.TestCase):
         self.assertIn("哈啊……", blocks[2][0].text)
         self.assertEqual(blocks[3][0].text.strip(), "")
         self.assertNotIn("ご視聴", translated)
+
+    def test_translate_file_moves_split_word_across_cue_boundary(self) -> None:
+        joins = load_joins(ROOT / "config" / "asr_joins.tsv")
+        self.assertTrue(joins)
+        text = (
+            "1\n"
+            "00:00:01,000 --> 00:00:02,000\n"
+            "いらっしゃいましたらカ\n"
+            "\n"
+            "2\n"
+            "00:00:02,001 --> 00:00:03,500\n"
+            "ウンターへお越しください。\n"
+        )
+        source = self.write("counter.srt", text)
+        calls: list[str] = []
+
+        def mock_chat(prompt: str) -> str:
+            calls.append(prompt)
+            if "ウンター" in prompt:
+                return "请到柜台来。"
+            return "译…"
+
+        baseline_calls: list[str] = []
+
+        def baseline_chat(prompt: str) -> str:
+            baseline_calls.append(prompt)
+            if "ウンター" in prompt:
+                return "请到柜台来。"
+            return "译…"
+
+        # 不开合并规则时同一 fixture 的请求次数：窗口批调用 1 次 + 逐句回退 2 次。
+        translate_file(baseline_chat, source, SETTINGS, window_size=2)
+        self.assertEqual(len(baseline_calls), 3)
+
+        outcome = translate_file(
+            mock_chat,
+            source,
+            SETTINGS,
+            join_rules=joins,
+            window_size=2,
+            out_dir=self.dir / "joined",
+        )
+        self.assertEqual(outcome.failures, [])
+        # 右吸附只改正文，不增加模型请求。
+        self.assertEqual(len(calls), len(baseline_calls))
+
+        translated = outcome.output.read_text(encoding="utf-8")
+        blocks = parse_srt(translated, "\n")
+        source_blocks = parse_srt(text, "\n")
+        self.assertEqual(len(blocks), len(source_blocks))
+        self.assertEqual(
+            [block.index for block, _ in blocks],
+            [block.index for block, _ in source_blocks],
+        )
+        self.assertEqual(
+            [block.timing for block, _ in blocks],
+            [block.timing for block, _ in source_blocks],
+        )
+        self.assertIn("柜台", blocks[1][0].text)
+        # 合并后的右 cue 应把“カ”带回来，提示词里不再是半截词。
+        self.assertTrue(
+            any("カウンターへお越しください。" in prompt for prompt in calls)
+        )
+        self.assertFalse(any("[#2] ウンター" in prompt for prompt in calls))
+        self.assertFalse(any("ましたらカ" in prompt for prompt in calls))
 
     def test_asr_hallucination_hard_filter(self) -> None:
         text = (
@@ -2088,6 +2186,29 @@ class QualityGuardTests(unittest.TestCase):
         self.assertEqual(
             self.block_texts(output), ["请用她的名字好好叫她哦"]
         )
+
+    def test_quote_private_repair_runs_after_first_person_rename(self) -> None:
+        """e2e：引用句“叫我叫”在 finalize 末段收敛，cue/时间轴不变。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "quote.srt"
+            source.write_text(
+                "1\n00:00:01,000 --> 00:00:02,500\n私のことは雫でいいって\n",
+                encoding="utf-8",
+            )
+
+            def mock_chat(_prompt: str) -> str:
+                return "说叫我叫雫就好"
+
+            outcome = translate_file(mock_chat, source, SETTINGS, window_size=1)
+
+            self.assertEqual(outcome.failures, [])
+            translated = outcome.output.read_text(encoding="utf-8")
+            blocks = parse_srt(translated, "\n")
+            self.assertEqual(len(blocks), 1)
+            block, _separator = blocks[0]
+            self.assertEqual(block.index, "1")
+            self.assertEqual(block.timing, "00:00:01,000 --> 00:00:02,500")
+            self.assertEqual(block.text, "说叫我雫就好")
 
 
 class DynamicEntityEngineTests(unittest.TestCase):

@@ -21,6 +21,7 @@ from typing import Callable
 from . import prompts
 from .client import LlamaClient
 from .config import AppConfig, ModelSpec, TranslateSettings
+from .cue_boundary import JoinRule, load_joins, transfer_texts
 from .errors import EngineError, OutputTruncated, TranslateError
 from .metrics import (
     PROMPT_OVERHEAD,
@@ -38,6 +39,7 @@ from .quality import (
     detect_register,
     normalize_compare,
     repair_first_person_name,
+    repair_quote_private,
 )
 
 SENTENCE_ENDERS = "。！？!?；;"
@@ -959,11 +961,22 @@ class TranslationEngine:
             self._glossary = Glossary.load(
                 prompt_dir.parent / "glossary" / "asmr.tsv"
             )
+        # 合并表与术语表同级：仅 ASMR 任务且表存在时启用，缺失时保持旧行为。
+        self._join_rules: tuple[JoinRule, ...] = ()
+        if task_template == "translate_asmr":
+            joins_path = prompt_dir.parent / "asr_joins.tsv"
+            if joins_path.exists():
+                self._join_rules = load_joins(joins_path)
 
     @property
     def glossary(self) -> Glossary:
         """只读术语表；translate_srt 通过它做 cue 级确定性后处理。"""
         return self._glossary
+
+    @property
+    def join_rules(self) -> tuple[JoinRule, ...]:
+        """只读跨 cue 断词规则；非 ASMR 任务或表缺失时为空元组。"""
+        return self._join_rules
 
     def __call__(self, text: str) -> str:
         return self.translate(text)
@@ -1511,6 +1524,21 @@ def _copies_history(
     return False
 
 
+def _translation_is_too_short(source_text: str, translation: str) -> bool:
+    """非空原文对应极短译文时判可疑；只拦明显漏译，不追求语义判断。
+
+    QC 目前只查“超长”，没有“过短=漏译”。批量窗口一旦把邻近行/拟声词
+    写进当前 cue，可能整句丢失但仍通过硬校验；这里只拦“长源文 + 极短
+    译文”的明显漏译，触发整窗回退让逐句路径重译。阈值刻意保守：源文
+    至少 30 字、译文不超过 6 字，避免把简短中文口语/语气词误判。
+    """
+    source_norm = _normalize_for_compare(source_text)
+    translation_norm = _normalize_for_compare(translation)
+    if len(source_norm) < 30 or not translation_norm:
+        return False
+    return len(translation_norm) <= 6
+
+
 def _window_translation_is_suspicious(
     window: list[tuple[int, Subtitle]],
     aligned: dict[str, str],
@@ -1518,11 +1546,12 @@ def _window_translation_is_suspicious(
 ) -> bool:
     """检测结构完整但语义明显错位的窗口，避免把相邻行译文写进当前 cue。
 
-    四类信号：
+    五类信号：
     1. 正文残留 [#N]；
     2. 非空原文对应空译文；
-    3. 不同原文得到完全相同且足够长的译文（合法重复短句不触发）；
-    4. 当前译文整段复用历史前文（跨窗复制，例如 396 -> 411）。
+    3. 非空原文对应极短译文（明显漏译）；
+    4. 不同原文得到完全相同且足够长的译文（合法重复短句不触发）；
+    5. 当前译文整段复用历史前文（跨窗复制，例如 396 -> 411）。
     """
     pairs: list[tuple[str, str]] = []
     for _index, subtitle in window:
@@ -1530,6 +1559,8 @@ def _window_translation_is_suspicious(
         if WINDOW_ID_ANY_RE.search(translation):
             return True
         if subtitle.text.strip() and not translation.strip():
+            return True
+        if _translation_is_too_short(subtitle.text, translation):
             return True
         if _copies_history(subtitle.text, translation, history):
             return True
@@ -1640,6 +1671,7 @@ def translate_srt(
     on_segment: Callable[[int, int], None] | None = None,
     window_size: int = 1,
     max_window_chars: int = 250,
+    join_rules: tuple[JoinRule, ...] = (),
 ) -> str:
     blocks = parse_srt(text, eol)
     valid_items = [
@@ -1648,9 +1680,6 @@ def translate_srt(
         if block.index and block.text.strip()
     ]
     total = len(valid_items)
-    # 解析 blocks 后、ASR 幻觉置空前保存 valid 源文快照；此时 subtitle 尚未被
-    # 改写，快照保留原始内容，供语域判定等文档级派生使用。
-    source_snapshot = [subtitle.text for _index, subtitle in valid_items]
     translatable: list[tuple[int, Subtitle]] = []
     filtered = 0
     for item in valid_items:
@@ -1660,10 +1689,17 @@ def translate_srt(
             filtered += 1
         else:
             translatable.append(item)
+    # 文档级快照前先做跨 cue 断词右吸附：只改正文，不改 cue 数/序号/时间轴。
+    if join_rules and translatable:
+        texts = [subtitle.text for _index, subtitle in translatable]
+        timings = [subtitle.timing for _index, subtitle in translatable]
+        texts, _ = transfer_texts(texts, timings, join_rules)
+        for (_index, subtitle), joined in zip(translatable, texts):
+            subtitle.text = joined
+    source_snapshot = [subtitle.text for _index, subtitle in translatable]
     done = 0
 
-    # 快照早于置空，但平台套话属于待清洗内容：判语域时显式剔除，避免片尾
-    # 敬语词把整篇语域带偏（否则“チャンネル登録…お客様…”会翻转 service）。
+    # 快照已排除 ASR 幻觉；这里仍过滤一次，防止调用方直接复用快照时漏清洗。
     register = detect_register(
         [
             text
@@ -1695,7 +1731,10 @@ def translate_srt(
         text_out = apply_pronoun_policy(text_out, profile)
         # 仅“下の名前で呼んであげて”场景：模型固执输出“我的名字/让我/叫我”，
         # 在 validate 前做确定性第三人称收敛；其余源文原样返回。
-        return repair_first_person_name(source_text, text_out)
+        text_out = repair_first_person_name(source_text, text_out)
+        # 仅“私のことは…って”引用场景：叠词口误“叫我叫”收敛成“叫我”，
+        # 放在人称收敛之后，避免前一步替换出的文本被再次改写。
+        return repair_quote_private(source_text, text_out)
 
     def cue_of(subtitle: Subtitle) -> int:
         return int(subtitle.index) if subtitle.index.isdigit() else 0
@@ -2462,6 +2501,7 @@ def translate_file(
     on_segment: Callable[[int, int], None] | None = None,
     window_size: int = 1,
     max_window_chars: int = 250,
+    join_rules: tuple[JoinRule, ...] = (),
 ) -> TranslationOutcome:
     source = Path(source)
     if not source.is_file():
@@ -2488,6 +2528,7 @@ def translate_file(
             on_segment=on_segment,
             window_size=window_size,
             max_window_chars=max_window_chars,
+            join_rules=join_rules,
         )
     else:
         segments = sum(1 for paragraph, _ in split_prose(text) if paragraph.strip())

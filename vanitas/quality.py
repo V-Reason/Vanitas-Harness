@@ -440,7 +440,7 @@ CUSTOMER_REVERSED_RE = re.compile(
 CUSTOMER_OBJECT_RE = re.compile(
     r"(?:触碰|接触|摸|碰)[^。！？]{0,8}(?:客人|您)"
 )
-QUOTE_PRIVATE_BAD_RE = re.compile(r"让我叫|我的名字|让你叫")
+QUOTE_PRIVATE_BAD_RE = re.compile(r"让我叫|我的名字|让你叫|叫我叫")
 QUOTE_PRIVATE_THIRD_RE = re.compile(r"叫她|叫他|称她|称他")
 FIRST_PERSON_SOURCE_RE = re.compile(r"私|僕|俺|わたし|あたし|自分")
 FIRST_PERSON_CUE_RE = re.compile(r"名前|呼ぶ|呼んで|あげて")
@@ -455,6 +455,11 @@ TAG_QUESTION_SOURCE_RE = re.compile(
     r"ね|でしょ|でしょう|だろう|確認|だろ|じゃん|っけ|っしょ"
 )
 TAG_QUESTION_TRANSLATIONS = ("对吧", "是吧", "对不对", "好不好")
+# 否定疑问「〜ていませんか」问的是“你不是…吗/你不…吗”，中文若写成
+# 肯定句会把语义方向反过来。只认持续体否定疑问，避免误伤「〜ませんか」
+# 这种邀请句（如「一緒に行きませんか」= 要不要一起去）。
+NEGATIVE_QUESTION_SOURCE_RE = re.compile(r"ていませんか|ではありませんか")
+NEGATIVE_TRANSLATION_RE = re.compile(r"不|没|没有|难道|不是|未")
 
 
 def audit_customer_direction(
@@ -498,7 +503,7 @@ def audit_customer_direction(
 def audit_quote_private(
     source: str, translation: str, cue: int | str
 ) -> list[AuditIssue]:
-    """``私のことは…って`` 是引用他人，不能被译成“让我叫/我的名字/让你叫”。"""
+    """``私のことは…って`` 是引用他人，不能被译成“让我叫/我的名字/让你叫/叫我叫”。"""
     if not source.strip() or not translation.strip():
         return []
     if "私のことは" not in source:
@@ -512,7 +517,7 @@ def audit_quote_private(
                 cue=cue,
                 message="引用他人被译成了第一人称",
                 hint=(
-                    "这是引用他人（…って）；不要译成“让我叫/我的名字/让你叫”，"
+                    "这是引用他人（…って）；不要译成“让我叫/我的名字/让你叫/叫我叫”，"
                     "保持第三人称转述；单独“叫我”不算坏译"
                 ),
             )
@@ -522,6 +527,49 @@ def audit_quote_private(
     if QUOTE_PRIVATE_THIRD_RE.search(translation):
         return []
     return []
+
+
+def repair_quote_private(source: str, text: str) -> str:
+    """引用句里的叠词口误 ``叫我叫`` 收敛成 ``叫我``。
+
+    只用于源文是 ``私のことは…って`` 的引用场景（与 ``audit_quote_private``
+    同一触发条件），且译文确实含 ``叫我叫`` 时才替换。普通“叫我”在语境中
+    可能正确，不在此处改动；条件不满足原样返回。
+    """
+    if not text or "叫我叫" not in text:
+        return text
+    if "私のことは" not in source:
+        return text
+    if not source.rstrip("。！？!?… ").endswith("って"):
+        return text
+    return text.replace("叫我叫", "叫我")
+
+
+def audit_negative_question(
+    source: str, translation: str, cue: int | str
+) -> list[AuditIssue]:
+    """源文是「〜ていませんか」否定疑问，译文却写成肯定句时报告。
+
+    例：「私のこと、覚えていませんか?」= 你不记得我了吗；译成“你还记得我
+    吗”会把方向反转。只匹配持续体否定疑问，不碰「〜ませんか」邀请句。
+    """
+    if not source.strip() or not translation.strip():
+        return []
+    if not NEGATIVE_QUESTION_SOURCE_RE.search(source):
+        return []
+    if NEGATIVE_TRANSLATION_RE.search(translation):
+        return []
+    return [
+        AuditIssue(
+            code="negative_question",
+            cue=cue,
+            message="否定疑问被译成了肯定句",
+            hint=(
+                "原文是「〜ていませんか」否定疑问；"
+                "译文要保留否定（如“你不记得我了吗”），不要译成肯定"
+            ),
+        )
+    ]
 
 
 def audit_first_person(
@@ -623,6 +671,7 @@ def audit_translation(
         *audit_duplicate(source, translation, cue, index),
         *audit_customer_direction(source, translation, cue),
         *audit_quote_private(source, translation, cue),
+        *audit_negative_question(source, translation, cue),
         *audit_first_person(source, translation, cue),
         *audit_tag_question(source, translation, cue),
         *audit_honorific(translation, profile, cue),
