@@ -32,6 +32,7 @@ from vanitas.translate import (  # noqa: E402
     plan_translation_outputs,
     postprocess_cue_text,
     rebuild_srt,
+    salvage_slash_translation,
     sanitize_filename_stem,
     sanitize_translation_output,
     strip_window_id_prefix,
@@ -2425,6 +2426,36 @@ class PostprocessTests(unittest.TestCase):
             postprocess_cue_text("你好 [#12]", "hello"),
             "你好",
         )
+
+    def test_salvage_slash_translation_avoids_raw_source_fallback(self) -> None:
+        self.assertEqual(salvage_slash_translation("先生/女士"), "先生")
+        self.assertEqual(
+            salvage_slash_translation("ツルペタオセックス/光溜溜的做爱"),
+            "光溜溜的做爱",
+        )
+
+        source = "1\n00:00:01,000 --> 00:00:02,000\nこんにちは\n"
+        calls: list[str] = []
+
+        def chat(prompt: str) -> str:
+            calls.append(prompt)
+            return "你好/您好"
+
+        failures: list = []
+        output = translate_srt(
+            chat,
+            source,
+            chunk_chars=800,
+            source="slash-salvage.srt",
+            eol="\n",
+            failures=failures,
+            window_size=1,
+        )
+        self.assertEqual(failures, [])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("你好", output)
+        self.assertNotIn("/", output)
+        self.assertNotIn("こんにちは", output)
 
     def test_slash_alternative_repairs_japanese_or_track_side(self) -> None:
         self.assertEqual(

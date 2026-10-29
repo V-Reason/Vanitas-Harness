@@ -265,10 +265,12 @@ def sanitize_translation_output(raw_text: str, source_text: str) -> str:
     return text
 
 
-def repair_slash_alternatives(text: str) -> str:
+def repair_slash_alternatives(text: str, *, fallback: bool = False) -> str:
     """把“日文/中文”或“Track/中文”式斜杠并列收敛到唯一中文项。
 
-    两边都是中文（先生/女士）或都是普通拉丁词时不猜，交给写回校验/QC。
+    两边都是中文（先生/女士）或都是普通拉丁词时默认不猜，交给写回校验/QC。
+    ``fallback=True`` 只用于硬校验失败后的兜底：仍无唯一中文项时取第一个
+    非空项，避免把整句原样写回。正常后处理仍保持保守行为。
     """
     if "/" not in text:
         return text
@@ -282,6 +284,8 @@ def repair_slash_alternatives(text: str) -> str:
         and not ARTIFACT_LATIN_RE.search(part)
     ]
     if len(clean) == 1:
+        return clean[0]
+    if fallback and clean:
         return clean[0]
     return text
 
@@ -337,6 +341,17 @@ def validate_cue_translation(text: str) -> str | None:
     if SLASH_ALTERNATIVE_RE.search(text):
         return "译文含中日文斜杠并列"
     return None
+
+
+def salvage_slash_translation(text: str) -> str:
+    """硬校验失败后的斜杠兜底：优先唯一中文项，否则取第一个非空项。
+
+    只在 ``validate_cue_translation`` 已判定失败后调用；正常路径仍走
+    ``postprocess_cue_text`` 的保守规则，不改变“先生/女士不猜”的契约。
+    """
+    if "/" not in text:
+        return text
+    return repair_slash_alternatives(text, fallback=True)
 
 
 def _is_mask_symbol(char: str) -> bool:
@@ -1844,6 +1859,11 @@ def translate_srt(
                 result = finalize(result, source_text)
                 reason = validate_cue_translation(result)
                 if reason:
+                    salvaged = salvage_slash_translation(result)
+                    if validate_cue_translation(salvaged) is None:
+                        result = salvaged
+                        reason = None
+                if reason:
                     failures.append(
                         TranslationFailure(
                             source=source,
@@ -2054,6 +2074,11 @@ def translate_srt(
                                 if validate_cue_translation(retry) is None:
                                     result = retry
                                     reason = None
+                        if reason:
+                            salvaged = salvage_slash_translation(result)
+                            if validate_cue_translation(salvaged) is None:
+                                result = salvaged
+                                reason = None
                         if reason:
                             failures.append(
                                 TranslationFailure(
