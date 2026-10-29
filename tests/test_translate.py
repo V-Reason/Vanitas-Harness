@@ -1876,6 +1876,43 @@ class QualityGuardTests(unittest.TestCase):
             ["甜腻的耳边絮语", self.ZH_A, self.ZH_RETRY],
         )
 
+    def test_single_retry_hint_fixes_residual_kana(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                "不完整",          # 批次解析失败 -> 逐句 fallback
+                "[#1] 雫ちゃん…",  # 首轮单句仍保留假名
+                "[#1] 雫酱…",      # 带 SINGLE_RETRY_HINT 的重试
+            ]
+        )
+        _engine, output, failures = self.run_translate(
+            client, "雫ちゃん、こんにちは", window_size=2
+        )
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(failures, [])
+        hint = client.calls[2]
+        self.assertIn("所有日文假名", hint)
+        self.assertIn("人名中的", hint)
+        self.assertIn("片假名名词", hint)
+        self.assertEqual(self.block_texts(output), ["雫酱…"])
+
+    def test_fallback_copy_is_audited_and_retried(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                "[#1] 只回第一行",   # 批次缺 #2 -> 逐句 fallback
+                f"[#1] {self.ZH_A}",
+                f"[#2] {self.ZH_A}",  # 第二句复制第一句
+                f"[#2] {self.ZH_B}",  # 带审计 hint 的重试
+            ]
+        )
+        _engine, output, failures = self.run_translate(
+            client, self.SRC_A, self.SRC_C, window_size=2
+        )
+        self.assertEqual(len(client.calls), 4)
+        self.assertEqual(failures, [])
+        self.assertIn("禁止复用", client.calls[3])
+        self.assertEqual(self.block_texts(output), [self.ZH_A, self.ZH_B])
+        self.assertEqual(output.count("今天真的非常开心"), 1)
+
 
 class DynamicEntityEngineTests(unittest.TestCase):
     def test_dynamic_entity_clustering_and_propagation(self) -> None:

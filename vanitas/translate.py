@@ -1559,8 +1559,10 @@ def _window_translation_is_suspicious(
 
 
 SINGLE_RETRY_HINT = (
-    "（上一次输出保留了日文假名、SEXPAR/Track 或斜杠；"
-    "请只把当前编号译成中文，禁止保留假名、禁止斜杠并列。）"
+    "（上一次输出仍残留日文假名；请把包括人名、称谓、助词、片假名名词在内的"
+    "所有日文假名都译成中文。人名中的“ちゃん/さん/君/様”必须译成"
+    "“酱/先生/君/大人”等中文称谓，片假名名词按语义翻译；"
+    "不得保留任何假名或整句日文。）"
 )
 
 
@@ -1964,18 +1966,33 @@ def translate_srt(
                                 )
                             )
                         else:
+                            # 逐句回退也要做文档级审计：批次失败不代表复制/敬称
+                            # 风险消失，命中时同样只做一次定点重译。
+                            cue = window_cues[position]
+                            source_text = window_sources[position]
+                            issues = audit(source_text, result, cue)
+                            if issues:
+                                retry = retry_for_audit(
+                                    subtitle,
+                                    source_text,
+                                    issues[0].hint,
+                                    base_history,
+                                )
+                                if retry is not None:
+                                    candidate = finalize(
+                                        retry, subtitle.text, entity_engine
+                                    )
+                                    if (
+                                        validate_cue_translation(candidate) is None
+                                        and not audit(source_text, candidate, cue)
+                                    ):
+                                        result = candidate
                             entity_engine.capture_translations(
-                                [subtitle.text], [result]
+                                [source_text], [result]
                             )
-                            index.add(
-                                window_cues[position],
-                                window_sources[position],
-                                result,
-                            )
+                            index.add(cue, source_text, result)
                             subtitle.text = result
-                            accepted.append(
-                                (window_sources[position], result)
-                            )
+                            accepted.append((source_text, result))
                 restore(base_history + tuple(accepted))
 
             done += len(window)
