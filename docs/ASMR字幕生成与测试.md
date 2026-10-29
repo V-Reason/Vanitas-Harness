@@ -357,11 +357,19 @@ warn 5 条：
 
 - **P0 修复**：旧 `sanitize_translation_output()` 全局删除 `[#N]`，导致 `TranslationEngine` 的批次响应在 `parse_window_response` 前就丢掉编号；实测 2-cue 窗口会发 3 次请求（1 批次 + 2 逐句），两条 cue 都被写成 `译一译二`。已删除全局清洗，编号只在 cue 边界由 `strip_window_id_prefix()`/`postprocess_cue_text()` 清理；新增批次编号保留与单句多编号拒绝回归测试。
 - **静默后处理**：`postprocess_cue_text()` 做简繁转换、行首 `，、；：。！？` 清理、`……。`/`~。` 等重复句号清理、原文无括号时剥离虚构动作括号；保留开头 `……`/`——`、原文已有括号，清洗为空时保留清洗前文本。只改正文，不动序号/时间轴。
-- **实体引擎**：`DynamicEntityEngine` 从全篇片假名、敬称名、3–4 字汉字块共同前缀提种子，停用表过滤普通词/拟声词；变体按包含/首字近似/编辑距离聚类。`capture_translations()` 仅在源行以实体开头且后接标点、译文前 2–4 字后接标点时高置信锁定，其余存前文示例；`get_query_context()` 注入变体/锁定名/示例；`enforce_locks()` 只清未翻译日文专名。仅 `window_size>1`（ASMR W=6）启用，且叠加滑动前文而不是替换。
-- **Prompt**：新增 `<sensory_immersion>`（贴耳体感、体感具象、动作本土化、拟声画面、跨行语流），保留 `<asmr_domain_lexicon>`、ASR 容错、计数/IO 与多行编号项规则；`お騒がせ` 仍保留“给您添麻烦”的敬语例外。
-- **QC**：`scripts/qc_srt.py` 三层分流；终端紧凑 Diff；`--json` 含 `summary`+`flagged_cues`；默认仅 error 返回 `1`，`--strict` actionable 也返回 `1`。
-- **测试**：新增 34 例，总数 **485 例**；非 guard 472 例全绿（1 例 skip）；`test_guard.test_ok_single_file` 因本机 4062 被 HY-MT2 占用仍失败，未停服。
-- **未验证**：未跑真实 696-cue 全量；未验证 HY-MT2 对新增 Prompt/实体上下文的长文本遵循度与显存/耗时；`您` 启发式、批次 `finish_reason=length` 拆分、真实 TTY 的 QC 观感未验收。
+- **实体引擎**：`DynamicEntityEngine` 只以敬称名、`という名`/`役` 明确姓名、共同前缀汉字姓名为种子；裸片假名/拟声词/普通名词不建实体，停用表拦截 `トラック`/`セックス`/`バイバイ`/`コショコショ` 等；`チン` 不再吞并 `ノア`。`capture_translations()` 只保存洁净示例；`_extract_locked_name()` 只锁高置信裸名；`enforce_locks()` 只清未翻译日文专名；平假名写法仅通过明确姓名做别名。仅 `window_size>1`（ASMR W=6）启用，且叠加滑动前文而不是替换。
+- **Prompt**：新增 `<sensory_immersion>`（贴耳体感、体感具象、动作本土化、拟声画面、跨行语流），保留 `<asmr_domain_lexicon>`、ASR 容错、计数/IO 与多行编号项规则；明确普通片假名不是专名、拟声词不得保留假名、禁止 `SEXPAR`/`Track` 与斜杠并列；`お騒がせ` 仍保留“给您添麻烦”的敬语例外。
+- **QC**：`scripts/qc_srt.py` 三层分流；新增 `latin`/`slash` actionable；`duplicate_translation` 先抹平 `ッ`/`ー` 并把源文相似阈值降到 0.60；终端紧凑 Diff；`--json` 含 `summary`+`flagged_cues`；默认仅 error 返回 `1`，`--strict` actionable 也返回 `1`。
+- **上下文/校验**：合流 `context_window=12` 通过 `record_window_history()` 按 cue 记录，不再把 6 条窗口放大成 72 条；批次接受前 `_copies_history()` 检查跨窗复制，命中整窗回退。`validate_cue_translation()` 拒绝假名、`SEXPAR`/`Track`、中日文斜杠；批次失败整窗回退，单句失败保留原文并记 failure。
+- **测试**：新增 17 例，总数 **502 例**；非 guard 489 例全绿（1 例 skip）；`test_guard.test_ok_single_file` 因本机 4062 被 HY-MT2 占用仍失败，未停服。
+- **未验证**：真实 696-cue 全量仍在验收中；未验证 HY-MT2 对收紧后 Prompt/实体上下文的长文本遵循度与显存/耗时；`您` 启发式、批次 `finish_reason=length` 拆分、真实 TTY 的 QC 观感未验收。
+
+### 7.8 质量回退根因与修复（2026-10-29）
+
+- **根因**：`DynamicEntityEngine` 把重复片假名/拟声词当实体；`トラックさん` 被锁成“托拉克”，`セックス` 把 `SEXPAR` 注入前文示例；`context_window=12` 在 6 条/窗下实际是 72 条，`自由:411` 复制 `394–396`。
+- **A/B**：同窗口、同模型、温度 0.2；去掉实体后 `コショコショ → 沙沙`、`トラック → Track/音轨`、`セックス → 做爱`；加上实体则保留假名/托拉克/セックスパー。OLD Prompt + 实体同样坏，说明 Prompt V2 不是唯一原因。
+- **修复验证**：`②33–38` 输出“沙沙”；`自由 355–360` 输出“做爱”、无 `SEXPAR`；`自由 367–372` 输出“音轨术语”，`Track` 被写回校验拦截。
+- **全量结果**：`自由交谈_梦见庄` 696 条复跑 146 次请求 / 813s，仅 #382 自造词残余；手工按 retry 结果修正后 QC error 0、actionable 4。其余 5 个文件未复跑；第三次全量因用户中止未完成。`ひよちん` 这类无明确证据昵称不保证自动锁定。
 
 ## 8. 下一步
 
