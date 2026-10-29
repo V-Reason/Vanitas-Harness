@@ -33,9 +33,11 @@ from .quality import (
     Glossary,
     TranslationProfile,
     apply_pronoun_policy,
-    audit_duplicate,
-    audit_honorific,
+    audit_translation,
+    combine_hints,
     detect_register,
+    normalize_compare,
+    repair_first_person_name,
 )
 
 SENTENCE_ENDERS = "。！？!?；;"
@@ -1684,13 +1686,16 @@ def translate_srt(
         source_text: str,
         entity: DynamicEntityEngine | None = None,
     ) -> str:
-        """统一的 cue 级后处理顺序：清洗 → 锁定名 → 术语 → 人称。"""
+        """统一的 cue 级后处理顺序：清洗 → 锁定名 → 术语 → 人称 → 窄修复。"""
         text_out = postprocess_cue_text(zh_text, source_text)
         if entity is not None:
             text_out = entity.enforce_locks(text_out)
         if glossary is not None:
             text_out = glossary.apply(source_text, text_out)
-        return apply_pronoun_policy(text_out, profile)
+        text_out = apply_pronoun_policy(text_out, profile)
+        # 仅“下の名前で呼んであげて”场景：模型固执输出“我的名字/让我/叫我”，
+        # 在 validate 前做确定性第三人称收敛；其余源文原样返回。
+        return repair_first_person_name(source_text, text_out)
 
     def cue_of(subtitle: Subtitle) -> int:
         return int(subtitle.index) if subtitle.index.isdigit() else 0
@@ -1707,9 +1712,48 @@ def translate_srt(
             reset_history()
 
     def audit(source_text: str, translation: str, cue: int) -> list:
-        return audit_duplicate(
-            source_text, translation, cue, index
-        ) + audit_honorific(translation, profile, cue)
+        return audit_translation(
+            source_text,
+            translation,
+            cue,
+            index=index,
+            profile=profile,
+        )
+
+    def candidate_ok(
+        source_text: str,
+        original: str,
+        candidate: str,
+        cue: int,
+        trigger_codes: set[str],
+    ) -> bool:
+        """审计重译候选的统一验收：硬校验、长度/换行与残余问题。"""
+        if validate_cue_translation(candidate) is not None:
+            return False
+        if not candidate.strip():
+            return False
+        if "\n" in candidate and "\n" not in source_text:
+            return False
+        cn = normalize_compare(candidate)
+        sn = normalize_compare(source_text)
+        if len(cn) > max(12, int(1.6 * len(sn))):
+            return False
+        # 标签问/引用/主客方向类问题本来就会显著改变句长，不做原文长度
+        # 比例限制；其余场景防止“修掉一个问题却扩写成另一句”。
+        semantic_codes = {
+            "tag_question",
+            "quote_private",
+            "customer_direction",
+            "first_person",
+        }
+        if not (trigger_codes & semantic_codes):
+            on = normalize_compare(original)
+            if len(on) >= 6 and not (0.5 <= len(cn) / len(on) <= 3.0):
+                return False
+        codes = {issue.code for issue in audit(source_text, candidate, cue)}
+        if codes & (set(trigger_codes) | {"duplicate_translation"}):
+            return False
+        return True
 
     def retry_for_audit(
         subtitle: Subtitle,
@@ -1771,14 +1815,21 @@ def translate_srt(
                 else:
                     issues = audit(source_text, result, cue)
                     if issues:
+                        trigger_codes = {issue.code for issue in issues}
                         retry = retry_for_audit(
-                            subtitle, source_text, issues[0].hint, base
+                            subtitle,
+                            source_text,
+                            combine_hints(issues),
+                            base,
                         )
                         if retry is not None:
                             candidate = finalize(retry, source_text)
-                            if (
-                                validate_cue_translation(candidate) is None
-                                and not audit(source_text, candidate, cue)
+                            if candidate_ok(
+                                source_text,
+                                result,
+                                candidate,
+                                cue,
+                                trigger_codes,
                             ):
                                 result = candidate
                     subtitle.text = result
@@ -1877,10 +1928,13 @@ def translate_srt(
                                 issues = audit(source_text, staging[position], cue)
                                 if not issues:
                                     continue
+                                trigger_codes = {
+                                    issue.code for issue in issues
+                                }
                                 retry = retry_for_audit(
                                     subtitle,
                                     source_text,
-                                    issues[0].hint,
+                                    combine_hints(issues),
                                     base_history,
                                 )
                                 if retry is None:
@@ -1888,9 +1942,13 @@ def translate_srt(
                                 candidate = finalize(
                                     retry, source_text, entity_engine
                                 )
-                                if validate_cue_translation(candidate) is not None:
-                                    continue
-                                if audit(source_text, candidate, cue):
+                                if not candidate_ok(
+                                    source_text,
+                                    staging[position],
+                                    candidate,
+                                    cue,
+                                    trigger_codes,
+                                ):
                                     continue
                                 staging[position] = candidate
                             entity_engine.capture_translations(
@@ -1972,19 +2030,25 @@ def translate_srt(
                             source_text = window_sources[position]
                             issues = audit(source_text, result, cue)
                             if issues:
+                                trigger_codes = {
+                                    issue.code for issue in issues
+                                }
                                 retry = retry_for_audit(
                                     subtitle,
                                     source_text,
-                                    issues[0].hint,
+                                    combine_hints(issues),
                                     base_history,
                                 )
                                 if retry is not None:
                                     candidate = finalize(
                                         retry, subtitle.text, entity_engine
                                     )
-                                    if (
-                                        validate_cue_translation(candidate) is None
-                                        and not audit(source_text, candidate, cue)
+                                    if candidate_ok(
+                                        source_text,
+                                        result,
+                                        candidate,
+                                        cue,
+                                        trigger_codes,
                                     ):
                                         result = candidate
                             entity_engine.capture_translations(

@@ -13,14 +13,23 @@ if str(ROOT) not in sys.path:
 
 from vanitas.errors import TranslateError  # noqa: E402
 from vanitas.quality import (  # noqa: E402
+    AuditIssue,
     DuplicateIndex,
+    DuplicateMatch,
     Glossary,
     TranslationProfile,
     apply_pronoun_policy,
+    audit_customer_direction,
     audit_duplicate,
+    audit_first_person,
     audit_honorific,
+    audit_quote_private,
+    audit_tag_question,
+    audit_translation,
+    combine_hints,
     detect_register,
     normalize_compare,
+    repair_first_person_name,
 )
 
 LONG_A = "这是完全相同的一条长译文"
@@ -257,6 +266,273 @@ class AuditTests(unittest.TestCase):
                 self.assertEqual(audit_honorific("您辛苦了", profile, 3), [])
 
         self.assertEqual(audit_honorific("你辛苦了", intimate, 3), [])
+
+
+class DuplicateMatchTests(unittest.TestCase):
+    def test_find_match_returns_previous_item_and_find_delegates(self) -> None:
+        index = DuplicateIndex()
+        index.add(7, "今日は楽しかったです", LONG_A)
+        match = index.find_match("別の原文です", LONG_A)
+        self.assertIsInstance(match, DuplicateMatch)
+        self.assertEqual(match.cue, 7)
+        self.assertEqual(match.source, "今日は楽しかったです")
+        self.assertEqual(match.translation, LONG_A)
+        self.assertEqual(index.find("別の原文です", LONG_A), 7)
+        self.assertIsNone(index.find_match("別の原文です", LONG_A, cue=7))
+
+    def test_duplicate_hint_contains_both_source_snippets(self) -> None:
+        previous_source = "あ" * 30
+        current_source = "い" * 30
+        index = DuplicateIndex()
+        index.add(7, previous_source, LONG_A)
+        issues = audit_duplicate(current_source, LONG_A, 12, index)
+        self.assertEqual(len(issues), 1)
+        hint = issues[0].hint
+        self.assertIn(f"该条原文「{'あ' * 24}…」", hint)
+        self.assertIn(f"本条原文「{'い' * 24}…」", hint)
+        self.assertIn("禁止复用，只按本条原文重译", hint)
+
+    def test_shared_long_prefix_with_dissimilar_source_hits(self) -> None:
+        source_two = "伊賀崎彩香の庭主催しております"
+        translation_two = "这是由伊贺崎彩香主办的庭主活动。"
+        source_eighty = "伊賀崎綾香の庭はね基本的に"
+        index = DuplicateIndex()
+        index.add(2, source_two, translation_two)
+
+        # 实际 #80 译文（规范化后包含 #2 译文）必须命中。
+        actual = "这是由伊贺崎彩香主办的庭主活动，基本上啊。"
+        self.assertEqual(index.find_match(source_eighty, actual, 80).cue, 2)
+
+        # 相似度掉到 0.80 以下、也不构成包含时，仍由 ≥6 字共同前缀兜底。
+        variant = "这是由伊贺崎彩香主办的庭院聚会，基本上啊。"
+        self.assertEqual(index.find_match(source_eighty, variant, 80).cue, 2)
+
+    def test_shared_prefix_does_not_fire_for_similar_source(self) -> None:
+        index = DuplicateIndex()
+        index.add(
+            1,
+            "伊賀崎彩香の庭主催しております",
+            "这是由伊贺崎彩香主办的庭主活动。",
+        )
+        # 源文相似度略高于 0.5，属于“同一句的近似写法”，不得因共同开头误报。
+        self.assertIsNone(
+            index.find_match(
+                "伊賀崎彩香の庭は基本的に",
+                "这是由伊贺崎彩香主办的庭院聚会，基本上啊。",
+                80,
+            )
+        )
+
+    def test_shared_prefix_shorter_than_six_does_not_fire(self) -> None:
+        index = DuplicateIndex()
+        index.add(
+            1,
+            "伊賀崎彩香の庭主催しております",
+            "这是由伊贺崎彩香主办的庭主活动。",
+        )
+        self.assertIsNone(
+            index.find_match(
+                "伊賀崎綾香の庭はね基本的に",
+                "这是伊贺崎彩香主持的庭院聚会，基本上啊。",
+                80,
+            )
+        )
+
+
+class NarrowAuditTests(unittest.TestCase):
+    def test_customer_direction_reports_reversed_voice(self) -> None:
+        for translation in (
+            "我们不可以触碰客人。",
+            "禁止触碰客人。",
+            "请不要接触客人。",
+        ):
+            with self.subTest(translation=translation):
+                issues = audit_customer_direction(
+                    "お客様から私たち触れることは禁止となっております。",
+                    translation,
+                    16,
+                )
+                self.assertEqual(len(issues), 1)
+                self.assertEqual(issues[0].code, "customer_direction")
+                self.assertIn("客人→我们", issues[0].hint)
+
+    def test_customer_direction_accepts_correct_voice(self) -> None:
+        for translation in (
+            "禁止客人触碰我们。",
+            "客人不能触碰我们。",
+            "客人不可以碰我们。",
+        ):
+            with self.subTest(translation=translation):
+                self.assertEqual(
+                    audit_customer_direction(
+                        "お客様から私たち触れることは禁止となっております。",
+                        translation,
+                        16,
+                    ),
+                    [],
+                )
+
+    def test_customer_direction_requires_all_source_conditions(self) -> None:
+        source = "お客様から私たち触れることは禁止となっております。"
+        self.assertEqual(
+            audit_customer_direction(source, "", 1), []
+        )
+        self.assertEqual(
+            audit_customer_direction("", "我们触碰客人。", 1), []
+        )
+        self.assertEqual(
+            audit_customer_direction(
+                "お客様から私たち触れることは許されております。",
+                "我们触碰客人。",
+                1,
+            ),
+            [],
+        )
+
+    def test_quote_private_only_narrow_first_person_modes(self) -> None:
+        for translation in ("让我叫你雫", "我的名字是雫", "让你叫我雫"):
+            with self.subTest(translation=translation):
+                issues = audit_quote_private(
+                    "私のことは雫でいいって", translation, 7
+                )
+                self.assertEqual(len(issues), 1)
+                self.assertEqual(issues[0].code, "quote_private")
+                self.assertIn("引用他人", issues[0].hint)
+
+        for translation in (
+            "他说，叫我雫就好",
+            "会长说叫她雫就好",
+            # 旧坏译不再是必报夹具：单独“叫我”在语境中可能正确，
+            # 保留为人工/QC residual，不触发自动重译。
+            "说叫我叫雫就好",
+        ):
+            with self.subTest(translation=translation):
+                self.assertEqual(
+                    audit_quote_private(
+                        "私のことは雫でいいって", translation, 7
+                    ),
+                    [],
+                )
+        # 没有“って”引用标记时不报，避免把普通自我介绍当引用。
+        self.assertEqual(
+            audit_quote_private("私のことは雫でいい", "我的名字是雫", 7),
+            [],
+        )
+        self.assertEqual(audit_quote_private("", "", 7), [])
+
+    def test_first_person_requires_absent_source_pronoun_and_cue_word(self) -> None:
+        issues = audit_first_person(
+            "名前を呼んでください", "请叫我的名字", 5
+        )
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].code, "first_person")
+        self.assertIn("不是第一人称", issues[0].hint)
+
+        self.assertEqual(
+            audit_first_person("私の名前を呼んで", "请叫我的名字", 5), []
+        )
+        self.assertEqual(
+            audit_first_person("名前を呼んで", "请叫他的名字", 5), []
+        )
+        self.assertEqual(
+            audit_first_person("名前を呼んで", "请让我来", 5)[0].code,
+            "first_person",
+        )
+        self.assertEqual(audit_first_person("", "", 5), [])
+
+    def test_repair_first_person_name_only_for_narrow_source(self) -> None:
+        source = "ちゃんと下の名前で呼んであげてよ"
+        self.assertEqual(
+            repair_first_person_name(
+                source, "请用我的名字好好叫我哦"
+            ),
+            "请用她的名字好好叫她哦",
+        )
+        self.assertEqual(
+            repair_first_person_name(
+                source, "请用她的名字好好叫她哦"
+            ),
+            "请用她的名字好好叫她哦",
+        )
+        # 不含固定源短语或源文已有第一人称时不得改写。
+        self.assertEqual(
+            repair_first_person_name(
+                "名前を呼んでください", "请用我的名字好好叫我哦"
+            ),
+            "请用我的名字好好叫我哦",
+        )
+        self.assertEqual(
+            repair_first_person_name(
+                "私の下の名前で呼んであげてよ", "请用我的名字好好叫我哦"
+            ),
+            "请用我的名字好好叫我哦",
+        )
+
+    def test_tag_question_only_when_source_has_no_tag(self) -> None:
+        issues = audit_tag_question(
+            "予算くださいってこと", "对吧？", 17
+        )
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].code, "tag_question")
+        self.assertIn("标签问", issues[0].hint)
+
+        self.assertEqual(
+            audit_tag_question("予算くださいってこと", "也就是说要预算", 17),
+            [],
+        )
+        self.assertEqual(
+            audit_tag_question("そうですね", "对吧？", 17), []
+        )
+        self.assertEqual(
+            audit_tag_question("予算くださいってこと", "……对吧？", 17)[0].code,
+            "tag_question",
+        )
+        self.assertEqual(
+            audit_tag_question("予算くださいってこと", "对不对", 17)[0].code,
+            "tag_question",
+        )
+        self.assertEqual(audit_tag_question("", "", 17), [])
+
+
+class AuditAggregatorTests(unittest.TestCase):
+    def test_combine_hints_deduplicates_and_limits(self) -> None:
+        issues = [
+            AuditIssue("a", 1, "m", "提示一"),
+            AuditIssue("b", 1, "m", "提示一"),
+            AuditIssue("c", 1, "m", "提示二"),
+            AuditIssue("d", 1, "m", "提示三"),
+        ]
+        self.assertEqual(combine_hints(issues), "提示一；提示二")
+        self.assertEqual(combine_hints(issues, limit=0), "")
+        self.assertEqual(combine_hints([]), "")
+
+    def test_audit_translation_order_duplicate_then_semantic(self) -> None:
+        translation = "我们不可以触碰客人，这不行的"
+        index = DuplicateIndex()
+        index.add(1, "今日は楽しかったです", translation)
+        issues = audit_translation(
+            "お客様から私たち触れることは禁止となっております。",
+            translation,
+            16,
+            index=index,
+            profile=TranslationProfile(register="service", pronoun="auto"),
+        )
+        self.assertEqual(
+            [issue.code for issue in issues],
+            ["duplicate_translation", "customer_direction"],
+        )
+
+    def test_audit_translation_is_empty_for_empty_inputs(self) -> None:
+        self.assertEqual(
+            audit_translation(
+                "",
+                "",
+                1,
+                index=DuplicateIndex(),
+                profile=TranslationProfile(register="intimate", pronoun="你"),
+            ),
+            [],
+        )
 
 
 if __name__ == "__main__":

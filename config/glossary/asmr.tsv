@@ -1,3 +1,5 @@
 # ASMR 术语表：source<TAB>preferred<TAB>forbidden（forbidden 用 | 分隔）
 # 只在源文命中 source 时替换译文中的 forbidden；空表/缺文件等价于不启用。
 アマアマ	甜腻	业余水平|业余
+お耳をマッサージ	耳朵按摩	采耳
+マッサージ	按摩	采耳

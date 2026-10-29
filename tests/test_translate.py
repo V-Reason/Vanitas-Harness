@@ -1695,12 +1695,35 @@ class QualityGuardTests(unittest.TestCase):
         )
         return engine, output, failures
 
+    def run_translate_text(self, client, text: str, *, window_size: int = 2):
+        engine = self.engine(client)
+        failures: list = []
+        output = translate_srt(
+            engine,
+            text,
+            chunk_chars=800,
+            source="quality.srt",
+            eol="\n",
+            failures=failures,
+            window_size=window_size,
+            max_window_chars=1000,
+        )
+        return engine, output, failures
+
+    def srt_blocks(self, *items: tuple[int, str]) -> str:
+        blocks = []
+        for index, text in items:
+            start = f"00:00:{index * 2 - 1:02d},000"
+            end = f"00:00:{index * 2:02d},000"
+            blocks.append(f"{index}\n{start} --> {end}\n{text}")
+        return "\n\n".join(blocks) + "\n"
+
     def block_texts(self, output: str) -> list[str]:
         return [block.text for block, _separator in parse_srt(output, "\n")]
 
     def test_asmr_engine_loads_glossary_and_translate_does_not(self) -> None:
         self.assertEqual(
-            len(self.engine(ScriptedTranslationClient([])).glossary.entries), 1
+            len(self.engine(ScriptedTranslationClient([])).glossary.entries), 3
         )
         plain = TranslationEngine(
             ScriptedTranslationClient([]),
@@ -1912,6 +1935,159 @@ class QualityGuardTests(unittest.TestCase):
         self.assertIn("禁止复用", client.calls[3])
         self.assertEqual(self.block_texts(output), [self.ZH_A, self.ZH_B])
         self.assertEqual(output.count("今天真的非常开心"), 1)
+
+
+    def test_batch_retranslates_tag_question(self) -> None:
+        sources = [
+            f"これは学生の台詞その{number}です" for number in range(1, 17)
+        ] + ["予算くださいってこと"]
+        client = ScriptedTranslationClient(
+            [
+                "\n".join(
+                    f"[#{position}] 第{position}句" for position in range(1, 7)
+                ),
+                "\n".join(
+                    f"[#{position}] 第{position}句" for position in range(7, 13)
+                ),
+                "\n".join(
+                    f"[#{position}] 第{position}句" for position in range(13, 17)
+                )
+                + "\n[#17] 对吧？",
+                "[#17] 也就是说要预算",
+            ]
+        )
+        _engine, output, failures = self.run_translate(
+            client, *sources, window_size=6
+        )
+        self.assertEqual(len(client.calls), 4)
+        self.assertEqual(failures, [])
+        self.assertIn("标签问", client.calls[3])
+        self.assertNotIn("对吧", output)
+        self.assertEqual(self.block_texts(output)[16], "也就是说要预算")
+
+    def test_window_size_one_retranslates_same_tag_question(self) -> None:
+        sources = [
+            f"これは学生の台詞その{number}です" for number in range(1, 17)
+        ] + ["予算くださいってこと"]
+        contents = [f"第{number}句" for number in range(1, 17)]
+        contents += ["对吧？", "[#17] 也就是说要预算"]
+        client = ScriptedTranslationClient(contents)
+        _engine, output, failures = self.run_translate(
+            client, *sources, window_size=1
+        )
+        self.assertEqual(len(client.calls), 18)
+        self.assertEqual(failures, [])
+        self.assertNotIn("对吧", output)
+        self.assertEqual(self.block_texts(output)[16], "也就是说要预算")
+
+    def customer_direction_srt(self) -> str:
+        return self.srt_blocks(
+            (14, "いらっしゃいませ。"),
+            (15, "ご予約ありがとうございます。"),
+            (16, "お客様から私たち触れることは禁止となっております。"),
+        )
+
+    def test_customer_direction_retry_accepts_short_candidate(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                "[#14] 欢迎光临\n"
+                "[#15] 感谢您的预约\n"
+                "[#16] 我们不可以触碰客人。",
+                "[#16] 禁止客人触碰我们",
+            ]
+        )
+        _engine, output, failures = self.run_translate_text(
+            client, self.customer_direction_srt(), window_size=6
+        )
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            self.block_texts(output),
+            ["欢迎光临", "感谢您的预约", "禁止客人触碰我们"],
+        )
+
+    def test_correct_customer_direction_has_no_extra_call(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                "[#14] 欢迎光临\n"
+                "[#15] 感谢您的预约\n"
+                "[#16] 禁止客人触碰我们",
+            ]
+        )
+        _engine, output, failures = self.run_translate_text(
+            client, self.customer_direction_srt(), window_size=6
+        )
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(failures, [])
+        self.assertEqual(self.block_texts(output)[2], "禁止客人触碰我们")
+
+    def test_candidate_fixing_tag_but_duplicating_is_rejected(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                f"[#1] {self.ZH_A}\n[#2] {self.ZH_B}",
+                "[#3] 对吧？",
+                f"[#3] {self.ZH_A}",
+            ]
+        )
+        _engine, output, failures = self.run_translate(
+            client, self.SRC_A, self.SRC_B, "予算くださいってこと"
+        )
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(failures, [])
+        self.assertIn("标签问", client.calls[2])
+        self.assertEqual(
+            self.block_texts(output), [self.ZH_A, self.ZH_B, "对吧？"]
+        )
+
+    def test_customer_direction_retry_failure_keeps_original(self) -> None:
+        client = FailingTranslationClient(
+            [
+                "[#14] 欢迎光临\n"
+                "[#15] 感谢您的预约\n"
+                "[#16] 我们不可以触碰客人。",
+            ],
+            fail_at={2},
+        )
+        _engine, output, failures = self.run_translate_text(
+            client, self.customer_direction_srt(), window_size=6
+        )
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(failures, [])
+        self.assertEqual(self.block_texts(output)[2], "我们不可以触碰客人。")
+
+    def test_ear_massage_glossary_specific_row_wins(self) -> None:
+        cases = [
+            ("お耳をマッサージしてあげる", "[#1] 采耳", "耳朵按摩"),
+            ("マッサージ", "[#1] 采耳", "按摩"),
+            ("耳かき", "[#1] 采耳", "采耳"),
+        ]
+        for source, content, expected in cases:
+            with self.subTest(source=source):
+                client = ScriptedTranslationClient([content])
+                _engine, output, failures = self.run_translate(
+                    client, source
+                )
+                self.assertEqual(len(client.calls), 1)
+                self.assertEqual(failures, [])
+                self.assertEqual(self.block_texts(output), [expected])
+
+    def test_first_person_name_is_repaired_before_validate(self) -> None:
+        source = "ちゃんと下の名前で呼んであげてよ"
+        bad = ScriptedTranslationClient(["[#1] 请用我的名字好好叫我哦"])
+        _engine, output, failures = self.run_translate(bad, source)
+        self.assertEqual(len(bad.calls), 1)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            self.block_texts(output), ["请用她的名字好好叫她哦"]
+        )
+
+        good = ScriptedTranslationClient(["[#1] 请用她的名字好好叫她哦"])
+        _engine, output, failures = self.run_translate(good, source)
+        self.assertEqual(len(good.calls), 1)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            self.block_texts(output), ["请用她的名字好好叫她哦"]
+        )
 
 
 class DynamicEntityEngineTests(unittest.TestCase):

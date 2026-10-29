@@ -1,0 +1,9 @@
+# ASR 跨 cue 断词合并表：left_tail<TAB>right_head<TAB>replacement
+# 仅当左 cue 以 left_tail 结尾、右 cue 以 right_head 开头时合并；# 开头为注释。
+カ	ウンター	カウンター
+手	を	手を
+寝	込	寝込
+綿	棒	綿棒
+心	を	心を
+気	持ち	気持ち
+ホテル	じゃ	ホテルじゃ
