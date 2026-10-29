@@ -1212,6 +1212,28 @@ class ScriptedTranslationClient:
         }
 
 
+class FailingTranslationClient:
+    """按序返回脚本内容，并在指定调用序抛 EngineError（模拟审计重译失败）。"""
+
+    def __init__(self, contents: list[str], *, fail_at: set[int]) -> None:
+        self.contents = list(contents)
+        self.fail_at = set(fail_at)
+        self.calls: list[str] = []
+
+    def chat(self, messages, *, max_tokens, temperature=0.2):
+        self.calls.append(str(messages[-1]["content"]))
+        if len(self.calls) in self.fail_at:
+            raise EngineError("模拟审计重译失败")
+        content = self.contents.pop(0) if self.contents else ""
+        return {
+            "choices": [
+                {"message": {"content": content}, "finish_reason": "stop"}
+            ],
+            "usage": {"completion_tokens": 1},
+            "timings": {"predicted_n": 1},
+        }
+
+
 class FakeTranslationClient:
     def __init__(self, *, truncate_over: int | None = None) -> None:
         self.calls: list[dict] = []
@@ -1628,6 +1650,231 @@ class TranslationEngineTests(unittest.TestCase):
                 sanitize_translation_output(translated, source), translated
             )
             self.assertEqual(translated.count("“"), translated.count("”"))
+
+
+class QualityGuardTests(unittest.TestCase):
+    """术语、语域/人称、文档级重复审计与定点重译。"""
+
+    SRC_A = "今日はとても楽しかったです、本当にいい一日でした"
+    SRC_B = "また何かあったら教えてくださいね"
+    SRC_C = "今日はとても退屈でした、本当に長い一日でした"
+    ZH_A = "今天真的非常开心呀，真是美好的一天。"
+    ZH_B = "明天也请继续听下去哦。"
+    ZH_COPY = "今天真的非常开心呢，真是美好的一天。"
+    ZH_RETRY = "今天真的非常无聊呢，真是漫长的一天。"
+
+    def srt_text(self, *texts: str) -> str:
+        blocks = []
+        for index, text in enumerate(texts, start=1):
+            start = f"00:00:{index * 2 - 1:02d},000"
+            end = f"00:00:{index * 2:02d},000"
+            blocks.append(f"{index}\n{start} --> {end}\n{text}")
+        return "\n\n".join(blocks) + "\n"
+
+    def engine(self, client, *, context_window: int = 5) -> TranslationEngine:
+        return TranslationEngine(
+            client,
+            ROOT / "config" / "prompts",
+            "",
+            options=translation_options(context_window=context_window),
+            task_template="translate_asmr",
+        )
+
+    def run_translate(self, client, *texts: str, window_size: int = 2):
+        engine = self.engine(client)
+        failures: list = []
+        output = translate_srt(
+            engine,
+            self.srt_text(*texts),
+            chunk_chars=800,
+            source="quality.srt",
+            eol="\n",
+            failures=failures,
+            window_size=window_size,
+            max_window_chars=1000,
+        )
+        return engine, output, failures
+
+    def block_texts(self, output: str) -> list[str]:
+        return [block.text for block, _separator in parse_srt(output, "\n")]
+
+    def test_asmr_engine_loads_glossary_and_translate_does_not(self) -> None:
+        self.assertEqual(
+            len(self.engine(ScriptedTranslationClient([])).glossary.entries), 1
+        )
+        plain = TranslationEngine(
+            ScriptedTranslationClient([]),
+            ROOT / "config" / "prompts",
+            "",
+            options=translation_options(),
+        )
+        self.assertEqual(plain.glossary.entries, ())
+
+    def test_cross_window_near_duplicate_triggers_one_retranslation(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                f"[#1] {self.ZH_A}\n[#2] {self.ZH_B}",
+                f"[#3] {self.ZH_COPY}",
+                f"[#3] {self.ZH_RETRY}",
+            ]
+        )
+        _engine, output, failures = self.run_translate(
+            client, self.SRC_A, self.SRC_B, self.SRC_C
+        )
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(failures, [])
+        self.assertIn("禁止复用", client.calls[2])
+        self.assertEqual(
+            self.block_texts(output), [self.ZH_A, self.ZH_B, self.ZH_RETRY]
+        )
+        self.assertEqual(output.count("今天真的非常开心"), 1)
+
+    def test_clean_window_has_no_extra_calls(self) -> None:
+        client = ScriptedTranslationClient(
+            ["[#1] 译一\n[#2] 译二", "[#3] 译三\n[#4] 译四"]
+        )
+        _engine, output, failures = self.run_translate(
+            client, "一", "二", "三", "四"
+        )
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(failures, [])
+        self.assertEqual(self.block_texts(output), ["译一", "译二", "译三", "译四"])
+
+    def test_glossary_replaces_forbidden_translation(self) -> None:
+        client = ScriptedTranslationClient(["[#1] 业余水平的耳边絮语"])
+        _engine, output, failures = self.run_translate(
+            client, "アマアマな声でささやく", window_size=2
+        )
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(failures, [])
+        self.assertEqual(self.block_texts(output), ["甜腻的耳边絮语"])
+
+    def test_glossary_preferred_synonym_does_not_retranslate(self) -> None:
+        client = ScriptedTranslationClient(["[#1] 甜腻的耳边絮语"])
+        _engine, output, failures = self.run_translate(
+            client, "アマアマな声でささやく", window_size=2
+        )
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(failures, [])
+        self.assertEqual(self.block_texts(output), ["甜腻的耳边絮语"])
+
+    def test_intimate_register_normalizes_nin(self) -> None:
+        client = ScriptedTranslationClient(
+            ["[#1] 您真好呢\n[#2] 给您膝枕哦"]
+        )
+        _engine, output, failures = self.run_translate(
+            client, "先輩、好きです", "膝枕してあげるね"
+        )
+        self.assertEqual(failures, [])
+        self.assertEqual(self.block_texts(output), ["你真好呢", "给你膝枕哦"])
+
+    def test_service_and_neutral_registers_keep_nin(self) -> None:
+        client = ScriptedTranslationClient(
+            ["[#1] 您这边请\n[#2] 您预约好了"]
+        )
+        _engine, output, failures = self.run_translate(
+            client,
+            "いらっしゃいませ",
+            "お客様、ご予約ありがとうございます",
+        )
+        self.assertEqual(failures, [])
+        self.assertEqual(self.block_texts(output), ["您这边请", "您预约好了"])
+
+        neutral = ScriptedTranslationClient(["[#1] 您好"])
+        _engine, output, failures = self.run_translate(
+            neutral, "こんにちは", window_size=2
+        )
+        self.assertEqual(failures, [])
+        self.assertEqual(self.block_texts(output), ["您好"])
+
+    def test_asr_hallucination_does_not_shift_register(self) -> None:
+        # 片尾套话里塞满服务词也不得把亲密文档判成 service；它本身也不该进模型。
+        # 提示词模板自带“チャンネル登録/お客様”示例，故用独有标记验证未被发送。
+        client = ScriptedTranslationClient(["[#1] 您好"])
+        _engine, output, failures = self.run_translate(
+            client,
+            "先輩、好きです",
+            "チャンネル登録 ASRHALLUCINATIONMARKER お客様 予約 施術 いらっしゃいませ ございます",
+            window_size=2,
+        )
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(failures, [])
+        self.assertEqual(self.block_texts(output), ["你好", ""])
+        self.assertNotIn("ASRHALLUCINATIONMARKER", client.calls[0])
+
+    def test_restore_history_keeps_maxlen(self) -> None:
+        engine = self.engine(
+            ScriptedTranslationClient([]), context_window=2
+        )
+        engine.restore_history((("a", "1"), ("b", "2"), ("c", "3")))
+        self.assertEqual(engine.history_snapshot(), (("b", "2"), ("c", "3")))
+        self.assertEqual(engine._history.maxlen, 2)
+
+        narrow = self.engine(
+            ScriptedTranslationClient([]), context_window=0
+        )
+        narrow.restore_history((("a", "1"),))
+        self.assertEqual(narrow.history_snapshot(), ())
+
+    def test_audit_retry_exception_keeps_original_without_failure(self) -> None:
+        client = FailingTranslationClient(
+            [
+                f"[#1] {self.ZH_A}\n[#2] {self.ZH_B}",
+                f"[#3] {self.ZH_COPY}",
+            ],
+            fail_at={3},
+        )
+        _engine, output, failures = self.run_translate(
+            client, self.SRC_A, self.SRC_B, self.SRC_C
+        )
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            self.block_texts(output), [self.ZH_A, self.ZH_B, self.ZH_COPY]
+        )
+
+    def test_fallback_success_enters_duplicate_index(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                "[#1] 只回第一行",
+                f"[#1] {self.ZH_A}",
+                f"[#2] {self.ZH_B}",
+                f"[#3] {self.ZH_COPY}",
+                f"[#3] {self.ZH_RETRY}",
+            ]
+        )
+        _engine, output, failures = self.run_translate(
+            client, self.SRC_A, self.SRC_B, self.SRC_C
+        )
+        self.assertEqual(len(client.calls), 5)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            self.block_texts(output), [self.ZH_A, self.ZH_B, self.ZH_RETRY]
+        )
+        self.assertEqual(output.count("今天真的非常开心"), 1)
+
+    def test_window_size_one_applies_glossary_and_duplicate_audit(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                "业余水平的耳边絮语",
+                self.ZH_A,
+                self.ZH_COPY,
+                f"[#3] {self.ZH_RETRY}",
+            ]
+        )
+        _engine, output, failures = self.run_translate(
+            client,
+            "アマアマな声でささやく",
+            self.SRC_A,
+            self.SRC_C,
+            window_size=1,
+        )
+        self.assertEqual(len(client.calls), 4)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            self.block_texts(output),
+            ["甜腻的耳边絮语", self.ZH_A, self.ZH_RETRY],
+        )
 
 
 class DynamicEntityEngineTests(unittest.TestCase):

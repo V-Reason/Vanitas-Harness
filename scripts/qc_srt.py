@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from vanitas.quality import detect_register  # noqa: E402
 from vanitas.translate import (  # noqa: E402
     ASR_HALLUCINATION_PATTERNS,
     LATIN_ALLOW,
@@ -203,6 +204,9 @@ def check_pair(source: Path, translated: Path) -> FileQC:
 
     result.cues = len(zh_cues)
     result.honorific = sum(cue.text.count("您") for cue in zh_cues)
+    # 文档级语域优先：服务语境保留敬称是刻意选择，亲密语境才强制“你”；
+    # neutral 回落到原有的单句启发式，避免改变既有 QC 契约。
+    register = detect_register([cue.text for cue in src_cues])
 
     if len(src_cues) != len(zh_cues):
         result.issues.append(
@@ -335,10 +339,14 @@ def check_pair(source: Path, translated: Path) -> FileQC:
                     )
                 )
 
-        if "您" in zh.text and (
-            INTIMATE_SOURCE_RE.search(source_text)
-            or not POLITE_SOURCE_RE.search(source_text)
-        ):
+        honorific_flagged = register == "intimate" or (
+            register == "neutral"
+            and (
+                INTIMATE_SOURCE_RE.search(source_text)
+                or not POLITE_SOURCE_RE.search(source_text)
+            )
+        )
+        if "您" in zh.text and honorific_flagged:
             result.issues.append(
                 _issue(
                     "actionable",

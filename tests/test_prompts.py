@@ -125,6 +125,20 @@ class PromptTests(unittest.TestCase):
             prompts.placeholders(text), {"input", "context_history"}
         )
 
+    def test_asmr_prompt_has_term_direction_and_quote_rules(self) -> None:
+        text = prompts.load_task(self.prompt_dir, "translate_asmr")
+        for phrase in (
+            "アマアマ（甘々）→甜腻，不是アマチュア",
+            "お客様から私たちに触れることは禁止",
+            "是客人→我们",
+            "私のことは雫でいいって",
+            "引用他人",
+        ):
+            self.assertIn(phrase, text)
+        self.assertEqual(
+            prompts.placeholders(text), {"input", "context_history"}
+        )
+
     def test_asmr_prompt_rejects_common_katakana_and_artifacts(self) -> None:
         text = prompts.load_task(self.prompt_dir, "translate_asmr")
         for phrase in (

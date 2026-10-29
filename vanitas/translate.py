@@ -28,6 +28,15 @@ from .metrics import (
     estimate_tokens,
     translation_budget,
 )
+from .quality import (
+    DuplicateIndex,
+    Glossary,
+    TranslationProfile,
+    apply_pronoun_policy,
+    audit_duplicate,
+    audit_honorific,
+    detect_register,
+)
 
 SENTENCE_ENDERS = "。！？!?；;"
 BLOCK_SEP = re.compile(r"(\r?\n[ \t]*\r?\n)")
@@ -942,6 +951,17 @@ class TranslationEngine:
         self._history: deque[tuple[str, str]] = deque(maxlen=window)
         self._entity_engine: DynamicEntityEngine | None = None
         self._on_stat = on_stat
+        # 术语表只在 ASMR 任务加载；其余任务保持空表，后处理零成本。
+        self._glossary = Glossary()
+        if task_template == "translate_asmr":
+            self._glossary = Glossary.load(
+                prompt_dir.parent / "glossary" / "asmr.tsv"
+            )
+
+    @property
+    def glossary(self) -> Glossary:
+        """只读术语表；translate_srt 通过它做 cue 级确定性后处理。"""
+        return self._glossary
 
     def __call__(self, text: str) -> str:
         return self.translate(text)
@@ -970,6 +990,22 @@ class TranslationEngine:
     def history_snapshot(self) -> tuple[tuple[str, str], ...]:
         """批次调用前的只读快照，供跨窗复制检查使用。"""
         return tuple(self._history)
+
+    def restore_history(
+        self, snapshot: tuple[tuple[str, str], ...]
+    ) -> None:
+        """把滑动上下文恢复到给定快照；保留 deque 的 maxlen 语义。
+
+        审计重译前会 ``reset_history()``，结束后必须回到批次前语义，否则
+        单句 ``[#N]`` 提示会污染后续窗口的参考上下文。``context_window=0``
+        时只清空，不尝试 append（maxlen=0 的 deque 不该承载任何历史）。
+        """
+        maxlen = self._history.maxlen
+        self._history.clear()
+        if maxlen == 0:
+            return
+        for source, translation in snapshot:
+            self._history.append((source, translation))
 
     def set_entity_engine(self, engine: DynamicEntityEngine | None) -> None:
         """绑定文档级实体索引；由 translate_srt 在单文件翻译期间管理。"""
@@ -1608,6 +1644,9 @@ def translate_srt(
         if block.index and block.text.strip()
     ]
     total = len(valid_items)
+    # 解析 blocks 后、ASR 幻觉置空前保存 valid 源文快照；此时 subtitle 尚未被
+    # 改写，快照保留原始内容，供语域判定等文档级派生使用。
+    source_snapshot = [subtitle.text for _index, subtitle in valid_items]
     translatable: list[tuple[int, Subtitle]] = []
     filtered = 0
     for item in valid_items:
@@ -1618,6 +1657,80 @@ def translate_srt(
         else:
             translatable.append(item)
     done = 0
+
+    # 快照早于置空，但平台套话属于待清洗内容：判语域时显式剔除，避免片尾
+    # 敬语词把整篇语域带偏（否则“チャンネル登録…お客様…”会翻转 service）。
+    register = detect_register(
+        [
+            text
+            for text in source_snapshot
+            if not ASR_HALLUCINATION_PATTERNS.search(text)
+        ]
+    )
+    profile = TranslationProfile(
+        register=register,
+        pronoun="你" if register == "intimate" else "auto",
+    )
+    index = DuplicateIndex()
+    glossary = getattr(chat, "glossary", None)
+    snapshot_history = getattr(chat, "history_snapshot", None)
+    reset_history = getattr(chat, "reset_history", None)
+    restore_history = getattr(chat, "restore_history", None)
+
+    def finalize(
+        zh_text: str,
+        source_text: str,
+        entity: DynamicEntityEngine | None = None,
+    ) -> str:
+        """统一的 cue 级后处理顺序：清洗 → 锁定名 → 术语 → 人称。"""
+        text_out = postprocess_cue_text(zh_text, source_text)
+        if entity is not None:
+            text_out = entity.enforce_locks(text_out)
+        if glossary is not None:
+            text_out = glossary.apply(source_text, text_out)
+        return apply_pronoun_policy(text_out, profile)
+
+    def cue_of(subtitle: Subtitle) -> int:
+        return int(subtitle.index) if subtitle.index.isdigit() else 0
+
+    def history_now() -> tuple[tuple[str, str], ...]:
+        if callable(snapshot_history):
+            return snapshot_history()
+        return ()
+
+    def restore(snapshot: tuple[tuple[str, str], ...]) -> None:
+        if callable(restore_history):
+            restore_history(snapshot)
+        elif callable(reset_history):
+            reset_history()
+
+    def audit(source_text: str, translation: str, cue: int) -> list:
+        return audit_duplicate(
+            source_text, translation, cue, index
+        ) + audit_honorific(translation, profile, cue)
+
+    def retry_for_audit(
+        subtitle: Subtitle,
+        source_text: str,
+        hint: str,
+        base: tuple[tuple[str, str], ...],
+    ) -> str | None:
+        """审计命中的一次定点重译；异常只保留原译，不写 failure。"""
+        if callable(reset_history):
+            reset_history()
+        try:
+            return _translate_single_cue(
+                chat,
+                subtitle,
+                source=source,
+                failures=failures,
+                correction=hint,
+                record_failure=False,
+            )
+        except (EngineError, TranslateError):
+            return None
+        finally:
+            restore(base)
 
     if window_size <= 1:
         clear_entity = getattr(chat, "set_entity_engine", None)
@@ -1630,16 +1743,20 @@ def translate_srt(
                 if on_segment is not None:
                     on_segment(done, total)
                 continue
+            source_text = subtitle.text
+            cue = cue_of(subtitle)
+            base = history_now()
+            accepted_text = ""
             result = _translate_chunks(
                 chat,
-                subtitle.text,
+                source_text,
                 chunk_chars=chunk_chars,
                 source=source,
                 label=f"line {subtitle.index}",
                 failures=failures,
             )
             if result is not None:
-                result = postprocess_cue_text(result, subtitle.text)
+                result = finalize(result, source_text)
                 reason = validate_cue_translation(result)
                 if reason:
                     failures.append(
@@ -1650,8 +1767,26 @@ def translate_srt(
                         )
                     )
                 else:
+                    issues = audit(source_text, result, cue)
+                    if issues:
+                        retry = retry_for_audit(
+                            subtitle, source_text, issues[0].hint, base
+                        )
+                        if retry is not None:
+                            candidate = finalize(retry, source_text)
+                            if (
+                                validate_cue_translation(candidate) is None
+                                and not audit(source_text, candidate, cue)
+                            ):
+                                result = candidate
                     subtitle.text = result
-            # 失败时保留原文，继续下一条
+                    accepted_text = result
+                    index.add(cue, source_text, result)
+            # 失败时保留原文，并把失败的调用从滑动上下文里剔除。
+            if accepted_text:
+                restore(base + ((source_text, accepted_text),))
+            else:
+                restore(base)
             done += 1
             if on_segment is not None:
                 on_segment(done, total)
@@ -1687,15 +1822,16 @@ def translate_srt(
 
         for window in windows:
             expected_ids = [item[1].index for item in window]
+            window_sources = [item[1].text for item in window]
+            window_cues = [cue_of(item[1]) for item in window]
+            base_history = history_now()
             fallback = len(set(expected_ids)) != len(expected_ids)
-            history: tuple[tuple[str, str], ...] = ()
+            accepted: list[tuple[str, str]] = []
+
             if not fallback:
                 batch_prompt = "\n".join(
                     f"[#{item[1].index}] {item[1].text}" for item in window
                 )
-                snapshot = getattr(chat, "history_snapshot", None)
-                if callable(snapshot):
-                    history = snapshot()
                 try:
                     batch_output = chat(batch_prompt)
                     ok, aligned, _missing = parse_window_response(
@@ -1706,23 +1842,23 @@ def translate_srt(
                             batch_output, expected_ids
                         )
                     if ok and _window_translation_is_suspicious(
-                        window, aligned, history
+                        window, aligned, base_history
                     ):
                         ok = False
-                    if ok:
-                        window_sources = [item[1].text for item in window]
-                        staging: list[tuple[Subtitle, str]] = []
+                    if not ok:
+                        fallback = True
+                    else:
+                        staging: list[str] = []
                         for _block_index, subtitle in window:
                             text = strip_window_id_prefix(
                                 aligned[subtitle.index]
                             )
-                            text = postprocess_cue_text(text, subtitle.text)
-                            text = entity_engine.enforce_locks(text)
-                            staging.append((subtitle, text))
+                            text = finalize(text, subtitle.text, entity_engine)
+                            staging.append(text)
                         bad = next(
                             (
                                 reason
-                                for _subtitle, text in staging
+                                for text in staging
                                 if (reason := validate_cue_translation(text))
                             ),
                             None,
@@ -1730,36 +1866,61 @@ def translate_srt(
                         if bad:
                             fallback = True
                         else:
+                            # 审计+定点重译：每个问题 cue 最多一次，且不写 failure。
+                            for position, (_block_index, subtitle) in (
+                                enumerate(window)
+                            ):
+                                source_text = window_sources[position]
+                                cue = window_cues[position]
+                                issues = audit(source_text, staging[position], cue)
+                                if not issues:
+                                    continue
+                                retry = retry_for_audit(
+                                    subtitle,
+                                    source_text,
+                                    issues[0].hint,
+                                    base_history,
+                                )
+                                if retry is None:
+                                    continue
+                                candidate = finalize(
+                                    retry, source_text, entity_engine
+                                )
+                                if validate_cue_translation(candidate) is not None:
+                                    continue
+                                if audit(source_text, candidate, cue):
+                                    continue
+                                staging[position] = candidate
                             entity_engine.capture_translations(
-                                window_sources,
-                                [text for _subtitle, text in staging],
+                                window_sources, staging
                             )
-                            recorded: list[tuple[str, str]] = []
-                            for source_text, (_subtitle, text), (
-                                _block_index,
-                                subtitle,
-                            ) in zip(window_sources, staging, window):
-                                subtitle.text = entity_engine.enforce_locks(text)
-                                recorded.append((source_text, subtitle.text))
-                            recorder = getattr(
-                                chat, "record_window_history", None
+                            # 无条件恢复批前上下文：干净窗口也要回到 batch 前语义，
+                            # 否则整窗记录会把 context_window 的 cue 语义放大。
+                            restore(
+                                base_history
+                                + tuple(zip(window_sources, staging))
                             )
-                            if callable(recorder):
-                                recorder(recorded)
-                    else:
-                        fallback = True
+                            for position in range(len(window)):
+                                index.add(
+                                    window_cues[position],
+                                    window_sources[position],
+                                    staging[position],
+                                )
+                            for position, (_block_index, subtitle) in (
+                                enumerate(window)
+                            ):
+                                subtitle.text = staging[position]
                 except (EngineError, TranslateError):
                     fallback = True
 
             if fallback:
                 # 硬熔断：该窗口原地回退为逐句串行，绝不采用部分对齐结果
-                reset_history = getattr(chat, "reset_history", None)
                 for position, (_block_index, subtitle) in enumerate(window):
                     previous = ""
                     if position > 0:
                         previous = window[position - 1][1].text
-                    elif history:
-                        previous = history[-1][1]
+                    elif base_history:
+                        previous = base_history[-1][1]
                     # 单句回退不继承上一句的滑动上下文，避免模型续写相邻行。
                     if callable(reset_history):
                         reset_history()
@@ -1770,8 +1931,7 @@ def translate_srt(
                         failures=failures,
                     )
                     if result is not None:
-                        result = postprocess_cue_text(result, subtitle.text)
-                        result = entity_engine.enforce_locks(result)
+                        result = finalize(result, subtitle.text, entity_engine)
                         reason = validate_cue_translation(result)
                         if reason:
                             # 给自造词/未本地化专名一次纠偏机会；仍不合格则保留原文。
@@ -1789,10 +1949,9 @@ def translate_srt(
                                 record_failure=False,
                             )
                             if retry is not None:
-                                retry = postprocess_cue_text(
-                                    retry, subtitle.text
+                                retry = finalize(
+                                    retry, subtitle.text, entity_engine
                                 )
-                                retry = entity_engine.enforce_locks(retry)
                                 if validate_cue_translation(retry) is None:
                                     result = retry
                                     reason = None
@@ -1808,8 +1967,16 @@ def translate_srt(
                             entity_engine.capture_translations(
                                 [subtitle.text], [result]
                             )
-                            result = entity_engine.enforce_locks(result)
+                            index.add(
+                                window_cues[position],
+                                window_sources[position],
+                                result,
+                            )
                             subtitle.text = result
+                            accepted.append(
+                                (window_sources[position], result)
+                            )
+                restore(base_history + tuple(accepted))
 
             done += len(window)
             if on_segment is not None:

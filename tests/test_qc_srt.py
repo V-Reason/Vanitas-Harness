@@ -157,6 +157,45 @@ class QcSrtTests(unittest.TestCase):
         result = self.pair(srt("お客様、こちらです"), srt("您这边请"))
         self.assertNotIn("honorific", self.codes(result))
 
+    def test_honorific_respects_document_register(self) -> None:
+        # 服务语域：整体是敬语场景，单句“您”不报。
+        result = self.pair(
+            srt("いらっしゃいませ、お客様", "ご予約ありがとうございます"),
+            srt("您这边请", "您的预约已确认"),
+        )
+        self.assertNotIn("honorific", self.codes(result))
+
+        # 亲密语域：整篇耳语撒娇，出现“您”直接报，不依赖单句启发式。
+        result = self.pair(
+            srt("先輩、好きです", "膝枕してあげるね"),
+            srt("您真好呢", "给您膝枕哦"),
+        )
+        self.assertIn("honorific", self.codes(result))
+
+    def test_honorific_neutral_keeps_single_cue_heuristic(self) -> None:
+        result = self.pair(srt("ほら、見て…"), srt("您看吧……"))
+        self.assertIn("honorific", self.codes(result))
+
+    def test_strict_service_register_exit_zero(self) -> None:
+        (self.dir / "a.srt").write_text(
+            srt("いらっしゃいませ、お客様", "ご予約ありがとうございます"),
+            encoding="utf-8",
+        )
+        (self.dir / "a.zh.srt").write_text(
+            srt("您这边请", "您的预约已确认"), encoding="utf-8"
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = qc_srt.main(
+                [
+                    "--source-dir",
+                    str(self.dir),
+                    "--zh-dir",
+                    str(self.dir),
+                    "--strict",
+                ]
+            )
+        self.assertEqual(code, 0)
+
     def test_unauthorized_staging_is_actionable(self) -> None:
         result = self.pair(srt("好きだよ"), srt("（在耳后）喜欢你哦"))
         self.assertIn("staging", self.codes(result))
