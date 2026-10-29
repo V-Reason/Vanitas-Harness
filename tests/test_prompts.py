@@ -125,6 +125,21 @@ class PromptTests(unittest.TestCase):
             prompts.placeholders(text), {"input", "context_history"}
         )
 
+    def test_asmr_prompt_rejects_common_katakana_and_artifacts(self) -> None:
+        text = prompts.load_task(self.prompt_dir, "translate_asmr")
+        for phrase in (
+            "普通片假名词",
+            "不是专名",
+            "SEXPAR",
+            "Track",
+            "コショコショ",
+            "斜杠并列",
+            "不得保留",
+        ):
+            self.assertIn(phrase, text)
+        self.assertNotIn("美咲日和", text)
+        self.assertNotIn("箱川诺亚", text)
+
     def test_task_agent_enforces_sandbox_and_tool_priority(self) -> None:
         text = prompts.load_task(self.prompt_dir, "agent")
         self.assertIn("当前工作目录：{cwd}", text)
