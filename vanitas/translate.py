@@ -252,6 +252,27 @@ def sanitize_translation_output(raw_text: str, source_text: str) -> str:
     return text
 
 
+def repair_slash_alternatives(text: str) -> str:
+    """把“日文/中文”或“Track/中文”式斜杠并列收敛到唯一中文项。
+
+    两边都是中文（先生/女士）或都是普通拉丁词时不猜，交给写回校验/QC。
+    """
+    if "/" not in text:
+        return text
+    parts = [part.strip() for part in text.split("/")]
+    if len(parts) < 2 or not all(parts):
+        return text
+    clean = [
+        part
+        for part in parts
+        if not UNTRANSLATED_KANA_RE.search(part)
+        and not ARTIFACT_LATIN_RE.search(part)
+    ]
+    if len(clean) == 1:
+        return clean[0]
+    return text
+
+
 def postprocess_cue_text(zh_text: str, src_text: str) -> str:
     """cue 级确定性清洗：简繁、行首标点、重复句号、未授权动作括号。
 
@@ -277,7 +298,32 @@ def postprocess_cue_text(zh_text: str, src_text: str) -> str:
     ]
     text = "\n".join(lines).strip()
     text = REPEATED_PUNCT_RE.sub(r"\1", text).strip()
+    text = repair_slash_alternatives(text)
     return text or original
+
+
+UNTRANSLATED_KANA_RE = re.compile(r"[\u3040-\u30ff]")
+ARTIFACT_LATIN_RE = re.compile(r"(?:SEXPAR|SEXXPAR|TRACK)", re.IGNORECASE)
+SLASH_ALTERNATIVE_RE = re.compile(
+    r"[\u4e00-\u9fffA-Za-z]/[\u4e00-\u9fffA-Za-z]"
+)
+LATIN_TOKEN_RE = re.compile(r"[A-Za-z]{3,}")
+LATIN_ALLOW = frozenset({"ASMR", "NG", "BGM"})
+
+
+def validate_cue_translation(text: str) -> str | None:
+    """写回前的硬校验；返回原因，None 表示可写回。
+
+    只拒绝确定会破坏中文字幕的伪影：假名、SEXPAR 类臆造词、中日文斜杠
+    并列。其他拉丁词（曲名/人名）交给 QC 的 actionable 检查，避免误杀。
+    """
+    if UNTRANSLATED_KANA_RE.search(text):
+        return "译文残留日文假名"
+    if ARTIFACT_LATIN_RE.search(text):
+        return "译文含臆造拉丁词"
+    if SLASH_ALTERNATIVE_RE.search(text):
+        return "译文含中日文斜杠并列"
+    return None
 
 
 def _is_mask_symbol(char: str) -> bool:
@@ -410,13 +456,30 @@ def _clip(text: str, limit: int) -> str:
 # 文档级实体倒排索引（无模型调用、无第三方依赖）
 # --------------------------------------------------------------------------- #
 
-KATAKANA_ENTITY_RE = re.compile(r"[\u30a1-\u30f6\u30fc]{2,8}")
-HONORIFIC_NAME_RE = re.compile(
-    r"([\u4e00-\u9fa5\u30a1-\u30f6\u30fc]{1,5})"
+KATAKANA_TERM_RE = re.compile(r"[\u30a1-\u30f6\u30fc]{2,10}")
+HIRAGANA_TERM_RE = re.compile(r"[\u3041-\u3096]{3,10}")
+KANJI_KATAKANA_NAME_CHAR = r"[\u4e00-\u9fa5\u30a1-\u30f6\u30fc]"
+HIRAGANA_NAME_CHAR = r"[\u3041-\u3096]"
+NAME_CHAR_CLASS = rf"(?:{KANJI_KATAKANA_NAME_CHAR}|{HIRAGANA_NAME_CHAR})"
+NAME_BOUNDARY = r"(?:^|(?<=[、。！？\s「『（(]))"
+# 汉字/片假名名字：不允许混入平假名，避免把“他のお客”“綿棒よりも”整段吞进来。
+# 不加行首/标点边界，因为“描いてくださった梅地様”这类名字前可直接接动词。
+KANJI_KATAKANA_HONORIFIC_RE = re.compile(
+    rf"({KANJI_KATAKANA_NAME_CHAR}{{1,8}})"
     r"(?:ちゃん|さん|くん|様|さま|先生|先輩)"
 )
+# 平假名名字单独处理：只允许纯平假名 base，避免“いの皆”这类混合词。
+HIRAGANA_HONORIFIC_RE = re.compile(
+    rf"{NAME_BOUNDARY}({HIRAGANA_NAME_CHAR}{{2,5}})"
+    r"(?:ちゃん|さん|くん|様|さま|先生|先輩)"
+)
+# 片假名昵称单独处理；平假名不加“ちん”，避免把普通词/拟声词误当名字。
+KATAKANA_NICKNAME_RE = re.compile(r"([\u30a1-\u30f6\u30fc]{2,8})ちん")
+EXPLICIT_NAME_RE = re.compile(rf"({NAME_CHAR_CLASS}{{2,10}})(?=という名|役)")
 KANJI_CHUNK_RE = re.compile(r"[\u4e00-\u9fa5]{2,4}")
-ENTITY_HONORIFIC_SUFFIXES = ("ちゃん", "さん", "くん", "様", "さま", "先生", "先輩")
+ENTITY_HONORIFIC_SUFFIXES = (
+    "ちゃん", "さん", "くん", "様", "さま", "先生", "先輩", "ちん"
+)
 
 # 噪声停用表：只过滤普通词/拟声词，不是译名词表。
 ENTITY_STOPWORDS = frozenset(
@@ -430,6 +493,12 @@ ENTITY_STOPWORDS = frozenset(
         "チュッ", "チュッチュ", "クチュ", "ジュル", "レロ", "コト", "コツン",
         "ドキドキ", "ゴクッ", "オイル", "ローション", "テスト", "カフェ",
         "ホテル", "マッサージ", "ラブラブ",
+        # 本轮真实语料中暴露的普通名词/拟声词；不得因为它们重复出现就锁成专名。
+        "トラック", "セックス", "バイバイ", "バイバーイ", "キャ", "チン",
+        "コショコショ", "ピコ", "カリ", "ヌルヌル", "オノマトペ", "ループ",
+        "ダメ", "エッチ", "キッズ", "イラスト", "ジェル", "マジ", "結構",
+        "恋人", "耳掃除", "美容師", "変態", "サイト", "オススメ",
+        "アイドル", "突然", "お姉", "客", "聞", "マゾ", "アンスリウム",
     }
 )
 
@@ -438,6 +507,28 @@ ENTITY_MAX_VARIANTS = 8
 ENTITY_MAX_EXAMPLES = 2
 ENTITY_EXAMPLE_CHARS = 80
 ENTITY_CONTEXT_CHARS = 1200
+
+
+def _kana_key(text: str) -> str:
+    """平假名→片假名键，仅用于把同一姓名的两种写法对齐。"""
+    return "".join(
+        chr(ord(char) + 0x60) if "\u3041" <= char <= "\u3096" else char
+        for char in text
+    )
+
+
+def _explicit_alias(
+    text: str, explicit_keys: dict[str, str]
+) -> tuple[str, str] | None:
+    """从连续平假名串里找出命中明确姓名的子串，优先最长匹配。"""
+    best: tuple[str, str] | None = None
+    for start in range(len(text)):
+        for end in range(start + 3, len(text) + 1):
+            candidate = text[start:end]
+            canonical = explicit_keys.get(_kana_key(candidate))
+            if canonical and (best is None or len(candidate) > len(best[1])):
+                best = (canonical, candidate)
+    return best
 
 
 def _common_prefix(values: set[str]) -> str:
@@ -475,14 +566,27 @@ def _edit_distance(left: str, right: str) -> int:
 
 
 def _seed_related(left: str, right: str) -> bool:
-    if left == right or left in right or right in left:
+    if left == right:
         return True
+    # 首字符不同就不是同一名字；禁止“チン 包含于 ノアチン”式跨名合并。
     if left[:1] != right[:1]:
         return False
+    if left in right or right in left:
+        return True
     if len(left) >= 3 and len(right) >= 3:
         if SequenceMatcher(None, left, right).ratio() >= 0.75:
             return True
     return abs(len(left) - len(right)) <= 1 and _edit_distance(left, right) <= 1
+
+
+def _is_name_variant(canonical: str, term: str) -> bool:
+    """只允许同一名字的前缀变体，不再接受任意包含关系。"""
+    if term == canonical:
+        return True
+    if term in ENTITY_STOPWORDS or not term.startswith(canonical):
+        return False
+    suffix = term[len(canonical) :]
+    return suffix in ENTITY_HONORIFIC_SUFFIXES or len(suffix) <= 4
 
 
 def _base_of_variant(variant: str) -> str:
@@ -495,10 +599,10 @@ def _base_of_variant(variant: str) -> str:
 class DynamicEntityEngine:
     """文档级实体索引：种子召回变体，首发锁定 + 前文示例注入。
 
-    设计目标是“宁漏不错”：片假名/敬称名/共同前缀汉字变体才进入索引；
-    锁定只接受“源行以实体开头且后接标点、译文前 2–4 字后接标点”的高置信
-    场景，其余只保存前文示例。``enforce_locks`` 只清理未翻译的日文专名，
-    不假装能确定性替换中文译名变体。
+    设计目标是“宁漏不错”：只有敬称名、明确姓名上下文和共同前缀汉字姓名
+    才进入索引；裸片假名/拟声词/普通名词不建实体。锁定只接受“源行以实体
+    开头且后接标点、译文前 2–4 字后接标点”的高置信场景，其余只保存前文
+    示例。``enforce_locks`` 只清理未翻译的日文专名。
     """
 
     def __init__(self, raw_cues: list[str]) -> None:
@@ -514,30 +618,48 @@ class DynamicEntityEngine:
     # ------------------------------------------------------------------ #
 
     def _build_index(self, raw_cues: list[str]) -> None:
-        katakana_counts: Counter[str] = Counter()
         honorific_counts: Counter[str] = Counter()
         honorific_forms: dict[str, str] = {}
+        explicit_counts: Counter[str] = Counter()
+        katakana_terms: Counter[str] = Counter()
+        hiragana_terms: Counter[str] = Counter()
         kanji_counts: Counter[str] = Counter()
         all_counts: Counter[str] = Counter()
         first_seen: dict[str, int] = {}
 
+        def add_name(name: str, full: str, index: int, weight: int = 1) -> None:
+            if not name or name in ENTITY_STOPWORDS:
+                return
+            honorific_counts[name] += weight
+            honorific_forms[full] = name
+            all_counts[name] += weight
+            all_counts[full] += weight
+            first_seen.setdefault(name, index)
+            first_seen.setdefault(full, index)
+
         for index, text in enumerate(raw_cues):
-            for match in KATAKANA_ENTITY_RE.finditer(text):
-                term = match.group(0)
-                katakana_counts[term] += 1
-                all_counts[term] += 1
-                first_seen.setdefault(term, index)
-            for match in HONORIFIC_NAME_RE.finditer(text):
+            for pattern in (KANJI_KATAKANA_HONORIFIC_RE, HIRAGANA_HONORIFIC_RE):
+                for match in pattern.finditer(text):
+                    add_name(match.group(1), match.group(0), index)
+            for match in KATAKANA_NICKNAME_RE.finditer(text):
+                add_name(match.group(1), match.group(0), index)
+            for match in EXPLICIT_NAME_RE.finditer(text):
                 name = match.group(1)
-                full = match.group(0)
                 if name in ENTITY_STOPWORDS:
                     continue
-                honorific_counts[name] += 1
-                honorific_forms[full] = name
+                explicit_counts[name] += 1
                 all_counts[name] += 1
-                all_counts[full] += 1
                 first_seen.setdefault(name, index)
-                first_seen.setdefault(full, index)
+            for match in KATAKANA_TERM_RE.finditer(text):
+                term = match.group(0)
+                katakana_terms[term] += 1
+                all_counts[term] += 1
+                first_seen.setdefault(term, index)
+            for match in HIRAGANA_TERM_RE.finditer(text):
+                term = match.group(0)
+                hiragana_terms[term] += 1
+                all_counts[term] += 1
+                first_seen.setdefault(term, index)
             for match in KANJI_CHUNK_RE.finditer(text):
                 term = match.group(0)
                 kanji_counts[term] += 1
@@ -545,13 +667,12 @@ class DynamicEntityEngine:
                 first_seen.setdefault(term, index)
 
         seeds: dict[str, int] = {}
-        for term, count in katakana_counts.items():
-            if count >= 2 and term not in ENTITY_STOPWORDS:
-                seeds[term] = max(seeds.get(term, 0), count)
         for term, count in honorific_counts.items():
-            weighted = count * 2
-            if weighted >= 2 and term not in ENTITY_STOPWORDS:
-                seeds[term] = max(seeds.get(term, 0), weighted)
+            if term not in ENTITY_STOPWORDS:
+                seeds[term] = max(seeds.get(term, 0), count * 2)
+        for term, count in explicit_counts.items():
+            if term not in ENTITY_STOPWORDS:
+                seeds[term] = max(seeds.get(term, 0), count * 2)
 
         prefix_groups: dict[str, set[str]] = {}
         for term in kanji_counts:
@@ -571,6 +692,16 @@ class DynamicEntityEngine:
         if not seeds:
             return
 
+        # 平假名写法（みさきひより）只有在规范键命中明确姓名（ミサキヒヨリ）时才并入，
+        # 不做无证据的昵称猜测。
+        explicit_keys = {_kana_key(name): name for name in explicit_counts}
+        extra_variants: dict[str, set[str]] = {}
+        for term in hiragana_terms:
+            alias = _explicit_alias(term, explicit_keys)
+            if alias:
+                canonical, matched = alias
+                extra_variants.setdefault(canonical, set()).add(matched)
+
         clusters: list[set[str]] = []
         for term in sorted(seeds, key=lambda item: (-seeds[item], -len(item), item)):
             related = [
@@ -585,7 +716,11 @@ class DynamicEntityEngine:
             clusters.append(merged)
 
         candidate_terms = (
-            set(katakana_counts) | set(kanji_counts) | set(honorific_forms)
+            set(kanji_counts)
+            | set(katakana_terms)
+            | set(honorific_forms)
+            | set(honorific_counts)
+            | set(explicit_counts)
         )
         cluster_for: dict[str, str] = {}
         cluster_scores: dict[str, int] = {}
@@ -596,11 +731,12 @@ class DynamicEntityEngine:
             )
             variants = set(cluster)
             for term in candidate_terms:
-                if term == canonical or canonical in term:
+                if _is_name_variant(canonical, term):
                     variants.add(term)
             for full, name in honorific_forms.items():
                 if name == canonical:
                     variants.add(full)
+            variants |= extra_variants.get(canonical, set())
             self._variants[canonical] = variants
             for term in variants:
                 cluster_for[term] = canonical
@@ -649,7 +785,9 @@ class DynamicEntityEngine:
             )[:ENTITY_MAX_VARIANTS]
             locked = self.locked_translations.get(canonical, "")
             examples = self.examples.get(canonical, [])[:ENTITY_MAX_EXAMPLES]
-            if len(variants) <= 1 and not locked and not examples:
+            # 没有锁定名/前文示例时不要只注入“实体变体”：模型会把它当专名
+            # 原样保留，反而造成假名残留；首次出现让模型自然译成中文。
+            if not locked and not examples:
                 continue
             base = [f"- 实体「{canonical}」：{' / '.join(variants)}"]
             if locked:
@@ -692,6 +830,9 @@ class DynamicEntityEngine:
             source = source.strip()
             translation = translation.strip()
             if not source or not translation:
+                continue
+            # 坏译不能进入“前文示例”，否则实体上下文会把错误固定下来。
+            if validate_cue_translation(translation) is not None:
                 continue
             hits = [
                 canonical
@@ -747,10 +888,14 @@ class DynamicEntityEngine:
     def _extract_locked_name(
         self, source: str, translation: str, canonical: str
     ) -> str:
+        if canonical in ENTITY_STOPWORDS:
+            return ""
         stripped_source = source.lstrip()
         if not stripped_source or stripped_source.startswith(
             ("（", "(", "【", "[")
         ):
+            return ""
+        if validate_cue_translation(translation) is not None:
             return ""
         variants = sorted(
             self._variants.get(canonical, {canonical}),
@@ -807,6 +952,24 @@ class TranslationEngine:
     def reset_history(self) -> None:
         """开始新文档时清空滑动上下文；文档级实体锁定表不受影响。"""
         self._history.clear()
+
+    def record_window_history(self, pairs: list[tuple[str, str]]) -> None:
+        """把合流窗口的自动整窗记录替换为逐 cue 记录。
+
+        ``_translate_once`` 每次 ``chat`` 调用都会 append 一条“整窗”记录；
+        合流窗口有 6 条 cue 时，直接把 12 条 maxlen 当成 72 条。这里弹出
+        刚追加的整窗条目，再按 cue 写入，恢复 context_window 的 cue 语义。
+        """
+        if not pairs:
+            return
+        if self._history:
+            self._history.pop()
+        for source, translation in pairs:
+            self._history.append((source, translation))
+
+    def history_snapshot(self) -> tuple[tuple[str, str], ...]:
+        """批次调用前的只读快照，供跨窗复制检查使用。"""
+        return tuple(self._history)
 
     def set_entity_engine(self, engine: DynamicEntityEngine | None) -> None:
         """绑定文档级实体索引；由 translate_srt 在单文件翻译期间管理。"""
@@ -1278,16 +1441,50 @@ def _source_texts_are_similar(left: str, right: str) -> bool:
     return SequenceMatcher(None, left, right).ratio() >= 0.75
 
 
+def _copies_history(
+    source_text: str,
+    translation: str,
+    history: tuple[tuple[str, str], ...],
+) -> bool:
+    """当前译文是否整段复用了历史前文。
+
+    只抓“不同源文却出现长句复制”的高置信场景；源文相似或译文过短时跳过，
+    避免把合法重复句/语气词误判成错位。
+    """
+    normalized = _normalize_for_compare(translation)
+    if len(normalized) < 12 or not history:
+        return False
+    source_norm = _normalize_for_compare(source_text)
+    for history_source, history_translation in history:
+        previous = _normalize_for_compare(history_translation)
+        if len(previous) < 8:
+            continue
+        if _source_texts_are_similar(
+            source_norm, _normalize_for_compare(history_source)
+        ):
+            continue
+        if previous in normalized or normalized in previous:
+            return True
+        match = SequenceMatcher(None, normalized, previous).find_longest_match(
+            0, len(normalized), 0, len(previous)
+        )
+        if match.size >= 10:
+            return True
+    return False
+
+
 def _window_translation_is_suspicious(
     window: list[tuple[int, Subtitle]],
     aligned: dict[str, str],
+    history: tuple[tuple[str, str], ...] = (),
 ) -> bool:
     """检测结构完整但语义明显错位的窗口，避免把相邻行译文写进当前 cue。
 
-    三类信号：
+    四类信号：
     1. 正文残留 [#N]；
     2. 非空原文对应空译文；
-    3. 不同原文得到完全相同且足够长的译文（合法重复短句不触发）。
+    3. 不同原文得到完全相同且足够长的译文（合法重复短句不触发）；
+    4. 当前译文整段复用历史前文（跨窗复制，例如 396 -> 411）。
     """
     pairs: list[tuple[str, str]] = []
     for _index, subtitle in window:
@@ -1295,6 +1492,8 @@ def _window_translation_is_suspicious(
         if WINDOW_ID_ANY_RE.search(translation):
             return True
         if subtitle.text.strip() and not translation.strip():
+            return True
+        if _copies_history(subtitle.text, translation, history):
             return True
         pairs.append((_normalize_for_compare(subtitle.text), translation))
 
@@ -1323,25 +1522,36 @@ def _window_translation_is_suspicious(
     return False
 
 
+SINGLE_RETRY_HINT = (
+    "（上一次输出保留了日文假名、SEXPAR/Track 或斜杠；"
+    "请只把当前编号译成中文，禁止保留假名、禁止斜杠并列。）"
+)
+
+
 def _translate_single_cue(
     chat: Callable[[str], str],
     subtitle: Subtitle,
     *,
     source: str,
     failures: list[TranslationFailure],
+    correction: str = "",
+    record_failure: bool = True,
 ) -> str | None:
     """窗口回退时按“单编号窗口”重译，避免无编号裸文本被模型续写多行。"""
     prompt = f"[#{subtitle.index}] {subtitle.text}"
+    if correction:
+        prompt = f"{prompt}\n{correction}"
     try:
         raw = chat(prompt)
     except (EngineError, TranslateError) as exc:
-        failures.append(
-            TranslationFailure(
-                source=source,
-                segment=f"line {subtitle.index}",
-                reason=str(exc),
+        if record_failure:
+            failures.append(
+                TranslationFailure(
+                    source=source,
+                    segment=f"line {subtitle.index}",
+                    reason=str(exc),
+                )
             )
-        )
         return None
 
     ok, aligned, _missing = parse_window_response(raw, [subtitle.index])
@@ -1352,13 +1562,14 @@ def _translate_single_cue(
 
     cleaned = strip_window_id_prefix(raw)
     if not cleaned:
-        failures.append(
-            TranslationFailure(
-                source=source,
-                segment=f"line {subtitle.index}",
-                reason="单句回退返回空译文",
+        if record_failure:
+            failures.append(
+                TranslationFailure(
+                    source=source,
+                    segment=f"line {subtitle.index}",
+                    reason="单句回退返回空译文",
+                )
             )
-        )
         return None
     # 没有编号却返回多个编号/多行，说明模型仍在续写相邻行；宁可保留原文，不写入错位内容。
     source_lines = len([line for line in subtitle.text.splitlines() if line.strip()])
@@ -1366,13 +1577,14 @@ def _translate_single_cue(
     if len(leaked_ids) > 1 or (
         source_lines <= 1 and len([line for line in cleaned.splitlines() if line.strip()]) > 2
     ):
-        failures.append(
-            TranslationFailure(
-                source=source,
-                segment=f"line {subtitle.index}",
-                reason="单句回退疑似续写相邻行，已保留原文",
+        if record_failure:
+            failures.append(
+                TranslationFailure(
+                    source=source,
+                    segment=f"line {subtitle.index}",
+                    reason="单句回退疑似续写相邻行，已保留原文",
+                )
             )
-        )
         return None
     return cleaned
 
@@ -1427,7 +1639,18 @@ def translate_srt(
                 failures=failures,
             )
             if result is not None:
-                subtitle.text = postprocess_cue_text(result, subtitle.text)
+                result = postprocess_cue_text(result, subtitle.text)
+                reason = validate_cue_translation(result)
+                if reason:
+                    failures.append(
+                        TranslationFailure(
+                            source=source,
+                            segment=f"line {subtitle.index}",
+                            reason=reason,
+                        )
+                    )
+                else:
+                    subtitle.text = result
             # 失败时保留原文，继续下一条
             done += 1
             if on_segment is not None:
@@ -1465,10 +1688,14 @@ def translate_srt(
         for window in windows:
             expected_ids = [item[1].index for item in window]
             fallback = len(set(expected_ids)) != len(expected_ids)
+            history: tuple[tuple[str, str], ...] = ()
             if not fallback:
                 batch_prompt = "\n".join(
                     f"[#{item[1].index}] {item[1].text}" for item in window
                 )
+                snapshot = getattr(chat, "history_snapshot", None)
+                if callable(snapshot):
+                    history = snapshot()
                 try:
                     batch_output = chat(batch_prompt)
                     ok, aligned, _missing = parse_window_response(
@@ -1478,7 +1705,9 @@ def translate_srt(
                         ok, aligned, _missing = recover_window_response(
                             batch_output, expected_ids
                         )
-                    if ok and _window_translation_is_suspicious(window, aligned):
+                    if ok and _window_translation_is_suspicious(
+                        window, aligned, history
+                    ):
                         ok = False
                     if ok:
                         window_sources = [item[1].text for item in window]
@@ -1490,12 +1719,33 @@ def translate_srt(
                             text = postprocess_cue_text(text, subtitle.text)
                             text = entity_engine.enforce_locks(text)
                             staging.append((subtitle, text))
-                        entity_engine.capture_translations(
-                            window_sources,
-                            [text for _subtitle, text in staging],
+                        bad = next(
+                            (
+                                reason
+                                for _subtitle, text in staging
+                                if (reason := validate_cue_translation(text))
+                            ),
+                            None,
                         )
-                        for subtitle, text in staging:
-                            subtitle.text = entity_engine.enforce_locks(text)
+                        if bad:
+                            fallback = True
+                        else:
+                            entity_engine.capture_translations(
+                                window_sources,
+                                [text for _subtitle, text in staging],
+                            )
+                            recorded: list[tuple[str, str]] = []
+                            for source_text, (_subtitle, text), (
+                                _block_index,
+                                subtitle,
+                            ) in zip(window_sources, staging, window):
+                                subtitle.text = entity_engine.enforce_locks(text)
+                                recorded.append((source_text, subtitle.text))
+                            recorder = getattr(
+                                chat, "record_window_history", None
+                            )
+                            if callable(recorder):
+                                recorder(recorded)
                     else:
                         fallback = True
                 except (EngineError, TranslateError):
@@ -1504,7 +1754,12 @@ def translate_srt(
             if fallback:
                 # 硬熔断：该窗口原地回退为逐句串行，绝不采用部分对齐结果
                 reset_history = getattr(chat, "reset_history", None)
-                for _block_index, subtitle in window:
+                for position, (_block_index, subtitle) in enumerate(window):
+                    previous = ""
+                    if position > 0:
+                        previous = window[position - 1][1].text
+                    elif history:
+                        previous = history[-1][1]
                     # 单句回退不继承上一句的滑动上下文，避免模型续写相邻行。
                     if callable(reset_history):
                         reset_history()
@@ -1517,11 +1772,44 @@ def translate_srt(
                     if result is not None:
                         result = postprocess_cue_text(result, subtitle.text)
                         result = entity_engine.enforce_locks(result)
-                        entity_engine.capture_translations(
-                            [subtitle.text], [result]
-                        )
-                        result = entity_engine.enforce_locks(result)
-                        subtitle.text = result
+                        reason = validate_cue_translation(result)
+                        if reason:
+                            # 给自造词/未本地化专名一次纠偏机会；仍不合格则保留原文。
+                            if callable(reset_history):
+                                reset_history()
+                            retry_hint = SINGLE_RETRY_HINT
+                            if previous and validate_cue_translation(previous) is None:
+                                retry_hint += f" 上一句译文：{_clip(previous, 80)}"
+                            retry = _translate_single_cue(
+                                chat,
+                                subtitle,
+                                source=source,
+                                failures=failures,
+                                correction=retry_hint,
+                                record_failure=False,
+                            )
+                            if retry is not None:
+                                retry = postprocess_cue_text(
+                                    retry, subtitle.text
+                                )
+                                retry = entity_engine.enforce_locks(retry)
+                                if validate_cue_translation(retry) is None:
+                                    result = retry
+                                    reason = None
+                        if reason:
+                            failures.append(
+                                TranslationFailure(
+                                    source=source,
+                                    segment=f"line {subtitle.index}",
+                                    reason=reason,
+                                )
+                            )
+                        else:
+                            entity_engine.capture_translations(
+                                [subtitle.text], [result]
+                            )
+                            result = entity_engine.enforce_locks(result)
+                            subtitle.text = result
 
             done += len(window)
             if on_segment is not None:

@@ -36,6 +36,7 @@ from vanitas.translate import (  # noqa: E402
     strip_window_id_prefix,
     translate_file,
     translate_srt,
+    validate_cue_translation,
 )
 
 SETTINGS = TranslateSettings(
@@ -413,15 +414,15 @@ class TranslateTests(unittest.TestCase):
                 batch_calls += 1
                 return "[#1] 这是完全相同的一条长译文\n[#2] 这是完全相同的一条长译文"
             single_calls += 1
-            return f"译{prompt}"
+            return "译今日" if "今日" in prompt else "译明日"
 
         outcome = translate_file(chat, source, SETTINGS, window_size=2)
         self.assertEqual(outcome.failures, [])
         self.assertEqual(batch_calls, 1)
         self.assertEqual(single_calls, 2)
         translated = outcome.output.read_text(encoding="utf-8")
-        self.assertIn("译今日はとても楽しかったです", translated)
-        self.assertIn("译明日の予定を確認します", translated)
+        self.assertIn("译今日", translated)
+        self.assertIn("译明日", translated)
 
     def test_translate_srt_rejects_partial_translation_overlap(self) -> None:
         source = self.write(
@@ -441,12 +442,177 @@ class TranslateTests(unittest.TestCase):
                     "[#2] 享受声音的部分可真多呢。"
                 )
             single_calls += 1
-            return f"译{prompt}"
+            return "译单句"
 
         outcome = translate_file(chat, source, SETTINGS, window_size=2)
         self.assertEqual(outcome.failures, [])
         self.assertEqual(batch_calls, 1)
         self.assertEqual(single_calls, 2)
+
+    def test_batch_history_is_recorded_per_cue(self) -> None:
+        source = "\n\n".join(
+            f"{index}\n00:00:01,000 --> 00:00:02,000\n一"
+            for index in range(1, 13)
+        )
+        first = "\n".join(f"[#{index}] 译{index}" for index in range(1, 7))
+        second = "\n".join(f"[#{index}] 译{index}" for index in range(7, 13))
+        client = ScriptedTranslationClient([first, second])
+        engine = TranslationEngine(
+            client,
+            ROOT / "config" / "prompts",
+            "",
+            options=translation_options(context_window=12),
+            task_template="translate_asmr",
+        )
+        failures: list = []
+        translate_srt(
+            engine,
+            source,
+            chunk_chars=800,
+            source="history.srt",
+            eol="\n",
+            failures=failures,
+            window_size=6,
+            max_window_chars=1000,
+        )
+        self.assertEqual(failures, [])
+        self.assertEqual(len(engine.history_snapshot()), 12)
+        self.assertIn("译6", client.calls[1])
+
+    def test_cross_window_copy_falls_back(self) -> None:
+        source = (
+            "1\n00:00:01,000 --> 00:00:02,000\n"
+            "今日はとても楽しかったです\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\n"
+            "明日の予定を確認します\n\n"
+            "3\n00:00:05,000 --> 00:00:06,000\n"
+            "これは別の長い台詞です\n"
+        )
+        client = ScriptedTranslationClient(
+            [
+                "[#1] 今天真的非常开心，发生了很多事。\n[#2] 明天确认计划。",
+                "[#3] 今天真的非常开心，发生了很多事。",
+                "[#3] 这是另一段很长的台词。",
+            ]
+        )
+        engine = TranslationEngine(
+            client,
+            ROOT / "config" / "prompts",
+            "",
+            options=translation_options(context_window=12),
+            task_template="translate_asmr",
+        )
+        failures: list = []
+        output = translate_srt(
+            engine,
+            source,
+            chunk_chars=800,
+            source="copy.srt",
+            eol="\n",
+            failures=failures,
+            window_size=2,
+            max_window_chars=1000,
+        )
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(failures, [])
+        self.assertIn("这是另一段很长的台词。", output)
+        self.assertEqual(output.count("今天真的非常开心，发生了很多事。"), 1)
+
+    def test_batch_validation_rejects_sexpar_and_falls_back(self) -> None:
+        source = (
+            "1\n00:00:01,000 --> 00:00:02,000\nこんにちは\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\nさようなら\n"
+        )
+        client = ScriptedTranslationClient(
+            [
+                "[#1] 做SEXPAR啦\n[#2] 正常",
+                "[#1] 做爱啦",
+                "[#2] 正常",
+            ]
+        )
+        engine = TranslationEngine(
+            client,
+            ROOT / "config" / "prompts",
+            "",
+            options=translation_options(),
+            task_template="translate_asmr",
+        )
+        failures: list = []
+        output = translate_srt(
+            engine,
+            source,
+            chunk_chars=800,
+            source="sexpar.srt",
+            eol="\n",
+            failures=failures,
+            window_size=2,
+            max_window_chars=1000,
+        )
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(failures, [])
+        self.assertIn("做爱啦", output)
+        self.assertNotIn("SEXPAR", output)
+
+    def test_fallback_retries_after_validation(self) -> None:
+        source = "1\n00:00:01,000 --> 00:00:02,000\nこんにちは\n"
+        client = ScriptedTranslationClient(
+            ["[#1] 做SEXPAR啦", "[#1] 做SEXPAR啦", "[#1] 做爱啦"]
+        )
+        engine = TranslationEngine(
+            client,
+            ROOT / "config" / "prompts",
+            "",
+            options=translation_options(),
+            task_template="translate_asmr",
+        )
+        failures: list = []
+        output = translate_srt(
+            engine,
+            source,
+            chunk_chars=800,
+            source="retry.srt",
+            eol="\n",
+            failures=failures,
+            window_size=2,
+            max_window_chars=1000,
+        )
+        self.assertEqual(failures, [])
+        self.assertEqual(len(client.calls), 3)
+        self.assertIn("做爱啦", output)
+
+    def test_fallback_validation_keeps_source_and_records_failure(self) -> None:
+        source = "1\n00:00:01,000 --> 00:00:02,000\nこんにちは\n"
+        client = ScriptedTranslationClient(
+            ["[#1] 做SEXPAR啦", "[#1] 做SEXPAR啦"]
+        )
+        engine = TranslationEngine(
+            client,
+            ROOT / "config" / "prompts",
+            "",
+            options=translation_options(),
+            task_template="translate_asmr",
+        )
+        failures: list = []
+        output = translate_srt(
+            engine,
+            source,
+            chunk_chars=800,
+            source="bad.srt",
+            eol="\n",
+            failures=failures,
+            window_size=1,
+        )
+        self.assertEqual(len(failures), 1)
+        self.assertIn("臆造", failures[0].reason)
+        self.assertIn("こんにちは", output)
+        self.assertNotIn("SEXPAR", output)
+
+    def test_validate_cue_translation_rejects_kana_sexpar_and_slash(self) -> None:
+        self.assertIn("假名", validate_cue_translation("まだ仮名") or "")
+        self.assertIn("臆造", validate_cue_translation("做SEXPAR啦") or "")
+        self.assertIn("臆造", validate_cue_translation("用Track的话") or "")
+        self.assertIn("斜杠", validate_cue_translation("先生/女士") or "")
+        self.assertIsNone(validate_cue_translation("ASMR和NG，1/2 也可以"))
 
     def test_translate_srt_accepts_repeated_short_source_lines(self) -> None:
         source = self.write(
@@ -1503,6 +1669,68 @@ class DynamicEntityEngineTests(unittest.TestCase):
         engine = DynamicEntityEngine(["今日はいい天気", "大丈夫"])
         self.assertEqual(engine.get_query_context("今日はいい天気"), "")
 
+    def test_common_katakana_and_onomatopoeia_are_not_entities(self) -> None:
+        engine = DynamicEntityEngine(
+            [
+                "トラックさん、こんにちは",
+                "トラックさん、またね",
+                "セックスしたい",
+                "セックス?",
+                "コショコショコショコショ",
+                "バイバーイ",
+                "バイバーイ",
+            ]
+        )
+        for term in ("トラック", "セックス", "コショコショ", "バイバイ"):
+            self.assertNotIn(term, engine.canonical_map)
+            self.assertNotIn(term, engine.locked_translations)
+        for text in ("トラックさん", "セックス", "コショコショ", "バイバーイ"):
+            self.assertEqual(engine.get_query_context(text), "")
+        engine.capture_translations(
+            ["トラックさん、こんにちは", "セックスしたい"],
+            ["托拉克，你好", "做SEXPAR"],
+        )
+        self.assertNotIn("トラック", engine.locked_translations)
+        self.assertNotIn("セックス", engine.examples)
+
+    def test_noa_is_not_merged_into_chin_and_pachinko_is_not_variant(self) -> None:
+        engine = DynamicEntityEngine(
+            [
+                "ノアちゃん、おはよう",
+                "ノアチン、またね",
+                "パチンコの話",
+                "チン、聞こえる",
+            ]
+        )
+        self.assertEqual(engine.canonical_map.get("ノア"), "ノア")
+        self.assertNotIn("チン", engine.canonical_map)
+        variants = engine._variants.get("ノア", set())
+        self.assertNotIn("パチンコ", variants)
+        self.assertNotIn("チン", variants)
+
+    def test_hiragana_alias_links_to_explicit_name(self) -> None:
+        engine = DynamicEntityEngine(
+            [
+                "ミサキヒヨリという名のサクラです",
+                "みさきひよりと申します",
+                "さくら役のみさきひよりと",
+            ]
+        )
+        self.assertEqual(engine.canonical_map.get("みさきひより"), "ミサキヒヨリ")
+        engine.capture_translations(["みさきひよりと"], ["美咲日和"])
+        context = engine.get_query_context("みさきひよりと")
+        self.assertIn("みさきひより", context)
+        self.assertIn("ミサキヒヨリ", context)
+
+    def test_capture_skips_kana_and_artifact_examples(self) -> None:
+        engine = DynamicEntityEngine(["ノアちゃん、おはよう"])
+        engine.capture_translations(
+            ["ノアちゃん、おはよう"],
+            ["ノアちゃん、SEXPAR"],
+        )
+        self.assertNotIn("ノア", engine.examples)
+        self.assertNotIn("ノア", engine.locked_translations)
+
     def test_capture_does_not_lock_non_leading_name(self) -> None:
         engine = DynamicEntityEngine(
             ["ノアちゃん、おはよう", "ノアチップ、またね"]
@@ -1616,6 +1844,21 @@ class PostprocessTests(unittest.TestCase):
             postprocess_cue_text("你好 [#12]", "hello"),
             "你好",
         )
+
+    def test_slash_alternative_repairs_japanese_or_track_side(self) -> None:
+        self.assertEqual(
+            postprocess_cue_text("ツルペタオセックス/光溜溜的做爱", "ツルペタオセックス?"),
+            "光溜溜的做爱",
+        )
+        self.assertEqual(
+            postprocess_cue_text("Track/音轨", "トラック"),
+            "音轨",
+        )
+        self.assertEqual(
+            postprocess_cue_text("吉田先生/女士", "吉田さん"),
+            "吉田先生/女士",
+        )
+        self.assertEqual(postprocess_cue_text("1/2", "分数"), "1/2")
 
 
 if __name__ == "__main__":
