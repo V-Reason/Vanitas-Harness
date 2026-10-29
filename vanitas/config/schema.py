@@ -149,6 +149,7 @@ PRESET_FIELDS = frozenset(
         "task_template",
         "window_size",
         "max_window_chars",
+        "lookahead_cues",
         "profile",
         "context_window",
         "context_summary_chars",

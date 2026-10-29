@@ -969,6 +969,7 @@ class TranslationEngine:
         window = max(0, int(self._options.context_window))
         self._history: deque[tuple[str, str]] = deque(maxlen=window)
         self._entity_engine: DynamicEntityEngine | None = None
+        self._lookahead = ""
         self._on_stat = on_stat
         # 术语表只在 ASMR 任务加载；其余任务保持空表，后处理零成本。
         self._glossary = Glossary()
@@ -1040,6 +1041,18 @@ class TranslationEngine:
     def set_entity_engine(self, engine: DynamicEntityEngine | None) -> None:
         """绑定文档级实体索引；由 translate_srt 在单文件翻译期间管理。"""
         self._entity_engine = engine
+
+    def set_lookahead(self, text: str) -> None:
+        """设置下一窗口的只读后文参考；仅供当前一次批量调用理解上下文。
+
+        后文不是待翻译输入，调用方必须在批次返回后立即 ``clear_lookahead``，
+        否则会被带入下一窗甚至写进滑动历史。
+        """
+        self._lookahead = text.strip()
+
+    def clear_lookahead(self) -> None:
+        """清除后文参考；与 ``set_lookahead`` 成对使用。"""
+        self._lookahead = ""
 
     def translate_filename(self, filename: str) -> str:
         """用翻译模型把文件名主体译成中文；不写入正文上下文。"""
@@ -1148,6 +1161,12 @@ class TranslationEngine:
             context = entity_context + "\n\n【前文】\n" + history
         else:
             context = history
+        if self._lookahead:
+            context += (
+                "\n\n【后文参考（仅用于理解指代/省略/语气，"
+                "禁止翻译或写入当前编号）】\n"
+                + self._lookahead
+            )
         prompt = prompts.render(
             self._template,
             {"input": text, "context_history": context},
@@ -1687,6 +1706,7 @@ def translate_srt(
     window_size: int = 1,
     max_window_chars: int = 250,
     join_rules: tuple[JoinRule, ...] = (),
+    lookahead_cues: int = 0,
 ) -> str:
     blocks = parse_srt(text, eol)
     valid_items = [
@@ -1932,7 +1952,34 @@ def translate_srt(
         if current:
             windows.append(current)
 
-        for window in windows:
+        # 后文参考只取紧邻的下一窗原文，按 cue 截断到 120 字；仅用于理解，
+        # 不进入 input_batch、不写历史、不参与写回。超长单条至少保留一条。
+        window_lookaheads: list[str] = []
+        if lookahead_cues > 0:
+            flat = [item for window in windows for item in window]
+            cursor = 0
+            for window in windows:
+                cursor += len(window)
+                parts: list[str] = []
+                used = 0
+                for item in flat[cursor : cursor + lookahead_cues]:
+                    # 后文参考不带 [#N]：带编号会诱导模型把参考项当输入翻译，
+                    # 导致编号多翻/乱序并整窗回退；这里只给裸原文。
+                    line = f"- {item[1].text}"
+                    if parts and used + len(line) > 120:
+                        break
+                    parts.append(line)
+                    used += len(line)
+                lookahead = "\n".join(parts)
+                if len(lookahead) > 120:
+                    lookahead = lookahead[:120].rstrip() + "…"
+                window_lookaheads.append(lookahead)
+        else:
+            window_lookaheads = [""] * len(windows)
+
+        set_lookahead = getattr(chat, "set_lookahead", None)
+        clear_lookahead = getattr(chat, "clear_lookahead", None)
+        for window_index, window in enumerate(windows):
             expected_ids = [item[1].index for item in window]
             window_sources = [item[1].text for item in window]
             window_cues = [cue_of(item[1]) for item in window]
@@ -1944,8 +1991,15 @@ def translate_srt(
                 batch_prompt = "\n".join(
                     f"[#{item[1].index}] {item[1].text}" for item in window
                 )
+                lookahead = window_lookaheads[window_index]
+                if lookahead and callable(set_lookahead):
+                    set_lookahead(lookahead)
                 try:
                     batch_output = chat(batch_prompt)
+                finally:
+                    if callable(clear_lookahead):
+                        clear_lookahead()
+                try:
                     ok, aligned, _missing = parse_window_response(
                         batch_output, expected_ids
                     )
@@ -2527,6 +2581,7 @@ def translate_file(
     window_size: int = 1,
     max_window_chars: int = 250,
     join_rules: tuple[JoinRule, ...] = (),
+    lookahead_cues: int = 0,
 ) -> TranslationOutcome:
     source = Path(source)
     if not source.is_file():
@@ -2554,6 +2609,7 @@ def translate_file(
             window_size=window_size,
             max_window_chars=max_window_chars,
             join_rules=join_rules,
+            lookahead_cues=lookahead_cues,
         )
     else:
         segments = sum(1 for paragraph, _ in split_prose(text) if paragraph.strip())

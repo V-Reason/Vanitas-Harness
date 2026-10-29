@@ -413,6 +413,7 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
     )
     window_size = int(preset_info.get("window_size", 1))
     max_window_chars = int(preset_info.get("max_window_chars", 250))
+    lookahead_cues = int(preset_info.get("lookahead_cues", 0))
     model = _resolve_model(config, args.model, "translate")
     profile_key = args.profile or preset_info.get("profile")
     profile = config.resolve_profile(model, profile_key)
@@ -565,6 +566,7 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                     output_suffix=content_suffix,
                     window_size=window_size,
                     max_window_chars=max_window_chars,
+                    lookahead_cues=lookahead_cues,
                     join_rules=(
                         getattr(chat, "join_rules", ())
                         if window_size > 1

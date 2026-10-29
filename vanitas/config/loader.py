@@ -915,6 +915,9 @@ def _load_settings(document: dict) -> Settings:
         max_window_chars = _as_optional_int(
             entry, "max_window_chars", label, 250, minimum=50
         )
+        lookahead_cues = _as_optional_int(
+            entry, "lookahead_cues", label, 0, minimum=0, maximum=4
+        )
         profile = entry.get("profile")
         if profile is not None:
             if not isinstance(profile, str) or not profile.strip():
@@ -939,6 +942,8 @@ def _load_settings(document: dict) -> Settings:
             normalized["window_size"] = window_size
         if "max_window_chars" in entry:
             normalized["max_window_chars"] = max_window_chars
+        if "lookahead_cues" in entry:
+            normalized["lookahead_cues"] = lookahead_cues
         if profile is not None:
             normalized["profile"] = profile
         if "context_window" in entry:

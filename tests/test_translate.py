@@ -82,6 +82,25 @@ def echo_chat(text: str) -> str:
     return "译" + text
 
 
+class LookaheadChat:
+    """记录每窗被设置的后文参考，并返回与输入编号对齐的译文。"""
+
+    def __init__(self) -> None:
+        self.lookaheads: list[str] = []
+        self.current = ""
+
+    def set_lookahead(self, text: str) -> None:
+        self.current = text
+
+    def clear_lookahead(self) -> None:
+        self.current = ""
+
+    def __call__(self, text: str) -> str:
+        self.lookaheads.append(self.current)
+        ids = re.findall(r"^\[#(\d+)\]", text, flags=re.MULTILINE)
+        return "\n".join(f"[#{index}] 译{index}" for index in ids)
+
+
 class TranslateTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -264,6 +283,30 @@ class TranslateTests(unittest.TestCase):
         self.assertEqual(
             [block.text for block, _ in blocks],
             ["译一", "译二", "译三", "译四"],
+        )
+
+    def test_translate_srt_passes_lookahead_and_clears(self) -> None:
+        source = self.write("lookahead.srt", self._windowed_srt())
+        chat = LookaheadChat()
+
+        outcome = translate_file(
+            chat,
+            source,
+            SETTINGS,
+            window_size=2,
+            lookahead_cues=1,
+        )
+
+        self.assertEqual(outcome.failures, [])
+        self.assertEqual(len(chat.lookaheads), 2)
+        self.assertIn("三", chat.lookaheads[0])
+        self.assertNotIn("[#3]", chat.lookaheads[0])
+        self.assertEqual(chat.lookaheads[1], "")
+        translated = outcome.output.read_text(encoding="utf-8")
+        self.assertNotIn("[#", translated)
+        self.assertEqual(
+            [block.text for block, _ in parse_srt(translated, "\n")],
+            ["译1", "译2", "译3", "译4"],
         )
 
     def test_short_window_translation_falls_back_to_single_cues(self) -> None:
@@ -1460,6 +1503,21 @@ class TranslationEngineTests(unittest.TestCase):
         latest = client.calls[-1]["messages"][-1]["content"]
         self.assertIn("无前文，故事开端", latest)
         self.assertNotIn("alpha", latest)
+
+    def test_engine_lookahead_is_reference_only_and_cleared(self) -> None:
+        client = FakeTranslationClient()
+        engine = self.make_engine(client)
+        engine.set_lookahead("[#7] 后文台词")
+        engine.translate("alpha")
+
+        prompt = client.calls[0]["messages"][-1]["content"]
+        self.assertIn("后文参考", prompt)
+        self.assertIn("后文台词", prompt)
+
+        engine.clear_lookahead()
+        engine.translate("beta")
+        latest = client.calls[1]["messages"][-1]["content"]
+        self.assertNotIn("后文台词", latest)
 
     def test_translate_filename_uses_model_and_sanitizes(self) -> None:
         client = FilenameTranslationClient(content="文件名：时钟.md")

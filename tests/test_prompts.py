@@ -333,6 +333,14 @@ class PromptTests(unittest.TestCase):
             text.index("<asr_repair_protocol>"),
         )
 
+    def test_asmr_prompt_has_lookahead_insulation(self) -> None:
+        text = prompts.load_task(self.prompt_dir, "translate_asmr")
+        for phrase in ("后文参考", "禁止翻译", "禁止写入当前编号"):
+            self.assertIn(phrase, text)
+        self.assertEqual(
+            prompts.placeholders(text), {"input", "context_history"}
+        )
+
     def test_unknown_placeholder_in_template_rejected(self) -> None:
         (self.temp_dir / "bad.md").write_text("hi {unknown}\n", encoding="utf-8")
         with self.assertRaises(ConfigError) as ctx:

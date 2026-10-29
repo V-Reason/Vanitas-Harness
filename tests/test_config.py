@@ -368,6 +368,8 @@ class ConfigTests(unittest.TestCase):
             ("context_window", -1),
             ("context_summary_chars", 39),
             ("chunk_chars", 49),
+            ("lookahead_cues", 5),
+            ("lookahead_cues", -1),
             ("profile", 2),
             ("profile", ""),
         ):
