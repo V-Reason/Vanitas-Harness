@@ -7,7 +7,8 @@
 1. 静默 auto：繁体、行首标点等由翻译后处理覆盖，只计数不刷 warning；
 2. 结构 error：cue 数/序号/时间轴、[#N] 泄漏、不同原文同长译文，阻断；
 3. 语义 actionable：ASR 疑似错词、亲昵语境“您”、未授权动作括号、
-   译文暴增、空译与假名残留，默认只提示，--strict 才阻断。
+   译文暴增、空译、假名残留、可疑拉丁词与斜杠并列，默认只提示，
+   --strict 才阻断。
 
 脚本只读，不写任何文件。
 """
@@ -28,6 +29,9 @@ if str(ROOT) not in sys.path:
 
 from vanitas.translate import (  # noqa: E402
     ASR_HALLUCINATION_PATTERNS,
+    LATIN_ALLOW,
+    LATIN_TOKEN_RE,
+    SLASH_ALTERNATIVE_RE,
     SOURCE_HAS_BRACKETS_RE,
     STAGING_BRACKETS_RE,
     TRADITIONAL_CHARS,
@@ -158,7 +162,12 @@ def _clip(text: str, limit: int = 80) -> str:
 def _source_texts_are_similar(left: str, right: str) -> bool:
     if not left or not right:
         return False
-    return SequenceMatcher(None, left, right).ratio() >= 0.75
+    # 促音/长音在拟声词里没有语义差异；先抹平再比较，避免“カリッ/カリ”误报。
+    left = left.replace("ッ", "").replace("ー", "")
+    right = right.replace("ッ", "").replace("ー", "")
+    if left in right or right in left:
+        return True
+    return SequenceMatcher(None, left, right).ratio() >= 0.60
 
 
 def _issue(
@@ -280,6 +289,35 @@ def check_pair(source: Path, translated: Path) -> FileQC:
                     source_text,
                     translation_text,
                     "确认是否漏译或专名未本地化",
+                )
+            )
+        latin_tokens = [
+            token
+            for token in LATIN_TOKEN_RE.findall(zh.text)
+            if token.upper() not in LATIN_ALLOW
+        ]
+        if latin_tokens:
+            result.issues.append(
+                _issue(
+                    "actionable",
+                    "latin",
+                    f"译文含可疑拉丁词：{'、'.join(latin_tokens[:3])}",
+                    zh.index,
+                    source_text,
+                    translation_text,
+                    "确认是否模型臆造词或未本地化的 Track/SEXPAR",
+                )
+            )
+        if SLASH_ALTERNATIVE_RE.search(zh.text):
+            result.issues.append(
+                _issue(
+                    "actionable",
+                    "slash",
+                    "译文含中日文斜杠并列",
+                    zh.index,
+                    source_text,
+                    translation_text,
+                    "改成一个确定译名；不要用 A/B 或 先生/女士 并列",
                 )
             )
 

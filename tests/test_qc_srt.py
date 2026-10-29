@@ -82,6 +82,49 @@ class QcSrtTests(unittest.TestCase):
             any(item.code == "duplicate_translation" for item in result.errors)
         )
 
+    def test_duplicate_onomatopoeia_is_not_error(self) -> None:
+        result = self.pair(
+            srt("カリッ カリッ カリッ", "カリ カリ カリ"),
+            srt("卡利……卡利……卡利……", "卡利……卡利……卡利……"),
+        )
+        self.assertFalse(any(item.code == "duplicate_translation" for item in result.errors))
+
+    def test_duplicate_source_substring_is_not_error(self) -> None:
+        result = self.pair(
+            srt("好き好きとは言ってないけど", "好き好き"),
+            srt("虽然没说喜欢喜欢啦。", "虽然没说喜欢喜欢啦。"),
+        )
+        self.assertFalse(any(item.code == "duplicate_translation" for item in result.errors))
+
+    def test_duplicate_near_synonym_sources_are_not_error(self) -> None:
+        result = self.pair(
+            srt("挿入のイメージ", "お挿入のイメージなんだけど"),
+            srt("就是插入的印象啦。", "是关于插入的印象啦。"),
+        )
+        self.assertFalse(any(item.code == "duplicate_translation" for item in result.errors))
+
+        result = self.pair(
+            srt("えーとか言って", "えぇーって"),
+            srt("说着“呃——”之类的。", "说着“诶——”之类的。"),
+        )
+        self.assertFalse(any(item.code == "duplicate_translation" for item in result.errors))
+
+    def test_latin_artifact_is_actionable(self) -> None:
+        result = self.pair(srt("セックスしたい"), srt("做SEXPAR啦"))
+        self.assertIn("latin", self.codes(result))
+        result = self.pair(srt("トラック"), srt("Track 语"))
+        self.assertIn("latin", self.codes(result))
+        result = self.pair(srt("ASMR"), srt("ASMR 和 NG"))
+        self.assertNotIn("latin", self.codes(result))
+
+    def test_slash_alternative_is_actionable(self) -> None:
+        result = self.pair(srt("吉田さん"), srt("吉田先生/女士"))
+        self.assertIn("slash", self.codes(result))
+        result = self.pair(srt("半分流"), srt("一半/二分之一"))
+        self.assertIn("slash", self.codes(result))
+        result = self.pair(srt("分数"), srt("1/2"))
+        self.assertNotIn("slash", self.codes(result))
+
     def test_auto_normalizable_issues_are_silent(self) -> None:
         result = self.pair(
             srt("これは最初の長い台詞です", "これは二番目の長い台詞です"),
