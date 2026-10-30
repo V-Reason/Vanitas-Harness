@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import warnings
 from pathlib import Path
@@ -67,6 +68,71 @@ SINGLE_RETRY_HINT = (
     "“酱/先生/君/大人”等中文称谓，片假名名词按语义翻译；"
     "不得保留任何假名或整句日文。）"
 )
+
+# 断点快照：显式可见的 <output>.part.srt，只收已接受条目，完成后由调用方删除。
+PARTIAL_SUFFIX = ".part.srt"
+
+
+def partial_snapshot_path(target: Path) -> Path:
+    """``<output>.part.srt``：与目标同目录，便于用户直接看到中断进度。"""
+    return target.with_name(target.name + PARTIAL_SUFFIX)
+
+
+def _load_partial(
+    path: Path, translatable: list[tuple[int, Subtitle]]
+) -> dict[str, str]:
+    """读取断点快照；序号与时间轴逐条对齐才采纳，否则整体丢弃。
+
+    宁可从头重译，也不把快照错位写进别的 cue：时间轴是源文件的物理
+    指纹，对不上就说明快照不属于本次输入（换文件或源被改过）。
+    """
+    if not path.is_file():
+        return {}
+    try:
+        raw = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    expected = {
+        subtitle.index: subtitle.timing for _index, subtitle in translatable
+    }
+    completed: dict[str, str] = {}
+    for block, _separator in parse_srt(raw, "\n"):
+        if not block.index or not block.timing:
+            return {}
+        if expected.get(block.index) != block.timing:
+            return {}
+        completed[block.index] = block.text
+    return completed
+
+
+def _write_partial(
+    path: Path, blocks: list[tuple[Subtitle, str]], eol: str, completed: set[str]
+) -> None:
+    """原子刷新快照：先写 ``.part_tmp`` 再 ``os.replace``，杜绝半截脏数据。
+
+    磁盘写失败只告警不中断翻译：让一次临时 I/O 故障废掉十几分钟已完成的
+    推理不值得，但也不能静默——告警保证用户知道续传能力已失效。
+    """
+    subset = [
+        (block, separator)
+        for block, separator in blocks
+        if block.index in completed
+    ]
+    data = rebuild_srt(subset, eol).encode("utf-8")
+    tmp = path.with_name(path.name + ".part_tmp")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        warnings.warn(
+            f"断点快照写入失败：{path}；{exc.strerror or exc}；本次运行不支持续传",
+            RuntimeWarning,
+            stacklevel=3,
+        )
 
 
 def _translate_chunks(
@@ -178,11 +244,15 @@ def translate_srt(
     t1_budget: T1Budget | None = None,
     file_cues: int | None = None,
     critique_budget: CritiqueBudget | None = None,
+    checkpoint_path: Path | None = None,
+    resume: bool = False,
 ) -> str:
     """翻译 SRT；ASMR 守卫开启时必须传入调用方共享的 ``t1_budget``。
 
     ``critique_budget`` 为空表示**不做 P3 复审**（默认）；显式传入
     ``CritiqueBudget`` 才会对高危 cue 追加一次隔离复审请求。
+    ``checkpoint_path`` 非空时按窗口增量写 ``.part.srt``；``resume`` 为真
+    且快照与源的时间轴逐条对齐时，已完成 cue 直接回填、不再请求模型。
     """
     if asmr_guard and t1_budget is None:
         # ASMR 预算必须由调用方跨文件共享，禁止按文件静默新建。
@@ -283,6 +353,29 @@ def translate_srt(
             restore_history(snapshot)
         elif callable(reset_history):
             reset_history()
+
+    # 断点续传：先把快照里已完成的 cue 回填进 blocks/索引/历史，后续只跑剩余项。
+    # 回填顺序必须与文档顺序一致，否则 _history 的“最近 N 条”语义会错位。
+    completed: dict[str, str] = {}
+    if resume and checkpoint_path is not None:
+        completed = _load_partial(checkpoint_path, translatable)
+    completed_indexes: set[str] = set()
+    resumed_pairs: list[tuple[str, str]] = []
+    for _block_index, subtitle in translatable:
+        done_text = completed.get(subtitle.index)
+        if done_text is None:
+            continue
+        source_text = subtitle.text
+        subtitle.text = done_text
+        completed_indexes.add(subtitle.index)
+        resumed_pairs.append((source_text, done_text))
+        cue = cue_of(subtitle)
+        index.add(cue, source_text, done_text)
+        if short_index is not None:
+            short_index.add(cue, source_text, done_text)
+    if resumed_pairs:
+        restore(tuple(resumed_pairs))
+        done = len(resumed_pairs)
 
     # invented_tool 的 ±3 cue 视野：按文档原始 cue 顺序建表（ASR 幻觉置空
     # 的 cue 仍占位，避免把距离算近）。nearby 不含当前 cue，当前源文由
@@ -510,6 +603,9 @@ def translate_srt(
         if callable(clear_entity):
             clear_entity(None)
         for _block_index, subtitle in valid_items:
+            if subtitle.index in completed_indexes:
+                # 断点续传：已完成的 cue 不重复请求，进度计数在回填时已加过。
+                continue
             if not subtitle.text.strip():
                 # ASR 幻觉已置空：不调用模型，但仍计入已完成段，保持进度与 segments 一致
                 done += 1
@@ -554,16 +650,25 @@ def translate_srt(
             # 失败时保留原文，并把失败的调用从滑动上下文里剔除。
             if accepted_text:
                 restore(base + ((source_text, accepted_text),))
+                completed_indexes.add(subtitle.index)
             else:
                 restore(base)
+            if checkpoint_path is not None:
+                _write_partial(checkpoint_path, blocks, eol, completed_indexes)
             done += 1
             if on_segment is not None:
                 on_segment(done, total)
         return rebuild_srt(blocks, eol)
 
-    entity_engine = DynamicEntityEngine(
-        [subtitle.text for _index, subtitle in translatable]
-    )
+    # 实体索引必须从**源文**建：续传时 completed 的 subtitle.text 已被换成译文，
+    # 用 subtitle.text 会把中文当成日语种子。source_snapshot 保留原始日文。
+    entity_engine = DynamicEntityEngine(list(source_snapshot))
+    if resumed_pairs:
+        # 让续传后的专名锁定与前文示例接上前半段，避免恢复后译名漂移。
+        entity_engine.capture_translations(
+            [pair[0] for pair in resumed_pairs],
+            [pair[1] for pair in resumed_pairs],
+        )
     setter = getattr(chat, "set_entity_engine", None)
     if callable(setter):
         setter(entity_engine)
@@ -693,6 +798,9 @@ def translate_srt(
         current: list[tuple[int, Subtitle]] = []
         current_chars = 0
         for item in translatable:
+            if item[1].index in completed_indexes:
+                # 断点续传：已完成的 cue 不再进任何窗口，避免重复请求。
+                continue
             text_len = len(item[1].text)
             if current and (
                 len(current) >= window_size
@@ -744,6 +852,7 @@ def translate_srt(
             base_history = history_now()
             fallback = len(set(expected_ids)) != len(expected_ids)
             accepted: list[tuple[str, str]] = []
+            window_completed: list[str] = []
 
             if not fallback:
                 batch_prompt = "\n".join(
@@ -753,11 +862,11 @@ def translate_srt(
                 if lookahead and callable(set_lookahead):
                     set_lookahead(lookahead)
                 try:
-                    batch_output = chat(batch_prompt)
-                finally:
-                    if callable(clear_lookahead):
-                        clear_lookahead()
-                try:
+                    try:
+                        batch_output = chat(batch_prompt)
+                    finally:
+                        if callable(clear_lookahead):
+                            clear_lookahead()
                     alignment = align_window_response(batch_output, expected_ids)
                     staging = (
                         None
@@ -819,6 +928,7 @@ def translate_srt(
                             enumerate(window)
                         ):
                             subtitle.text = staging[position]
+                        window_completed = list(expected_ids)
                 except (EngineError, TranslateError):
                     fallback = True
 
@@ -896,8 +1006,13 @@ def translate_srt(
                             add_indexes(cue, source_text, result)
                             subtitle.text = result
                             accepted.append((source_text, result))
+                            window_completed.append(subtitle.index)
                 restore(base_history + tuple(accepted))
 
+            completed_indexes.update(window_completed)
+            if checkpoint_path is not None:
+                # 快照按窗口刷新：只有“整窗已收尾”才值得落盘，半窗没有恢复价值。
+                _write_partial(checkpoint_path, blocks, eol, completed_indexes)
             done += len(window)
             if on_segment is not None:
                 on_segment(done, total)
@@ -972,11 +1087,13 @@ def translate_file(
     t1_budget: T1Budget | None = None,
     file_cues: int | None = None,
     critique_budget: CritiqueBudget | None = None,
+    resume: bool = False,
 ) -> TranslationOutcome:
     """翻译单文件；ASMR 守卫开启时必须传入跨文件共享的 ``t1_budget``。
 
     ``critique_budget`` 为空表示不做 P3 复审；传入后由 ``translate_srt``
-    按文件调用 ``begin_file`` 重置单文件配额。
+    按文件调用 ``begin_file`` 重置单文件配额。``resume=True`` 时若存在与源
+    时间轴对齐的 ``<output>.part.srt``，已完成 cue 不再请求模型。
     """
     source = Path(source)
     if not source.is_file():
@@ -998,6 +1115,34 @@ def translate_file(
     t1_budget.begin_file(str(source), file_cues)
     failures: list[TranslationFailure] = []
     segments = 0
+
+    target = output_path(
+        source,
+        out_dir,
+        settings.output_suffix if output_suffix is None else output_suffix,
+        output_stem,
+    )
+    # 断点快照只对 SRT 有意义（散文没有 cue/时间轴指纹，无法安全校验）。
+    snapshot = partial_snapshot_path(target) if suffix == ".srt" else None
+    try:
+        # 快照在翻译**过程中**就要落盘，目录必须提前建好；否则 --out-dir 场景
+        # 会因为父目录不存在把续传能力静默降级成告警。
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise TranslateError(
+            f"无法创建输出目录：{target.parent}；{exc.strerror or exc}"
+        ) from exc
+    if snapshot is not None and not resume:
+        # 非续传模式先清旧快照：否则后续 --resume 会把上一次的残片当成进度。
+        try:
+            snapshot.unlink(missing_ok=True)
+        except OSError as exc:
+            warnings.warn(
+                f"旧断点快照无法清理：{snapshot}；{exc.strerror or exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
     if suffix == ".srt":
         blocks = parse_srt(text, eol)
         segments = sum(1 for subtitle, _ in blocks if subtitle.index and subtitle.text.strip())
@@ -1017,6 +1162,8 @@ def translate_file(
             t1_budget=t1_budget,
             file_cues=file_cues,
             critique_budget=critique_budget,
+            checkpoint_path=snapshot,
+            resume=resume,
         )
     else:
         segments = sum(1 for paragraph, _ in split_prose(text) if paragraph.strip())
@@ -1029,18 +1176,23 @@ def translate_file(
             on_segment=on_segment,
         )
 
-    target = output_path(
-        source,
-        out_dir,
-        settings.output_suffix if output_suffix is None else output_suffix,
-        output_stem,
-    )
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         data = translated.encode("utf-8")
         target.write_bytes(BOM + data if has_bom else data)
     except OSError as exc:
         raise TranslateError(f"写入失败：{target}；{exc.strerror or exc}") from exc
+
+    if snapshot is not None:
+        # 终态已落地，快照失去意义；删除失败只告警，不影响已完成的产物。
+        try:
+            snapshot.unlink(missing_ok=True)
+        except OSError as exc:
+            warnings.warn(
+                f"断点快照清理失败：{snapshot}；{exc.strerror or exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     outcome = TranslationOutcome(
         source=source,

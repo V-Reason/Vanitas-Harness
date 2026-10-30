@@ -166,6 +166,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="运行环境：production（默认）| experimental；experimental 当前仅 ASMR 实现",
     )
+    translate_cmd.add_argument(
+        "--resume",
+        action="store_true",
+        help="若存在与源时间轴对齐的 <输出>.part.srt 快照，从断点继续翻译",
+    )
     _add_verbose(translate_cmd, "显示完整逐文件报告")
 
     batch_cmd = sub.add_parser("batch", help="按 JSONL 批量执行任务")
@@ -713,6 +718,7 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                         else ()
                     ),
                     on_segment=monitor.set_segment_progress,
+                    resume=bool(getattr(args, "resume", False)),
                 )
             except TranslateError as exc:
                 error = str(exc)

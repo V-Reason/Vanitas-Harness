@@ -58,7 +58,13 @@ from .critique import (
     parse_critique_response,
     triage_cue_risk,
 )
-from .engine import TranslationEngine, build_chat_for, extract_content, make_engine_chat
+from .engine import (
+    StreamingAbortDetector,
+    TranslationEngine,
+    build_chat_for,
+    extract_content,
+    make_engine_chat,
+)
 from .entity import (
     ENTITY_CONTEXT_CHARS,
     ENTITY_EXAMPLE_CHARS,
@@ -138,10 +144,12 @@ from .io import (
     sanitize_filename_stem,
 )
 from .pipeline import (
+    PARTIAL_SUFFIX,
     SINGLE_RETRY_HINT,
     T1_NEARBY_RADIUS,
     _translate_chunks,
     _translate_single_cue,
+    partial_snapshot_path,
     translate_file,
     translate_prose,
     translate_srt,
@@ -233,8 +241,10 @@ __all__ = [
     "collect_translate_inputs", "output_path", "plan_name_renames",
     "plan_translation_outputs", "sanitize_filename_stem",
     # engine
-    "TranslationEngine", "build_chat_for", "extract_content", "make_engine_chat",
+    "StreamingAbortDetector", "TranslationEngine", "build_chat_for",
+    "extract_content", "make_engine_chat",
     # pipeline
-    "SINGLE_RETRY_HINT", "T1_NEARBY_RADIUS", "_translate_chunks",
-    "_translate_single_cue", "translate_file", "translate_prose", "translate_srt",
+    "PARTIAL_SUFFIX", "SINGLE_RETRY_HINT", "T1_NEARBY_RADIUS",
+    "_translate_chunks", "_translate_single_cue", "partial_snapshot_path",
+    "translate_file", "translate_prose", "translate_srt",
 ]
