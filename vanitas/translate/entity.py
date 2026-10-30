@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from collections.abc import Iterable
 from difflib import SequenceMatcher
 
 from .cleaner import _clip, validate_cue_translation
@@ -64,6 +65,18 @@ ENTITY_MAX_VARIANTS = 8
 ENTITY_MAX_EXAMPLES = 2
 ENTITY_EXAMPLE_CHARS = 80
 ENTITY_CONTEXT_CHARS = 1200
+
+# 元数据先验的同音变体门禁。ASR 把「茜音」听成「赤音」时是整篇一致的错字，
+# 但"同长、编辑距离 1"本身毫无判别力——「声音」「本音」「発音」全都满足。
+# 因此额外要求：正文里每一次出现都紧跟敬称/作品后缀，或整句就是该名字。
+# 这是"宁漏不错"的取舍：真实语料若以「赤音の声」出现则不会收敛，
+# 换来的是绝不可能把「声音」误替换成「茜音」。
+PRIOR_SEED_MIN_REPEAT = 2
+PRIOR_SEED_MAX_VARIANTS = 8
+PRIOR_SEED_MARKERS = (
+    "ちゃん", "さん", "くん", "様", "さま", "先生", "先輩",
+    "編", "篇", "役", "ルート",
+)
 
 
 def _kana_key(text: str) -> str:
@@ -153,6 +166,30 @@ def _base_of_variant(variant: str) -> str:
     return variant
 
 
+def _is_name_chars(text: str) -> bool:
+    """整串都是汉字/假名（名字的字符集），否则不参与同音变体比较。"""
+    if not text:
+        return False
+    return all(
+        "\u4e00" <= char <= "\u9fa5"
+        or "\u3041" <= char <= "\u30f6"
+        or char == "\u30fc"
+        for char in text
+    )
+
+
+def _is_han_name(text: str) -> bool:
+    """纯汉字名字才能直接当锁定译名；含假名的先验只做实体、不做替换。"""
+    return bool(text) and all("\u4e00" <= char <= "\u9fa5" for char in text)
+
+
+def _in_name_context(rest: str) -> bool:
+    """名字后面必须紧跟敬称/作品后缀，或者到此为止（整句就是这个称呼）。"""
+    if not rest:
+        return True
+    return any(rest.startswith(marker) for marker in PRIOR_SEED_MARKERS)
+
+
 class DynamicEntityEngine:
     """文档级实体索引：种子召回变体，首发锁定 + 前文示例注入。
 
@@ -168,7 +205,71 @@ class DynamicEntityEngine:
         self.examples: dict[str, list[tuple[str, str]]] = {}
         self._variants: dict[str, set[str]] = {}
         self._canonical_order: list[str] = []
+        # 先把源文留存到先验注入阶段用：同音变体必须从正文统计，
+        # 不能等到 ``_build_index`` 之后（那时候选已被停用表过滤过一次）。
+        self._sources = raw_cues
         self._build_index(raw_cues)
+
+    # ------------------------------------------------------------------ #
+    # 元数据先验
+    # ------------------------------------------------------------------ #
+
+    def seed_prior_entities(self, seeds: Iterable[str]) -> list[str]:
+        """把文件名等元数据里的主角名注入为最高优先级文档级实体。
+
+        先验名字来自文件系统（``朝のひとりごと(茜音編).wav``），比 ASR 从气声里
+        辨认的汉字写法可靠得多。这里只做三件事：
+
+        1. 登记 canonical，并把同长、编辑距离 1、且**每次出现都带名字语境**的
+           写法收为变体（整篇一致的 ASR 错字）；
+        2. 纯汉字种子直接锁定为译名 —— ``enforce_locks`` 才有替换目标；
+        3. 不覆盖已由正文建出的实体，避免把 ASR 认对的名字打散。
+
+        返回实际被采纳的种子，供调用方观测；空列表表示全部被过滤。
+        """
+        accepted: list[str] = []
+        for raw in seeds:
+            name = (raw or "").strip()
+            if not name or name in ENTITY_STOPWORDS:
+                continue
+            if name in self._variants or name in self.canonical_map:
+                continue
+            variants = {name} | self._prior_homophones(name)
+            self._variants[name] = variants
+            for variant in variants:
+                self.canonical_map.setdefault(variant, name)
+            if name not in self._canonical_order:
+                self._canonical_order.insert(0, name)
+            if _is_han_name(name):
+                self.locked_translations.setdefault(name, name)
+            accepted.append(name)
+        return accepted
+
+    def _prior_homophones(self, name: str) -> set[str]:
+        """找正文里与先验名同长、错一个字、且每次都在名字位置上的写法。"""
+        length = len(name)
+        if length < 2:
+            return set()
+        counts: Counter[str] = Counter()
+        marked: Counter[str] = Counter()
+        for text in self._sources:
+            for start in range(len(text) - length + 1):
+                window = text[start : start + length]
+                if window == name or not _is_name_chars(window):
+                    continue
+                counts[window] += 1
+                if _in_name_context(text[start + length :]):
+                    marked[window] += 1
+        accepted = {
+            window
+            for window, count in counts.items()
+            if count >= PRIOR_SEED_MIN_REPEAT
+            # 每一次出现都必须落在名字位置；出现一次普通词用法就整类否决。
+            and marked.get(window, 0) == count
+            and _edit_distance(window, name) == 1
+        }
+        ranked = sorted(accepted, key=lambda item: (-counts[item], item))
+        return set(ranked[:PRIOR_SEED_MAX_VARIANTS])
 
     # ------------------------------------------------------------------ #
     # 索引

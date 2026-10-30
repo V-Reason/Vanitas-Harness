@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import statistics
 import subprocess
 import sys
 import time
@@ -209,6 +210,64 @@ class BenchmarkReport:
                 continue
             counted[reason] = counted.get(reason, 0) + 1
         return counted
+
+
+@dataclass
+class RepeatReport:
+    """多轮采样汇总：把单次 ±6pp 的噪声压成"均值 ± 标准差"。
+
+    单轮 80 cue 的同配置复跑差异可达 5 条（±6pp），意味着 3% 的真实提升会被
+    噪声淹没。这里统计的是**轮间**标准差（每轮自己是一次完整独立翻译），
+    不是同一条 cue 被评了多次。
+    """
+
+    repeat: int
+    reports: list[BenchmarkReport] = field(default_factory=list)
+
+    @property
+    def run_rates(self) -> list[float]:
+        return [
+            report.passed_draft / report.total_cues
+            if report.total_cues
+            else 0.0
+            for report in self.reports
+        ]
+
+    @property
+    def mean_rate(self) -> float:
+        rates = self.run_rates
+        return statistics.fmean(rates) if rates else 0.0
+
+    @property
+    def std_rate(self) -> float:
+        rates = self.run_rates
+        return statistics.stdev(rates) if len(rates) > 1 else 0.0
+
+    def cue_pass_rates(self) -> dict[str, float]:
+        totals: dict[str, int] = {}
+        hits: dict[str, int] = {}
+        for report in self.reports:
+            for item in report.results:
+                totals[item.cue.id] = totals.get(item.cue.id, 0) + 1
+                hits[item.cue.id] = hits.get(item.cue.id, 0) + int(
+                    item.passed_draft
+                )
+        return {
+            cue_id: hits[cue_id] / total
+            for cue_id, total in totals.items()
+            if total
+        }
+
+    def unstable_cues(self) -> list[tuple[str, float]]:
+        """跨轮结果翻转的 cue（单项通过率严格落在 0 与 1 之间）。"""
+        return sorted(
+            (
+                (cue_id, rate)
+                for cue_id, rate in self.cue_pass_rates().items()
+                if 0.0 < rate < 1.0
+            ),
+            key=lambda item: (item[1], item[0]),
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -573,6 +632,29 @@ def run_benchmark(
 
 
 # --------------------------------------------------------------------------- #
+# 多轮采样（抗噪网格）
+# --------------------------------------------------------------------------- #
+def run_benchmark_repeated(
+    cues: Sequence[GoldenCue],
+    chat_factory: Callable[[Callable[[Any], None] | None], Any],
+    *,
+    repeat: int = 1,
+    **options: Any,
+) -> RepeatReport:
+    """跑 ``repeat`` 轮独立评测并汇总；``options`` 原样透传给 ``run_benchmark``。
+
+    每一轮都是一次完整的重新翻译（不复用同一批初译）：要量的是"同配置复跑的
+    波动有多大"，而不是"同一份文本被评了几次"。这两件事在统计上完全不同。
+    """
+    if repeat < 1:
+        raise BenchDataError("--repeat 必须 ≥ 1")
+    collected = RepeatReport(repeat=repeat)
+    for _ in range(repeat):
+        collected.reports.append(run_benchmark(cues, chat_factory, **options))
+    return collected
+
+
+# --------------------------------------------------------------------------- #
 # 看板
 # --------------------------------------------------------------------------- #
 def _pct(value: float | None) -> str:
@@ -662,6 +744,71 @@ def render_dashboard(report: BenchmarkReport) -> str:
             f" · 误伤率 {_pct(report.degrade_rate).strip()}"
         )
     return "\n".join(lines)
+
+
+def render_repeat_summary(report: RepeatReport) -> str:
+    """多轮采样的控制台摘要；N=1 时明确写出"噪声未测量"。"""
+    lines = ["-" * 100]
+    if report.repeat <= 1:
+        lines.append(
+            "多轮采样未启用（--repeat 1）：单轮结果的复跑噪声约 ±6pp，"
+            "3pp 以内的差异不可判读；加 --repeat 3 可把分辨率压到 ±1~2pp"
+        )
+        lines.append("-" * 100)
+        return "\n".join(lines)
+    lines.append(
+        f"多轮采样 N={report.repeat} · "
+        f"Mean Pass Rate: {report.mean_rate * 100:.1f}% "
+        f"± {report.std_rate * 100:.1f}pp (N={report.repeat})"
+    )
+    for index, item in enumerate(report.reports, start=1):
+        rate = (
+            item.passed_draft / item.total_cues * 100
+            if item.total_cues
+            else 0.0
+        )
+        lines.append(
+            f"  第{index}轮 {rate:.1f}%"
+            f" ({item.passed_draft}/{item.total_cues})"
+            f" · {item.elapsed_s:.1f}s"
+        )
+    unstable = report.unstable_cues()
+    if unstable:
+        preview = "、".join(
+            f"{cue_id} {rate * 100:.0f}%" for cue_id, rate in unstable[:8]
+        )
+        lines.append(f"  跨轮翻转的 cue {len(unstable)} 条：{preview}")
+    else:
+        lines.append("  跨轮无翻转：每一条 cue 的结论在 N 轮内一致")
+    lines.append("-" * 100)
+    return "\n".join(lines)
+
+
+def repeat_payload(report: RepeatReport) -> dict[str, Any]:
+    return {
+        "n": report.repeat,
+        "mean_rate": report.mean_rate,
+        "std_rate": report.std_rate,
+        "runs": [
+            {
+                "passed": item.passed_draft,
+                "total": item.total_cues,
+                "rate": (
+                    item.passed_draft / item.total_cues
+                    if item.total_cues
+                    else None
+                ),
+                "wall_clock_s": round(item.elapsed_s, 3),
+                "critique_requests": item.critique_requests,
+                "critique_adopted": item.critique_used,
+            }
+            for item in report.reports
+        ],
+        "cue_pass_rates": report.cue_pass_rates(),
+        "unstable_cues": [
+            cue_id for cue_id, _rate in report.unstable_cues()
+        ],
+    }
 
 
 def report_payload(report: BenchmarkReport) -> dict[str, Any]:
@@ -814,7 +961,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--critique-budget",
         type=int,
         default=None,
-        help="覆盖复审预算上限；默认按 for_corpus(8%) 推导",
+        help="覆盖复审预算上限；默认按 for_corpus(8%%) 推导",
     )
     parser.add_argument("--only", default=None, help="只跑某战区：CAT_A,CAT_B…")
     parser.add_argument(
@@ -823,6 +970,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="诊断用：对未通过的 cue 强制复审，绕过 triage 门禁（非线上行为）",
     )
     parser.add_argument("--out", type=Path, default=None, help="JSON 报告路径")
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="多轮独立采样次数（默认 1；推荐 3 或 5，用于压平单轮 ±6pp 噪声）",
+    )
     parser.add_argument("--ensure", action="store_true", help="服务未起时自动 serve")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -847,9 +1000,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_SERVICE
 
     try:
-        report = run_benchmark(
+        repeated = run_benchmark_repeated(
             cues,
             factory,
+            repeat=args.repeat,
             mode=args.mode,
             window=args.window,
             critique_budget_cap=args.critique_budget,
@@ -864,10 +1018,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"✗ 评测中断：{type(exc).__name__}: {exc}", file=sys.stderr)
         return EXIT_TRANSPORT
 
-    report.model = model_id
-    report.profile = profile_key
-    report.port = port
-    print(render_dashboard(report))
+    for item in repeated.reports:
+        item.model = model_id
+        item.profile = profile_key
+        item.port = port
+    report = repeated.reports[-1]
+    print(render_repeat_summary(repeated))
+    if args.repeat > 1:
+        print("下方为第 1 轮明细看板（均值以多轮汇总为准）")
+        print(render_dashboard(repeated.reports[0]))
+    else:
+        print(render_dashboard(report))
 
     out_path = args.out
     if out_path is None:
@@ -875,8 +1036,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         out_path = DEFAULT_REPORT_DIR / f"semantic_eval_{stamp}.json"
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = report_payload(report)
+        if args.repeat > 1:
+            # 单轮明细仍写 `cues`；多轮指标另开 `repeat` 段，不混进 totals。
+            payload["repeat"] = repeat_payload(repeated)
         out_path.write_text(
-            json.dumps(report_payload(report), ensure_ascii=False, indent=2),
+            json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     except OSError as exc:

@@ -5,7 +5,8 @@
 
 三层分工：
 1. 静默 auto：繁体、行首标点等由翻译后处理覆盖，只计数不刷 warning；
-2. 结构 error：cue 数/序号/时间轴、[#N] 泄漏、不同原文同长译文，阻断；
+2. 结构 error：cue 数/序号/时间轴、协议编号残渣（``[#N]`` 及其单边/全角/
+   Markdown 变体）、不同原文同长译文，阻断；
 3. 语义 actionable：ASR 疑似错词、亲昵语境“您”、未授权动作括号、
    译文暴增、空译、假名残留、可疑拉丁词与斜杠并列，默认只提示，
    --strict 才阻断。
@@ -37,10 +38,13 @@ from vanitas.translate import (  # noqa: E402
     STAGING_BRACKETS_RE,
     TRADITIONAL_CHARS,
     TRADITIONAL_TO_SIMPLIFIED_MAP,
+    WINDOW_ID_ANY_RE,
 )
 
 BLOCK_SEP = re.compile(r"(\r?\n[ \t]*\r?\n)")
-WINDOW_ID = re.compile(r"\[#\d+\]")
+# 与翻译后处理共用同一份残渣正则：QC 的职责是"后处理该清而没清干净的，全部拦住"。
+# 两处规则漂移会同时造成两种事故——放过单边残渣落盘，或把干净正文误报成错误。
+WINDOW_ID = WINDOW_ID_ANY_RE
 KANA = re.compile(r"[\u3040-\u30ff]")
 LEADING_PUNCT = re.compile(r"^\s*[，、；：。！？!?]")
 TRADITIONAL = TRADITIONAL_CHARS
@@ -253,11 +257,11 @@ def check_pair(source: Path, translated: Path) -> FileQC:
                 _issue(
                     "error",
                     "window_id",
-                    "译文正文泄漏 [#N]",
+                    "译文正文泄漏协议编号残渣（含单边括号/全角/Markdown 变体）",
                     zh.index,
                     source_text,
                     translation_text,
-                    "删除编号泄漏；重跑后处理或该窗口",
+                    "删除编号残渣；重跑后处理或该窗口",
                 )
             )
 

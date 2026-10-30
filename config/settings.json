@@ -94,6 +94,7 @@
     "max_split_depth": 3,
     "default_preset": "subtitle",
     "environment": "production",
+    "strip_trailing_periods": true,
     "presets": {
       "subtitle": {
         "task_template": "translate",

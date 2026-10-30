@@ -20,7 +20,33 @@ import re
 BLANK_LINE_RUN_RE = re.compile(r"(?:\r\n|\r|\n)(?:[^\S\r\n]*(?:\r\n|\r|\n))+")
 
 WINDOW_ID_RE = re.compile(r"^\[#(\d+)\]\s*(.*)$")
-WINDOW_ID_ANY_RE = re.compile(r"\s*\[#\d+\]\s*")
+# 协议编号残渣：不追求“只修 #84] 这一个特例”，而是把整类形态一次纳管。
+# 温度非 0 时模型输出格式不可预测：今天漏左括号（#84]），明天漏井号（[84]），
+# 后天换全角（【#84】）或 Markdown 包裹（**[#84]**）。井号是唯一可靠判别符，
+# 因此**带 # 的形态允许单边缺失**；不带 # 的纯数字只在行首、且括号成对时
+# 才认（否则会把正文里的“(2024)”当成编号）。
+_PROTOCOL_LEFT = r"\[(【［〔"
+_PROTOCOL_RIGHT = r"\])】］〕"
+_PROTOCOL_MARK = r"[*_`~]*"
+# 列表符只在行首出现，且必须与编号粘连，否则会把正文里的 "1." 当成协议前缀。
+_PROTOCOL_BULLET = r"(?:^|(?<=\n))[ \t]*(?:\d{1,3}[.)、][ \t]*|[-*+][ \t]+)"
+WINDOW_ID_ANY_RE = re.compile(
+    r"(?:"
+    # 行首列表符 + 带 # 编号（"1. [#84]" / "- [#84]"）
+    rf"{_PROTOCOL_BULLET}{_PROTOCOL_MARK}[{_PROTOCOL_LEFT}]?\s*#\s*\d{{1,4}}\s*"
+    rf"[{_PROTOCOL_RIGHT}]?{_PROTOCOL_MARK}"
+    r"|"
+    # 带 # 编号：行中任意位置，括号可单边缺失，允许 Markdown 包裹
+    rf"[ \t]*{_PROTOCOL_MARK}[{_PROTOCOL_LEFT}]?\s*#\s*\d{{1,4}}\s*"
+    rf"[{_PROTOCOL_RIGHT}]?{_PROTOCOL_MARK}"
+    r"|"
+    # 无 # 的纯数字：只在行首且括号成对，避免误伤正文里的年份/编号
+    rf"{_PROTOCOL_BULLET}?{_PROTOCOL_MARK}[{_PROTOCOL_LEFT}]\s*\d{{1,4}}\s*"
+    rf"[{_PROTOCOL_RIGHT}]{_PROTOCOL_MARK}"
+    r")"
+    r"[ \t]*[:：.\-、]?[ \t]*",
+    re.MULTILINE,
+)
 
 FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)\n```$", re.DOTALL)
 QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’", "「": "」", "『": "』"}
@@ -50,6 +76,26 @@ STAGING_BRACKETS_RE = re.compile(
 )
 REPEATED_PUNCT_RE = re.compile(r"([…—~～♡❤♪])。")
 LEADING_INVALID_PUNCT_RE = re.compile(r"^[，、；：。！？!?\s]+")
+
+# 标点语流归一：ASMR 全片句末标点率会在 7%~100% 之间随机漂移，同一份产出里
+# 有的段落句句带句号、有的一段全无。这里只做“同一含义只留一种写法”的收敛，
+# 不改变语义、不调用模型。
+#
+# `。。。` 是模型写的省略号，口径上必须在“重复句号折叠”**之前**处理：
+# 否则三步句号会先被压成单个句号，拖音语气被抹平。
+ELLIPSIS_LIKE_RE = re.compile(r"(?:\.{3,}|…+|‥+|。{3,})")
+TRAILING_DUP_PUNCT_RE = re.compile(r"([…—~～♡❤♪!！?？])。")
+DUP_PERIOD_RE = re.compile(r"。{2,}")
+DUP_COMMA_RE = re.compile(r"，{2,}")
+DUP_ENUM_RE = re.compile(r"、{2,}")
+DUP_SEMICOLON_RE = re.compile(r"；{2,}")
+TILDE_RE = re.compile(r"[〜～]")
+# 对白引用句的句末句号夹在收引号内侧（「……。」），与裸句末句号同属一类：
+# ASMR 字幕里绝大多数短句是带引号的对白，只剥裸句号等于没剥。
+TRAILING_QUOTE_PERIOD_RE = re.compile(r"。(?=[」』”\"'’）)]*$)")
+# 短句末尾孤立句号的剥离上限。超过这个长度的行视为陈述句/叙事句，
+# 句号是语法完整性标记，必须保留；短句（耳语、气声、应答）剥掉更贴耳。
+MAX_TRAILING_PERIOD_CHARS = 30
 
 UNTRANSLATED_KANA_RE = re.compile(r"[\u3040-\u30ff]")
 ARTIFACT_LATIN_RE = re.compile(r"(?:SEXPAR|SEXXPAR|TRACK)", re.IGNORECASE)
@@ -127,7 +173,54 @@ def _collapse_blank_lines(text: str) -> str:
     return BLANK_LINE_RUN_RE.sub("\n", text)
 
 
-def postprocess_cue_text(zh_text: str, src_text: str) -> str:
+def _strip_line_period(line: str) -> str:
+    """短句末尾的孤立句号剥离；长陈述句的句号保留。
+
+    只在整行以 ``。`` 结尾（或 ``。`` 后只剩收引号/收括号）且长度不超过
+    ``MAX_TRAILING_PERIOD_CHARS`` 时动手：长句的句号承担语法收尾，一刀切
+    全删会让长段叙事读起来没有断句。
+    """
+    if len(line) > MAX_TRAILING_PERIOD_CHARS:
+        return line
+    if line.endswith("。"):
+        return line[:-1]
+    match = TRAILING_QUOTE_PERIOD_RE.search(line)
+    if match:
+        return line[: match.start()] + line[match.end() :]
+    return line
+
+
+def normalize_punctuation(
+    text: str, *, strip_trailing_period: bool = True
+) -> str:
+    """确定性标点语流归一（纯函数，0 Token）。
+
+    处理顺序有硬约束：先收省略号形态，再折叠重复标点，最后逐行剥短句句号。
+    顺序反了会把 ``。。。`` 先压成 ``。``，模型的拖音语气就丢了。
+
+    只收敛“同一含义的多种写法”，不改动语义与措辞；重复的 ``！！``/``？？``
+    属于刻意强调，不折叠。
+    """
+    if not text:
+        return text
+    result = ELLIPSIS_LIKE_RE.sub("……", text)
+    result = TRAILING_DUP_PUNCT_RE.sub(r"\1", result)
+    result = DUP_PERIOD_RE.sub("。", result)
+    result = DUP_COMMA_RE.sub("，", result)
+    result = DUP_ENUM_RE.sub("、", result)
+    result = DUP_SEMICOLON_RE.sub("；", result)
+    result = TILDE_RE.sub("~", result)
+    if not strip_trailing_period:
+        return result
+    return "\n".join(_strip_line_period(line) for line in result.splitlines())
+
+
+def postprocess_cue_text(
+    zh_text: str,
+    src_text: str,
+    *,
+    strip_trailing_period: bool = True,
+) -> str:
     """cue 级确定性清洗：空行折叠、简繁、行首标点、重复句号、未授权动作括号。
 
     只改字幕正文，不碰序号/时间轴；不调用模型。空行折叠在去 ``[#N]`` 之后、
@@ -139,8 +232,16 @@ def postprocess_cue_text(zh_text: str, src_text: str) -> str:
     if not original:
         return ""
 
-    text = _collapse_blank_lines(WINDOW_ID_ANY_RE.sub("", zh_text)).strip()
+    # 协议残渣（含单边括号、全角、Markdown 包裹）必须在折叠空行之前清掉：
+    # 残渣本身可能带换行，先折叠会把一行残渣拆成两个 block 的边界。
+    stripped_ids = WINDOW_ID_ANY_RE.sub("", zh_text)
+    text = _collapse_blank_lines(stripped_ids).strip()
     if not text:
+        # 整条 cue 只有一个协议标签（真实语料里出现过整行就是 ``#84]``）：
+        # 清掉之后本该是空。这里**不能**回退成原文，否则残渣照样落盘，
+        # 而"非空原文→空译文"的重译/QC 信号永远不会触发。
+        if stripped_ids.strip() != zh_text.strip():
+            return ""
         return original
     text = text.translate(TRADITIONAL_TO_SIMPLIFIED_MAP)
     if not SOURCE_HAS_BRACKETS_RE.search(src_text):
@@ -153,7 +254,9 @@ def postprocess_cue_text(zh_text: str, src_text: str) -> str:
         for line in text.splitlines()
     ]
     text = "\n".join(lines).strip()
-    text = REPEATED_PUNCT_RE.sub(r"\1", text).strip()
+    text = normalize_punctuation(
+        text, strip_trailing_period=strip_trailing_period
+    ).strip()
     text = repair_slash_alternatives(text)
     return text or original
 

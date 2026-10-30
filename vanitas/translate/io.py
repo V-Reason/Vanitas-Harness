@@ -73,6 +73,94 @@ FILENAME_SYMBOL_CONNECTOR = re.compile(
     r"([♪♡❤💗✩★☆])(?:是|则|就)(?=[一-鿿])"
 )
 
+# 文件名元数据先验：音声作品的主角名几乎总写在文件名/目录名的括号里
+# （``朝のひとりごと(茜音編).wav``），而 ASR 从气声里听出正确汉字写法的概率
+# 极低（必然倾向常见字，把「茜音」听成「赤音」）。用文件系统既有元数据反哺
+# 实体引擎，是全篇专名一致性成本最低的一环。
+METADATA_BRACKET_RE = re.compile(
+    r"[（(【\[〔「『]([^）)】\]〕」』]{1,24})[）)】\]〕」』]"
+)
+# 作品名里的通用后缀：剥掉后剩下的才是候选人名。
+METADATA_SUFFIXES = (
+    "ロングバージョン", "ショートバージョン", "ボイスドラマ", "ボイス",
+    "ルート", "パート", "バージョン", "完全版", "限定版", "通常版",
+    "姐妹", "姉妹", "姊妹",
+    "編", "篇", "役", "ver", "Ver", "VER",
+)
+# 文件名主体本身当作候选的唯一理由：它带 RJ 编号或作品后缀。否则
+# 「おはよう」「大好き」这类普通词也会被当成主角名锁进实体表。
+METADATA_STEM_SUFFIXES = ("編", "篇", "役")
+# 裸文件名的候选长度上限（含 RJ 编号与后缀），超出说明是整句作品标题。
+METADATA_STEM_MAX_CHARS = 24
+# 括号里常见但不是人名的标注；命中即丢弃，避免把场景词锁成专名。
+METADATA_STOPWORDS = frozenset(
+    {
+        "本編", "前編", "後編", "完結編", "最終編", "新作", "最新", "作品",
+        "音声", "実演", "効果音", "効果", "両耳", "左右", "右耳", "左耳",
+        "字幕", "翻訳", "体験版", "無修正", "修正版", "初回", "特典",
+        "おまけ", "オマケ", "ASMR", "asmr", "DL", "同梱", "差分",
+        "笑", "溜息", "ため息", "喘ぎ", "吐息", "耳元", "耳舐め",
+    }
+)
+METADATA_ID_RE = re.compile(r"(?i)(?<![A-Za-z])RJ\s*\d{4,}(?!\d)")
+METADATA_JUNK_RE = re.compile(r"(?:第\s*\d+\s*[話话]|[Vv]ol\.?\s*\d+|part\s*\d+)")
+METADATA_NAME_CHAR_RE = re.compile(r"^[\u3041-\u30ff\u4e00-\u9fa5]+$")
+METADATA_MIN_CHARS = 2
+METADATA_MAX_CHARS = 6
+
+
+def _clean_metadata_seed(candidate: str) -> str:
+    """把一段括号文本收敛成候选人名；不可用时返回空串。"""
+    text = candidate.strip()
+    if not text:
+        return ""
+    text = METADATA_ID_RE.sub("", text)
+    text = METADATA_JUNK_RE.sub("", text)
+    text = text.strip(" 　・-—―_·.,、:：")
+    changed = True
+    while changed and text:
+        changed = False
+        for suffix in METADATA_SUFFIXES:
+            if len(text) > len(suffix) and text.endswith(suffix):
+                text = text[: -len(suffix)].strip(" 　・-—―_·")
+                changed = True
+                break
+    if not METADATA_NAME_CHAR_RE.match(text):
+        return ""
+    if not METADATA_MIN_CHARS <= len(text) <= METADATA_MAX_CHARS:
+        return ""
+    if text in METADATA_STOPWORDS:
+        return ""
+    return text
+
+
+def extract_metadata_entity_seeds(path: Path) -> list[str]:
+    """从文件名与父目录名提取高置信度主角名种子。
+
+    只认两种来源，宁可漏也不猜：
+    1. 括号内文本（``(茜音編)`` / ``【双叶】`` / ``［あかね］``），剥掉通用后缀；
+    2. 文件名主体本身就是 ``2~8`` 字且以 ``編/篇/役`` 结尾的短名（``茜音編.wav``）。
+
+    返回去重后的列表（文件名优先于目录名）；无候选时返回空列表，
+    调用方据此跳过预热，不额外分支。
+    """
+    path = Path(path)
+    seeds: list[str] = []
+    for index, raw in enumerate((path.stem, path.parent.name)):
+        if not raw:
+            continue
+        candidates = METADATA_BRACKET_RE.findall(raw)
+        if not candidates and index == 0 and (
+            METADATA_ID_RE.search(raw)
+            or raw.rstrip().endswith(METADATA_STEM_SUFFIXES)
+        ) and len(raw) <= METADATA_STEM_MAX_CHARS:
+            candidates = [raw]
+        for candidate in candidates:
+            seed = _clean_metadata_seed(candidate)
+            if seed and seed not in seeds:
+                seeds.append(seed)
+    return seeds
+
 
 def _is_mask_symbol(char: str) -> bool:
     """遮罩装饰符号，但保留下划线/点/连字符作为文件名分隔符。"""

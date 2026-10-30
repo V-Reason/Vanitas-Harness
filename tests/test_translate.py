@@ -599,8 +599,8 @@ class TranslateTests(unittest.TestCase):
         )
         self.assertEqual(len(client.calls), 3)
         self.assertEqual(failures, [])
-        self.assertIn("这是另一段很长的台词。", output)
-        self.assertEqual(output.count("今天真的非常开心，发生了很多事。"), 1)
+        self.assertIn("这是另一段很长的台词", output)
+        self.assertEqual(output.count("今天真的非常开心，发生了很多事"), 1)
 
     def test_batch_validation_rejects_sexpar_and_falls_back(self) -> None:
         source = (
@@ -1887,10 +1887,13 @@ class QualityGuardTests(unittest.TestCase):
     SRC_A = "今日はとても楽しかったです、本当にいい一日でした"
     SRC_B = "また何かあったら教えてくださいね"
     SRC_C = "今日はとても退屈でした、本当に長い一日でした"
-    ZH_A = "今天真的非常开心呀，真是美好的一天。"
-    ZH_B = "明天也请继续听下去哦。"
-    ZH_COPY = "今天真的非常开心呢，真是美好的一天。"
-    ZH_RETRY = "今天真的非常无聊呢，真是漫长的一天。"
+    # 这些常量同时充当"模型原始输出"与"期望写回文本"：标点归一（
+    # cleaner.normalize_punctuation）会把 ≤30 字短句末尾的孤立句号剥掉，
+    # 因此期望值本身不带句号。
+    ZH_A = "今天真的非常开心呀，真是美好的一天"
+    ZH_B = "明天也请继续听下去哦"
+    ZH_COPY = "今天真的非常开心呢，真是美好的一天"
+    ZH_RETRY = "今天真的非常无聊呢，真是漫长的一天"
 
     def srt_text(self, *texts: str) -> str:
         blocks = []
@@ -1973,9 +1976,18 @@ class QualityGuardTests(unittest.TestCase):
         return [block.text for block, _separator in parse_srt(output, "\n")]
 
     def test_asmr_engine_loads_glossary_and_translate_does_not(self) -> None:
-        self.assertEqual(
-            len(self.engine(ScriptedTranslationClient([])).glossary.entries), 3
-        )
+        entries = {
+            (entry.source, entry.preferred)
+            for entry in self.engine(
+                ScriptedTranslationClient([])
+            ).glossary.entries
+        }
+        # 断言口径而非条目总数：词表会持续扩充，钉死数字只会变成
+        # "改一行词表就要改三处测试"的噪声。
+        self.assertIn(("アマアマ", "甜腻"), entries)
+        self.assertIn(("お耳をマッサージ", "耳朵按摩"), entries)
+        self.assertIn(("マッサージ", "按摩"), entries)
+        self.assertIn(("塩吹き", "潮吹"), entries)
         plain = TranslationEngine(
             ScriptedTranslationClient([]),
             ROOT / "config" / "prompts",
@@ -2167,7 +2179,8 @@ class QualityGuardTests(unittest.TestCase):
         self.assertIn("所有日文假名", hint)
         self.assertIn("人名中的", hint)
         self.assertIn("片假名名词", hint)
-        self.assertEqual(self.block_texts(output), ["雫酱…"])
+        # 单个 … 属同一类"语气延伸符"写法，归一后统一为规范省略号 ……。
+        self.assertEqual(self.block_texts(output), ["雫酱……"])
 
     def test_fallback_copy_is_audited_and_retried(self) -> None:
         client = ScriptedTranslationClient(
@@ -2304,7 +2317,7 @@ class QualityGuardTests(unittest.TestCase):
         )
         self.assertEqual(len(client.calls), 2)
         self.assertEqual(failures, [])
-        self.assertEqual(self.block_texts(output)[2], "我们不可以触碰客人。")
+        self.assertEqual(self.block_texts(output)[2], "我们不可以触碰客人")
 
     def test_ear_massage_glossary_specific_row_wins(self) -> None:
         cases = [
@@ -2372,7 +2385,9 @@ class QualityGuardTests(unittest.TestCase):
     def test_engine_exposes_task_template_and_asmr_assets(self) -> None:
         engine = self.engine(ScriptedTranslationClient([]))
         self.assertEqual(engine.task_template, "translate_asmr")
-        self.assertEqual(len(engine.glossary.entries), 3)
+        sources = {entry.source for entry in engine.glossary.entries}
+        self.assertIn("アマアマ", sources)
+        self.assertIn("お耳をマッサージ", sources)
         self.assertTrue(engine.join_rules)
         plain = TranslationEngine(
             ScriptedTranslationClient([]),
@@ -2395,7 +2410,9 @@ class QualityGuardTests(unittest.TestCase):
         self.assertEqual(
             engine.task_template, "translate_asmr_experimental"
         )
-        self.assertEqual(len(engine.glossary.entries), 3)
+        self.assertTrue(
+            {entry.source for entry in engine.glossary.entries} >= {"アマアマ"}
+        )
         self.assertTrue(engine.join_rules)
         budget = T1Budget()
         failures: list = []
