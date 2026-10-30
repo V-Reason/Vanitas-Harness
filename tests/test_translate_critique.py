@@ -15,15 +15,29 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from vanitas import prompts  # noqa: E402
-from vanitas.errors import EngineError  # noqa: E402
+from vanitas.errors import EngineError, OutputTruncated  # noqa: E402
 from vanitas.translate import (  # noqa: E402
     CritiqueBudget,
+    TranslationEngine,
+    TranslationOptions,
     build_critique_input,
     execute_critique_repair,
     parse_critique_response,
     parse_srt,
     translate_srt,
     triage_cue_risk,
+)
+
+PROMPT_DIR = ROOT / "config" / "prompts"
+OPTIONS = TranslationOptions(
+    n_ctx=8192,
+    context_window=5,
+    context_summary_chars=200,
+    min_output_tokens=512,
+    output_ratio=2.5,
+    prompt_safety_tokens=64,
+    temperature=0.2,
+    max_split_depth=3,
 )
 
 SOURCES = [
@@ -214,6 +228,7 @@ class CritiquePipelineTests(unittest.TestCase):
         texts: list[str] | None = None,
         budget: CritiqueBudget | None = None,
         file_cues: int | None = None,
+        window_size: int = 6,
     ):
         failures: list = []
         output = translate_srt(
@@ -223,7 +238,7 @@ class CritiquePipelineTests(unittest.TestCase):
             source="critique.srt",
             eol="\n",
             failures=failures,
-            window_size=6,
+            window_size=window_size,
             max_window_chars=2000,
             critique_budget=budget,
             file_cues=file_cues,
@@ -258,6 +273,46 @@ class CritiquePipelineTests(unittest.TestCase):
         self.assertEqual(chat.critique_calls, [])
         texts = [block.text for block, _ in parse_srt(output, "\n")]
         self.assertEqual(texts, DRAFTS)
+
+    def test_critique_repair_applies_entity_locks(self) -> None:
+        """P5-F2：复审候选也必须过 enforce_locks，不能把已锁定译名改回日文名。"""
+        sources = [
+            "梅地様、こんにちは",
+            "今日はいい天気ですね",
+            "本を読みます",
+            "窓を閉めてください",
+            "私のこと、覚えていませんか",
+            "コーヒーを入れます",
+        ]
+        drafts = [
+            "梅地先生，你好",
+            "今天天气真好",
+            "来看看书吧",
+            "请把窗户关上",
+            "你还记得我吗",
+            "泡一杯咖啡",
+        ]
+
+        def batch(start: int, stop: int) -> str:
+            return "\n".join(
+                f"[#{index}] {drafts[index - 1]}"
+                for index in range(start, stop + 1)
+            )
+
+        chat = CritiqueChat(
+            [batch(1, 3), batch(4, 6)],
+            ["梅地様，你不记得我了吗"],
+        )
+        budget = CritiqueBudget(max_total=10, per_file=5)
+        output, failures = self.run_window(
+            chat, texts=sources, budget=budget, window_size=3
+        )
+
+        self.assertEqual(failures, [])
+        self.assertEqual(len(chat.critique_calls), 1)
+        texts = [block.text for block, _ in parse_srt(output, "\n")]
+        self.assertEqual(texts[4], "梅地先生，你不记得我了吗")
+        self.assertNotIn("梅地様", output)
 
     def test_budget_blocks_extra_critiques_in_one_window(self) -> None:
         risky = [
@@ -408,6 +463,69 @@ class CritiqueTemplateTests(unittest.TestCase):
         self.assertEqual(sorted(prompts.placeholders(text)), ["input"])
         self.assertIn("【保持】", text)
         self.assertNotIn("task_translate_asmr", text)
+
+
+class EngineCritiqueChannelTests(unittest.TestCase):
+    """P5-F4：TranslationEngine.critique() 自己（模板/历史/截断），不是替身。"""
+
+    class Client:
+        def __init__(self, content: str = "客人不能触碰我们") -> None:
+            self.content = content
+            self.calls: list[list[dict]] = []
+
+        def chat(
+            self,
+            messages,
+            *,
+            max_tokens,
+            temperature=0.2,
+            response_format=None,
+            timeout=None,
+        ):
+            self.calls.append(messages)
+            return {
+                "choices": [
+                    {
+                        "message": {"content": self.content},
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+
+    class TruncatingClient(Client):
+        def chat(self, messages, **kwargs):
+            self.calls.append(messages)
+            return {
+                "choices": [
+                    {"message": {"content": "x"}, "finish_reason": "length"}
+                ]
+            }
+
+    def engine(self, client) -> TranslationEngine:
+        return TranslationEngine(
+            client, PROMPT_DIR, "SYSTEM", options=OPTIONS
+        )
+
+    def test_critique_uses_critique_template_and_keeps_history_clean(self) -> None:
+        client = self.Client()
+        engine = self.engine(client)
+        bundle = "【当前日文】\nお客様\n\n【初译草稿】\n我们可以触碰客人"
+        self.assertEqual(engine.critique(bundle), "客人不能触碰我们")
+
+        self.assertEqual(len(client.calls), 1)
+        messages = client.calls[0]
+        self.assertEqual(messages[0], {"role": "system", "content": "SYSTEM"})
+        prompt = messages[-1]["content"]
+        self.assertIn("【保持】", prompt)          # 复审模板标记
+        self.assertIn("我们可以触碰客人", prompt)  # 输入包已灌进 {input}
+        self.assertNotIn("{input}", prompt)
+        # 复审绝不写滑动上下文
+        self.assertEqual(engine.history_snapshot(), ())
+
+    def test_critique_raises_on_truncated_output(self) -> None:
+        engine = self.engine(self.TruncatingClient())
+        with self.assertRaises(OutputTruncated):
+            engine.critique("【当前日文】\nお客様")
 
 
 if __name__ == "__main__":

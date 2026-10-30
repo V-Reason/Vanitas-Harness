@@ -3331,6 +3331,20 @@ class DynamicEntityEngineTests(unittest.TestCase):
         )
         self.assertEqual(engine.enforce_locks("诺亚，再见"), "诺亚，再见")
 
+    def test_enforce_locks_does_not_cascade(self) -> None:
+        """P5-F12：锁定名含日文基名时不能级联替换成「梅地先生先生」。"""
+        engine = DynamicEntityEngine(["梅地様、こんにちは"])
+        engine.capture_translations(
+            ["梅地様、こんにちは"], ["梅地先生，你好"]
+        )
+        self.assertEqual(engine.locked_translations.get("梅地"), "梅地先生")
+        self.assertEqual(
+            engine.enforce_locks("梅地様，你不记得我了吗"),
+            "梅地先生，你不记得我了吗",
+        )
+        # 已经是中文译名时不应再被替换一次。
+        self.assertEqual(engine.enforce_locks("梅地先生，你好"), "梅地先生，你好")
+
 
 class PostprocessTests(unittest.TestCase):
     def test_traditional_to_simplified_cleaner(self) -> None:

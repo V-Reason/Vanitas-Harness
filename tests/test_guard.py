@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -28,6 +29,14 @@ class GuardTests(unittest.TestCase):
         for name in RUNTIME:
             (self.root / "bin" / name).write_bytes(b"stub")
         (self.root / "models").mkdir()
+        # 守卫用例不能依赖本机真实端口状态：默认模型一跑起来，4060/4062 上
+        # 有真 llama-server，happy-path 会全被打成红。这里假装端口空闲；
+        # 需要真实占用语义的用例自己 stop 掉补丁。
+        self._port_patch = mock.patch.object(
+            guard, "_port_owner", return_value=None
+        )
+        self._port_patch.start()
+        self.addCleanup(self._port_patch.stop)
 
     def make_model(self, name: str, magic: bytes = b"GGUF", size: int = 4096) -> Path:
         path = self.root / "models" / name
@@ -104,6 +113,7 @@ class GuardTests(unittest.TestCase):
 
     # 8) 端口被占
     def test_port_busy_reports_pid(self) -> None:
+        self._port_patch.stop()  # 本用例要的是真实端口占用语义
         model = self.make_model("base.gguf")
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
             listener.bind(("127.0.0.1", 0))

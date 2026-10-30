@@ -260,6 +260,15 @@ def translate_srt(
             "ASMR 守卫需要调用方显式传入共享 T1Budget；"
             "不要按文件静默新建预算"
         )
+    if critique_budget is not None and window_size <= 1:
+        # P3 复审只在合流窗口里挂载；单句路径没有窗口可复用，静默忽略会让
+        # 调用方误以为开了复审。显式告警，不改变译文。
+        warnings.warn(
+            "P3 复审只对 window_size>1 的合流路径生效；"
+            f"当前 window_size={window_size}，critique_budget 被忽略",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     blocks = parse_srt(text, eol)
     valid_items = [
         (index, block)
@@ -354,6 +363,16 @@ def translate_srt(
         elif callable(reset_history):
             reset_history()
 
+    # invented_tool 的 ±3 cue 视野：按文档原始 cue 顺序建表（ASR 幻觉置空
+    # 的 cue 仍占位，避免把距离算近）。nearby 不含当前 cue，当前源文由
+    # audit_invented_tool 自己查。
+    # 必须在续传回填之前建表：回填会把已完成 cue 的 subtitle.text 换成中文，
+    # 之后建表会让 nearby_sources 混入译文，日文道具词匹配不到 → 误报。
+    all_cues = [(cue_of(subtitle), subtitle.text) for _i, subtitle in valid_items]
+    cue_positions = {
+        cue: position for position, (cue, _text) in enumerate(all_cues)
+    }
+
     # 断点续传：先把快照里已完成的 cue 回填进 blocks/索引/历史，后续只跑剩余项。
     # 回填顺序必须与文档顺序一致，否则 _history 的“最近 N 条”语义会错位。
     completed: dict[str, str] = {}
@@ -376,14 +395,6 @@ def translate_srt(
     if resumed_pairs:
         restore(tuple(resumed_pairs))
         done = len(resumed_pairs)
-
-    # invented_tool 的 ±3 cue 视野：按文档原始 cue 顺序建表（ASR 幻觉置空
-    # 的 cue 仍占位，避免把距离算近）。nearby 不含当前 cue，当前源文由
-    # audit_invented_tool 自己查。
-    all_cues = [(cue_of(subtitle), subtitle.text) for _i, subtitle in valid_items]
-    cue_positions = {
-        cue: position for position, (cue, _text) in enumerate(all_cues)
-    }
 
     def nearby_sources_for(cue: int) -> tuple[str, ...]:
         position = cue_positions.get(cue)
@@ -789,7 +800,9 @@ def translate_srt(
                 context=context,
                 risk_codes=risk_codes,
                 critique_budget=critique_budget,
-                finalize=finalize,
+                # 必须绑上实体索引：否则复审候选会绕过 enforce_locks，
+                # 把已锁定的中文译名改回汉字日文名（validate 拦不住无假名专名）。
+                finalize=lambda text, src: finalize(text, src, entity_engine),
                 accept=accept,
             )
 
@@ -1134,6 +1147,14 @@ def translate_file(
         ) from exc
     if snapshot is not None and not resume:
         # 非续传模式先清旧快照：否则后续 --resume 会把上一次的残片当成进度。
+        if snapshot.is_file() and snapshot.stat().st_size > 0:
+            # 有进度却没带 --resume：这是用户最容易踩的坑，必须说出来。
+            warnings.warn(
+                f"发现未完成的断点快照 {snapshot}，未加 --resume，已丢弃并从头发起；"
+                "如需续传请重跑并加 --resume",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         try:
             snapshot.unlink(missing_ok=True)
         except OSError as exc:

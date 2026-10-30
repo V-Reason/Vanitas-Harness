@@ -12,6 +12,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +22,9 @@ if str(ROOT) not in sys.path:
 from vanitas.config import TranslateSettings  # noqa: E402
 from vanitas.errors import OutputTruncated  # noqa: E402
 from vanitas.translate import (  # noqa: E402
+    CritiqueBudget,
     StreamingAbortDetector,
+    T1Budget,
     TranslationEngine,
     TranslationOptions,
     collect_translate_inputs,
@@ -77,24 +80,31 @@ class StreamingClient:
         tps: float = 12.5,
         tps_source: str = "server.timings",
         finish_reason: str = "stop",
+        finish_reasons: list[str] | None = None,
     ) -> None:
         self.scripts = list(scripts or [])
         self.tokens = tokens
         self.tps = tps
         self.tps_source = tps_source
         self.finish_reason = finish_reason
+        self.finish_reasons = list(finish_reasons or [])
         self.calls: list[str] = []
         self.closed = 0
 
     def stream_chat(self, messages, *, max_tokens, temperature=0.2, **kwargs):
         self.calls.append(str(messages[-1]["content"]))
         chunks = self.scripts.pop(0) if self.scripts else []
+        reason = (
+            self.finish_reasons.pop(0)
+            if self.finish_reasons
+            else self.finish_reason
+        )
         try:
             for chunk in chunks:
                 yield {"type": "delta", "content": chunk}
             yield {
                 "type": "done",
-                "finish_reason": self.finish_reason,
+                "finish_reason": reason,
                 "tokens": self.tokens,
                 "tps": self.tps,
                 "tps_source": self.tps_source,
@@ -111,9 +121,13 @@ class StreamingClient:
 class ScriptedChat:
     """按脚本返回整段文本；用异常对象模拟崩溃。"""
 
-    def __init__(self, steps: list[object]) -> None:
+    def __init__(
+        self, steps: list[object], *, task_template: str | None = None
+    ) -> None:
         self.steps = list(steps)
         self.calls: list[str] = []
+        if task_template is not None:
+            self.task_template = task_template
 
     def __call__(self, prompt: str) -> str:
         self.calls.append(prompt)
@@ -178,6 +192,16 @@ class StreamingEngineTests(unittest.TestCase):
         with self.assertRaises(OutputTruncated):
             engine("[#1] こんにちは")
         self.assertEqual(client.closed, 1)
+
+    def test_streaming_length_reason_splits_input(self) -> None:
+        # finish_reason=length 时走二分重译：1 次截断 + 2 次分片 = 3 次请求。
+        client = StreamingClient(
+            [["截断"], ["甲"], ["乙"]],
+            finish_reasons=["length", "stop", "stop"],
+        )
+        engine = self.engine(client)
+        self.assertEqual(engine("一句。二句。"), "甲乙")
+        self.assertEqual(len(client.calls), 3)
 
     def test_window_abort_degrades_to_per_cue(self) -> None:
         # 批次流被早停掐断后，必须整窗回退逐句，而不是把文件顶掉。
@@ -284,6 +308,46 @@ class CheckpointTests(unittest.TestCase):
             )
             self.assertFalse(snapshot.is_file())
 
+    def test_resume_single_cue_path_skips_completed(self) -> None:
+        # 默认 subtitle 预设是 window_size=1：这条路径的跳过快照必须单独覆盖。
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "one.srt"
+            source.write_text(srt_text(SOURCES[:4]), encoding="utf-8")
+            snapshot = partial_snapshot_path(tmp_path / "one.zh.srt")
+            snapshot.write_text(srt_text(ZH[:2]), encoding="utf-8")
+            chat = ScriptedChat([ZH[2], ZH[3]])
+            outcome = translate_file(
+                chat, source, SETTINGS, window_size=1, resume=True
+            )
+            produced = outcome.output.read_text(encoding="utf-8")
+
+        self.assertEqual(len(chat.calls), 2)
+        self.assertEqual(outcome.failures, [])
+        self.assertEqual(
+            [block.text for block, _ in parse_srt(produced, "\n")], ZH[:4]
+        )
+        self.assertFalse(snapshot.is_file())
+
+    def test_resume_with_complete_snapshot_makes_no_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "done.srt"
+            source.write_text(srt_text(SOURCES[:4]), encoding="utf-8")
+            snapshot = partial_snapshot_path(tmp_path / "done.zh.srt")
+            snapshot.write_text(srt_text(ZH[:4]), encoding="utf-8")
+            chat = ScriptedChat([])
+            outcome = translate_file(
+                chat, source, SETTINGS, window_size=1, resume=True
+            )
+            produced = outcome.output.read_text(encoding="utf-8")
+
+        self.assertEqual(chat.calls, [])
+        self.assertEqual(
+            [block.text for block, _ in parse_srt(produced, "\n")], ZH[:4]
+        )
+        self.assertFalse(snapshot.is_file())
+
     def test_snapshot_is_not_collected_as_input(self) -> None:
         settings = TranslateSettings(
             source_suffixes=(".srt",), chunk_chars=800, output_suffix=".zh"
@@ -342,6 +406,102 @@ class ThreadingComplianceTests(unittest.TestCase):
                 if needle in text:
                     offenders.append(f"{path.name}: {needle}")
         self.assertEqual(offenders, [])
+
+
+class ResumeAuditIsolationTests(unittest.TestCase):
+    """续传回填不能污染 T1 审计看到的邻行源文（P5-F1）。"""
+
+    def test_resume_keeps_japanese_neighbours_for_invented_tool(self) -> None:
+        texts = [
+            "綿棒でお耳をきれいにしましょう",
+            "はい、お願いします",
+            "それでは始めますね",
+            "気持ちいいですか",
+        ]
+        done = ["用棉棒把耳朵清理干净吧", "好的，麻烦你了"]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "asmr.srt"
+            source.write_text(srt_text(texts), encoding="utf-8")
+            snapshot = partial_snapshot_path(tmp_path / "asmr.zh.srt")
+            snapshot.write_text(srt_text(done), encoding="utf-8")
+            chat = ScriptedChat(
+                [batch_line([(3, "那就用掏耳勺开始吧"), (4, "舒服吗")])],
+                task_template="translate_asmr",
+            )
+            failures: list = []
+            output = translate_srt(
+                chat,
+                srt_text(texts),
+                chunk_chars=800,
+                source=str(source),
+                eol="\n",
+                failures=failures,
+                window_size=2,
+                max_window_chars=1000,
+                asmr_guard=True,
+                t1_budget=T1Budget(),
+                checkpoint_path=snapshot,
+                resume=True,
+            )
+
+        self.assertEqual(failures, [])
+        # 第 1 条的「綿棒」必须仍以日文出现在 nearby 里；否则 invented_tool
+        # 会误报并多发一次单句请求。
+        self.assertEqual(len(chat.calls), 1, chat.calls)
+        self.assertIn("掏耳勺", output)
+
+
+class CheckpointWarningTests(unittest.TestCase):
+    """丢弃未完成快照必须出声（P5-F6）。"""
+
+    def test_discarding_stale_snapshot_warns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "a.srt"
+            source.write_text(srt_text(SOURCES[:6]), encoding="utf-8")
+            target = tmp_path / "a.zh.srt"
+            snapshot = partial_snapshot_path(target)
+            snapshot.write_text(srt_text(ZH[:2]), encoding="utf-8")
+            chat = ScriptedChat(
+                [batch_line(list(zip(range(1, 7), ZH[:6])))]
+            )
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                outcome = translate_file(
+                    chat, source, SETTINGS, window_size=6
+                )
+
+        messages = [str(item.message) for item in caught]
+        self.assertTrue(
+            any("断点快照" in text and "--resume" in text for text in messages),
+            messages,
+        )
+        self.assertFalse(snapshot.is_file())
+        self.assertEqual(outcome.segments, 6)
+
+
+class CritiquePathWarningTests(unittest.TestCase):
+    """window_size=1 时 P3 复审不生效，必须告警而不是静默（P5-F11）。"""
+
+    def test_critique_budget_on_single_cue_path_warns(self) -> None:
+        chat = ScriptedChat([ZH[0]])
+        failures: list = []
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            translate_srt(
+                chat,
+                srt_text(SOURCES[:1]),
+                chunk_chars=800,
+                source="one.srt",
+                eol="\n",
+                failures=failures,
+                window_size=1,
+                critique_budget=CritiqueBudget(),
+            )
+
+        messages = [str(item.message) for item in caught]
+        self.assertTrue(any("P3 复审" in text for text in messages), messages)
 
 
 if __name__ == "__main__":
