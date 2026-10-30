@@ -232,6 +232,11 @@ def _is_generated_output(path: Path, output_suffix: str) -> bool:
     return bool(suffix) and path.stem.lower().endswith(suffix)
 
 
+def _is_partial_snapshot(path: Path) -> bool:
+    """断点快照 `<output>.part.srt` 不是输入；否则续传残片会被再翻一遍。"""
+    return path.name.lower().endswith(".part.srt")
+
+
 def _is_excluded_dir(candidate: Path, excluded_key: str | None) -> bool:
     """仅剪掉 --out-dir 本身，避免把上次产物再次当输入。"""
     if not excluded_key:
@@ -292,6 +297,8 @@ def collect_translate_inputs(
                     if candidate.suffix.lower() not in allowed:
                         continue
                     if _is_generated_output(candidate, settings.output_suffix):
+                        continue
+                    if _is_partial_snapshot(candidate):
                         continue
                     if not candidate.is_file():
                         continue

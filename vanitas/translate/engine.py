@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from .. import prompts
-from .cleaner import _clip, sanitize_translation_output
+from .cleaner import WINDOW_ID_ANY_RE, _clip, sanitize_translation_output
 from ..client import LlamaClient
 from ..config import AppConfig, ModelSpec
 from ..cue_boundary import JoinRule, load_joins
@@ -57,6 +57,54 @@ def extract_content(result: dict) -> str:
     if not content:
         raise EngineError("模型返回空内容")
     return content
+
+
+def _expected_cue_count(text: str) -> int:
+    """从待译文本推断本窗预期编号数；无编号（散文/单句）按 1 处理。"""
+    return max(1, len(WINDOW_ID_ANY_RE.findall(text)))
+
+
+class StreamingAbortDetector:
+    """针对微批次输出流实施物理早停，提前掐断连接释放 GPU。
+
+    只拦“确定不可能变成好译文”的形态：越界编号、连续空行、短语死锁、
+    字符数失控。所有判据都基于已收到的前缀，不预测未来，也不看语义——
+    宁可漏停，不可误停（误停会白白多一次回退请求）。
+    """
+
+    def __init__(self, expected_cue_count: int, max_chars: int = 4000) -> None:
+        self.expected_cue_count = max(1, int(expected_cue_count))
+        self.max_chars = max(100, int(max_chars))
+        self.buffer = ""
+        self.aborted = False
+        self.abort_reason = ""
+
+    def feed(self, delta: str) -> bool:
+        """处理新 token 片段；返回 True 表示继续，False 表示应立刻断开。"""
+        self.buffer += delta
+        if len(self.buffer) > self.max_chars:
+            return self._abort(f"输出字符数超出上限 {self.max_chars}")
+
+        limit_tag = f"[#{self.expected_cue_count + 1}]"
+        if limit_tag in self.buffer:
+            return self._abort(f"检测到编号越界标签 {limit_tag}")
+
+        if "\n\n\n\n" in self.buffer or "\r\n\r\n\r\n\r\n" in self.buffer:
+            return self._abort("检测到异常空行连续溢出")
+
+        tail = self.buffer[-120:]
+        for phrase_len in (12, 16, 20, 24):
+            if len(tail) < phrase_len * 3:
+                continue
+            unit = tail[-phrase_len:]
+            if tail.endswith(unit * 3):
+                return self._abort(f"检测到短语死锁循环：{unit[:10]}...")
+        return True
+
+    def _abort(self, reason: str) -> bool:
+        self.aborted = True
+        self.abort_reason = reason
+        return False
 
 
 class TranslationEngine:
@@ -363,16 +411,27 @@ class TranslationEngine:
             raise TranslateError(str(exc)) from exc
 
         started = time.perf_counter()
-        result = self._client.chat(
-            messages,
-            max_tokens=budget.max_tokens,
-            temperature=options.temperature,
-        )
-        elapsed_s = time.perf_counter() - started
-        choices = result.get("choices") or []
-        finish_reason = ""
-        if choices and isinstance(choices[0], dict):
-            finish_reason = str(choices[0].get("finish_reason") or "")
+        stream_chat = getattr(self._client, "stream_chat", None)
+        if callable(stream_chat):
+            (
+                raw,
+                finish_reason,
+                elapsed_s,
+                tokens,
+                tps,
+                tps_source,
+            ) = self._generate_stream(messages, budget, text)
+        else:
+            # 鸭子类型的测试替身只有 chat()；保留阻塞路径，生产客户端恒走流式。
+            (
+                raw,
+                finish_reason,
+                elapsed_s,
+                tokens,
+                tps,
+                tps_source,
+            ) = self._generate_blocking(messages, budget, text, started)
+
         if finish_reason == "length":
             if depth >= options.max_split_depth or len(text) <= 1:
                 raise OutputTruncated(
@@ -385,6 +444,39 @@ class TranslationEngine:
                 self._translate_once(part, depth=depth + 1) for part in parts
             )
 
+        translated = sanitize_translation_output(raw, text)
+        self._history.append((text, translated))
+        if self._on_stat is not None:
+            self._on_stat(
+                SegmentStat(
+                    source=text,
+                    translation=translated,
+                    elapsed_s=elapsed_s,
+                    tokens=tokens,
+                    tps=tps,
+                    tps_source=tps_source,
+                )
+            )
+        return translated
+
+    def _generate_blocking(
+        self,
+        messages: list[dict],
+        budget,
+        text: str,
+        started: float,
+    ) -> tuple[str, str, float, int, float, str]:
+        """阻塞路径：兼容只有 ``chat()`` 的鸭子类型客户端。"""
+        result = self._client.chat(
+            messages,
+            max_tokens=budget.max_tokens,
+            temperature=self._options.temperature,
+        )
+        elapsed_s = time.perf_counter() - started
+        choices = result.get("choices") or []
+        finish_reason = ""
+        if choices and isinstance(choices[0], dict):
+            finish_reason = str(choices[0].get("finish_reason") or "")
         raw = extract_content(result)
         translated = sanitize_translation_output(raw, text)
         raw_usage = result.get("usage")
@@ -403,19 +495,61 @@ class TranslationEngine:
         else:
             tps = tokens / elapsed_s if elapsed_s > 0 else 0.0
             tps_source = "client.usage" if usage else "estimate"
-        self._history.append((text, translated))
-        if self._on_stat is not None:
-            self._on_stat(
-                SegmentStat(
-                    source=text,
-                    translation=translated,
-                    elapsed_s=elapsed_s,
-                    tokens=tokens,
-                    tps=tps,
-                    tps_source=tps_source,
-                )
-            )
-        return translated
+        return raw, finish_reason, elapsed_s, tokens, tps, tps_source
+
+    def _generate_stream(
+        self,
+        messages: list[dict],
+        budget,
+        text: str,
+    ) -> tuple[str, str, float, int, float, str]:
+        """流式路径：边收边判，命中畸形立即掐断 Socket 释放 GPU。
+
+        ``stream.close()`` 会把 ``GeneratorExit`` 抛回 ``chat_stream`` 的
+        ``finally``，由底层 ``response.close()`` 真正断开 HTTP 连接；这是
+        早停能省下算力的唯一原因，不能只 break 循环。
+        """
+        detector = StreamingAbortDetector(
+            _expected_cue_count(text),
+            max_chars=max(4000, len(text) * 3),
+        )
+        started = time.perf_counter()
+        parts: list[str] = []
+        done_event: dict | None = None
+        stream = self._client.stream_chat(
+            messages,
+            max_tokens=budget.max_tokens,
+            temperature=self._options.temperature,
+        )
+        try:
+            for event in stream:
+                kind = event.get("type")
+                if kind == "delta":
+                    chunk = event.get("content") or ""
+                    if not chunk:
+                        continue
+                    parts.append(chunk)
+                    if not detector.feed(chunk):
+                        raise OutputTruncated(
+                            f"流式早停：{detector.abort_reason}"
+                        )
+                elif kind == "done":
+                    done_event = event
+        finally:
+            closer = getattr(stream, "close", None)
+            if callable(closer):
+                closer()
+        elapsed_s = time.perf_counter() - started
+        raw = "".join(parts)
+        if not raw.strip():
+            raise EngineError("模型返回空内容")
+        done = done_event or {}
+        finish_reason = str(done.get("finish_reason") or "")
+        tokens = int(done.get("tokens") or 0) or estimate_tokens(raw)
+        tps = float(done.get("tps") or 0.0)
+        tps_source = str(done.get("tps_source") or "estimate")
+        return raw, finish_reason, elapsed_s, tokens, tps, tps_source
+
 
 
 def make_engine_chat(
