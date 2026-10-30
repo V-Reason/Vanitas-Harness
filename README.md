@@ -41,6 +41,7 @@ vanitas.bat translate novels --preset prose --out-dir translated :: 递归翻译
 vanitas.bat translate novels --translate-filename --out-dir translated :: 翻译内容+文件名，输出不加 .zh
 vanitas.bat translate media --translate-filename-only :: 只原地改名，支持 mp3/mp4/png 等任意文件
 vanitas.bat translate asmr.srt --preset asmr :: ASMR 字幕（8K Q4 / 6 行合流）
+vanitas.bat translate asmr.srt --preset asmr --env experimental :: 实验 ASMR 模板（不默认；仅 ASMR）
 vanitas.bat stop         :: 停止所有 llama-server
 ```
 
