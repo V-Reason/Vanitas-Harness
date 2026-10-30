@@ -112,7 +112,16 @@ Vanitas-Harness\
 │   ├── progress.py
 │   ├── prompts.py
 │   ├── render.py
-│   ├── translate.py
+│   ├── translate\
+│   │   ├── __init__.py         # 唯一门面：全量 re-export，兼容 `from vanitas.translate import X`
+│   │   ├── types.py            # 数据契约（dataclass / 预算 / 事件）
+│   │   ├── cleaner.py          # 确定性清洗与写回硬校验（0 Token）
+│   │   ├── format.py           # SRT/纯文本解析、分块、EOL 归一化
+│   │   ├── window.py           # 微批次 [#N] 协议与窗口错位熔断
+│   │   ├── entity.py           # 文档级实体倒排与锁定名
+│   │   ├── io.py               # 输入展开、输出规划、文件名遮罩/改名
+│   │   ├── engine.py           # 单段翻译驱动（上下文/预算/截断重译）
+│   │   └── pipeline.py         # 端到端串联（文件/字幕/审计/T1 预算）
 │   └── ui.py
 ├── tests\
 │   ├── benchmarks\

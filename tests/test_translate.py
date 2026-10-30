@@ -2951,8 +2951,10 @@ class QualityGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "a.srt"
             source.write_text(self.srt_text("はい"), encoding="utf-8")
+            # patch 必须指向定义模块：门面只做 re-export，无法拦截
+            # pipeline.translate_file 内部的全局查找。
             with mock.patch.object(
-                translate_module, "translate_srt", return_value=""
+                translate_module.pipeline, "translate_srt", return_value=""
             ) as patched:
                 translate_file(
                     ScriptedTranslationClient([]),
