@@ -413,23 +413,48 @@ class DynamicEntityEngine:
                 self.locked_translations[canonical] = locked
 
     def enforce_locks(self, zh_text: str) -> str:
-        """把中文译文里未翻译的日文专名收敛到已锁定译名。"""
+        """把中文译文里未翻译的日文专名收敛到已锁定译名。
+
+        两层防护，缺一不可：
+        1. 先把**已经是锁定译名**的片段用哨兵挡住——否则当锁定名本身包含
+           日文基名（梅地先生 ⊃ 梅地）时，正确的中文名会被再替换一次；
+        2. 每个实体只做一遍替换（正则交替、长变体优先）——逐个
+           ``str.replace`` 会让长变体替换出的中文名再次命中短变体，
+           得到「梅地先生先生」。
+        """
         if not zh_text or not self.locked_translations:
             return zh_text
         result = zh_text
-        for canonical, locked in sorted(
-            self.locked_translations.items(),
-            key=lambda item: len(item[0]),
-            reverse=True,
+        for index, (canonical, locked) in enumerate(
+            sorted(
+                self.locked_translations.items(),
+                key=lambda item: len(item[0]),
+                reverse=True,
+            )
         ):
+            if not locked:
+                continue
             variants = sorted(
-                self._variants.get(canonical, {canonical}),
+                (
+                    variant
+                    for variant in self._variants.get(canonical, {canonical})
+                    if variant
+                ),
                 key=len,
                 reverse=True,
             )
-            for variant in variants:
-                if variant and variant in result:
-                    result = result.replace(variant, locked)
+            if not variants:
+                continue
+            pattern = re.compile("|".join(re.escape(item) for item in variants))
+            # 哨兵用私用区字符 + 序号，正常译文不会出现。
+            marker = f"\ue000{index}\ue001"
+            masked = locked in result
+            if masked:
+                result = result.replace(locked, marker)
+            if pattern.search(result):
+                result = pattern.sub(lambda _match, value=locked: value, result)
+            if masked:
+                result = result.replace(marker, locked)
         return result
 
     def _add_example(

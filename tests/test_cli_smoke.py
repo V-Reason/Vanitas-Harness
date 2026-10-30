@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
 from vanitas import cli  # noqa: E402
 from vanitas.config import DEFAULT_THEME, load_config  # noqa: E402
 from vanitas.errors import ConfigError, GuardError  # noqa: E402
-from vanitas.translate import T1Budget, T1Event  # noqa: E402
+from vanitas.translate import T1Budget, T1Event, parse_srt  # noqa: E402
 from vanitas.ui import Palette  # noqa: E402
 
 ENV_KEYS = (
@@ -166,6 +166,40 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertIn("✗ 端口 4060 被 PID 1", err)
         self.assertNotIn("GUARD-CODE", err)
+
+    def test_translate_resume_skips_snapshot_cues(self) -> None:
+        """P5-F4：--resume 必须真的穿透到 translate_file（否则静默无效果）。"""
+        source = self.dir / "resume.srt"
+        source.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\nBye\n",
+            encoding="utf-8",
+        )
+        out_dir = self.dir / "out"
+        out_dir.mkdir()
+        snapshot = out_dir / "resume.zh.srt.part.srt"
+        snapshot.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\n断点译文\n", encoding="utf-8"
+        )
+        with clean_env():
+            with mock.patch.object(
+                cli, "_ensure_engine", return_value=(FakeClient(), 4060)
+            ):
+                code, _out, err = run(
+                    [
+                        "translate",
+                        str(source),
+                        "--out-dir",
+                        str(out_dir),
+                        "--resume",
+                    ]
+                )
+        self.assertEqual(code, 0, err)
+        target = out_dir / "resume.zh.srt"
+        blocks = parse_srt(target.read_text(encoding="utf-8"), "\n")
+        # 第 1 条来自快照（FakeClient 只会返回“译文”），第 2 条才是新译。
+        self.assertEqual([block.text for block, _ in blocks], ["断点译文", "译文"])
+        self.assertFalse(snapshot.is_file())
 
     def test_translate_with_fake_engine(self) -> None:
         source = self.dir / "sample.srt"
