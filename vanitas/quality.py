@@ -4,12 +4,15 @@
 翻译管线负责“怎么译”，这里只负责“译完怎么确定性地查/收敛”，避免两边
 互相引用。所有函数都是纯函数或无模型调用的状态机，不产生请求、不写盘。
 
-边界（P1/P2a）：
+边界（P1/P2a/T1）：
 - 重复检测只覆盖“不同原文却复用同一译文”的文档级复制，不判断语义对错；
 - 语域检测只按固定词表计数，不推断人物关系；
 - 术语表只替换 forbidden，不保证 preferred 一定出现，也不触发重译；
 - P2a 的四类语义审计都是“高置信窄规则”：源文与译文同时命中固定模式
-  才报，空源/空译直接放行；不做开放式语义判断，未命中仍交人工抽检。
+  才报，空源/空译直接放行；不做开放式语义判断，未命中仍交人工抽检；
+- T1 三个守卫同样只报不强制替换：short_duplicate 只认“短源文 + 长同译”，
+  address_term 只认闭集称谓，invented_tool 只认闭集道具词；是否重译由
+  translate.py 的 ASMR 门控与每文件预算决定。
 """
 
 from __future__ import annotations
@@ -312,12 +315,18 @@ class DuplicateIndex:
         source: str,
         translation: str,
         cue: int | str | None = None,
+        *,
+        strict: bool = False,
     ) -> DuplicateMatch | None:
         """返回与当前译文重复的历史条目；无命中返回 None。
 
         源文相似（同一句话的合法重复）不算复制；译文完全相同、相似度
         达到阈值或长句互相包含才命中。阈值、候选排序与并列规则与旧
         ``find()`` 完全一致，返回值保留登记时的 cue 类型。
+
+        ``strict=True`` 只认“规范化译文完全相同或相似度 ≥ translation_ratio”：
+        长共同前缀与互相包含两条窄规则不参与，供 T1 short_duplicate 使用
+        （其契约明确要求相同/≥0.85，不能被 <0.85 的窄规则带出命中）。
         """
         normalized = normalize_compare(translation)
         if len(normalized) < self.min_chars:
@@ -363,6 +372,8 @@ class DuplicateIndex:
                 >= self.translation_ratio
             ):
                 return DuplicateMatch(item.cue, item.source, item.translation)
+            if strict:
+                continue
             if previous in normalized or normalized in previous:
                 return DuplicateMatch(item.cue, item.source, item.translation)
             if (
@@ -373,6 +384,15 @@ class DuplicateIndex:
             ):
                 return DuplicateMatch(item.cue, item.source, item.translation)
         return None
+
+    def find_similar(
+        self,
+        source: str,
+        translation: str,
+        cue: int | str | None = None,
+    ) -> DuplicateMatch | None:
+        """严格相似查找：只认译文相同/≥ translation_ratio，供短重复守卫用。"""
+        return self.find_match(source, translation, cue, strict=True)
 
     def find(
         self,
@@ -433,7 +453,218 @@ def audit_duplicate(
     ]
 
 
-# 主客方向：只处理源文明确出现“客人/我们/触碰/禁止”四个条件的句子。
+# --------------------------------------------------------------------------- #
+# T1：ASMR 确定性守卫（只报不替换；重译/预算由 translate.py 统一管）
+# --------------------------------------------------------------------------- #
+
+# 三个 code 是 T1 的唯一闭集：translate.py 用它们做 ASMR 门控、每 cue 一次
+# 重译与每文件 5 次上限；新 code 必须同时进 candidate_ok.semantic_codes。
+ASMR_T1_CODES = frozenset(
+    {"short_duplicate", "address_term", "invented_tool"}
+)
+
+# short_duplicate：只抓“短源文却得到同一个长译文”的跨 cue 复用。
+# 较短源文 ≤8 字是 roadmap v2 §4 / B8 写死的边界；9 字的近义源文对
+# （17/9 字、相似 0.46）落在阈值外，必须 0 命中。
+SHORT_DUPLICATE_MAX_SOURCE_CHARS = 8
+
+# 纯拟声/叠词的常见汉字。只用于 T1 的反例放行，不参与翻译或替换。
+# 来源：提示词 sfx 分节列出的“沙沙/簌簌/咕噜/哧溜/嗯姆”等拟声词与
+# 中文叠词习惯；命中即视为“两个不同短源文同译”可能合法，不重译。
+ONOMATOPOEIA_CHARS = frozenset(
+    "沙唰哗滴嗒咚砰啪滋咕噜哼哈呵嘻嘿噗嗤哧溜嗯姆啊呀哦噢喔呜喵汪咩"
+    "嗷吼嗡嗖咻呼啦嘶嚓咔铛叮铃啵唧啾嘎呱嚯唔呃哇嘤啧咂嘘嚅喃哔哞"
+    "咿咝锵锒吱咯喳呖呶呲咧啸"
+)
+
+# 全假名 + 长音不一定都是拟声：コーヒー/ケーキ 是正常名词。只有带促音
+# 「ッ」或下列闭集里的呼吸/拟声长音才按拟声放行；不再用“任意全假名+ー”
+# 的宽条件，避免 short_duplicate 对正常片假名词漏报。
+KANA_ONO_EXEMPT = frozenset(
+    {
+        "じゅるー",
+        "ちゅるー",
+        "ぐちゅー",
+        "くちゅー",
+        "にゅるー",
+        "ぬるー",
+        "はぁ",
+        "ふぅ",
+        "ふー",
+        "はー",
+        "あーん",
+        "んっ",
+        "ちゅっ",
+        "チュッ",
+    }
+)
+
+# address_term：源文闭集 = 旦那様/ご主人様；只查译文是否误用“先生/老师”。
+# 不列“老公/主人/老爷”封闭译名，也不做 glossary/强制替换（B8 §1.8/§2.1）。
+ADDRESS_SOURCE_TERMS = ("旦那様", "ご主人様")
+ADDRESS_BAD_TRANSLATIONS = ("先生", "老师")
+
+# invented_tool：道具词闭集来自提示词 <asmr_domain_lexicon> 已有的圈内词。
+# provenance：生产模板 L37/L43（梵天/耳掻き/綿棒/タワシ）与 T2 staging
+# L29-30（梵天/耳掻き→掏耳勺/綿棒→棉签）；ホルホール 是 G0 dev 实测的
+# 采耳刷别名（源文有真实道具时不得误报为“臆造”）；耳ブラシ 是具体耳刷
+# 复合词，不能放宽成通用「ブラシ」（歯ブラシ/ヘアブラシ 会漏报）。
+TOOL_SOURCE_TERMS = (
+    "梵天",
+    "ぼんてん",
+    "耳掻き",
+    "耳かき",
+    "綿棒",
+    "タワシ",
+    "ホルホール",
+    "耳ブラシ",
+)
+TOOL_TRANSLATION_TERMS = ("梵天", "掏耳勺", "棉签", "采耳刷", "棕刷")
+
+KANA_CHAR_RE = re.compile(r"[\u3040-\u309f\u30a0-\u30ff]")
+
+
+def _is_kana_char(char: str) -> bool:
+    return bool(KANA_CHAR_RE.match(char))
+
+
+def is_onomatopoeia_or_reduplication(text: str) -> bool:
+    """判断文本是否“纯拟声/叠词”，供 short_duplicate 放行反例。
+
+    覆盖四类：
+    1. 短单元重复覆盖整串（沙沙、はむはむ、コショコショ、沙沙沙沙）；
+    2. 中文 ABB 叠词（软绵绵）；
+    3. 全部由常见拟声汉字组成（沙、哗、咕噜……）；
+    4. 全假名且带促音（ッ，如カリッ），或落在呼吸/长音拟声闭集
+       （はぁ/ふぅ/じゅるー……）。普通长音片假名词（コーヒー/ケーキ）
+       不在此列，避免 short_duplicate 漏报。
+    普通名词（ミルク、好き、だめ）不会被判为拟声。
+    """
+    compact = normalize_compare(text)
+    if len(compact) < 2:
+        return True
+    for unit_len in (1, 2, 3):
+        if len(compact) < unit_len * 2:
+            continue
+        if len(compact) % unit_len:
+            continue
+        unit = compact[:unit_len]
+        if unit * (len(compact) // unit_len) == compact:
+            return True
+    if len(compact) == 3 and compact[1] == compact[2]:
+        return True
+    if all(char in ONOMATOPOEIA_CHARS for char in compact):
+        return True
+    if all(_is_kana_char(char) or char == "ー" for char in compact):
+        if "ッ" in compact or compact in KANA_ONO_EXEMPT:
+            return True
+    return False
+
+
+def audit_short_duplicate(
+    source: str,
+    translation: str,
+    cue: int | str,
+    index: DuplicateIndex,
+    *,
+    max_source_chars: int = SHORT_DUPLICATE_MAX_SOURCE_CHARS,
+) -> list[AuditIssue]:
+    """两个短源文得到同一长译文时报告；调用方只做一次定点重译。
+
+    触发（AND）：译文规范化 ≥8 字且相同/≥0.85（由 ``DuplicateIndex(
+    min_chars=8, translation_ratio=0.85)`` + ``find_similar`` 保证）；较短
+    源文 ≤8 字；两侧源文不同（由索引的 source_ratio 保证）；源文/译文
+    均非纯拟声或叠词。近义源文对（17/9 字）因较短源文为 9 字而不命中。
+    """
+    if not str(source).strip() or not str(translation).strip():
+        return []
+    source_norm = normalize_compare(source)
+    if not source_norm:
+        return []
+    match = index.find_similar(source, translation, cue)
+    if match is None:
+        return []
+    previous_norm = normalize_compare(match.source)
+    if min(len(source_norm), len(previous_norm)) > max_source_chars:
+        return []
+    if (
+        is_onomatopoeia_or_reduplication(source)
+        or is_onomatopoeia_or_reduplication(match.source)
+        or is_onomatopoeia_or_reduplication(translation)
+    ):
+        return []
+    return [
+        AuditIssue(
+            code="short_duplicate",
+            cue=cue,
+            message=f"短句译文与第 {match.cue} 条重复，但原文不同",
+            hint=(
+                f"与第 {match.cue} 条短句译文重复；"
+                f"该条原文「{_audit_snippet(match.source, 16)}」，"
+                f"本条原文「{_audit_snippet(source, 16)}」；"
+                "按本条原文重译，禁止复用同一短译"
+            ),
+        )
+    ]
+
+
+def audit_address_term(
+    source: str, translation: str, cue: int | str
+) -> list[AuditIssue]:
+    """源含旦那様/ご主人様、译文却译成“先生/老师”时报告。
+
+    只做 audit-only：不写 glossary、不强制替换、不写死单一译名；hint 也
+    不列“老公/主人/老爷”封闭表。姓+様（南様/梅地様）与お客様不在闭集。
+    """
+    if not str(source).strip() or not str(translation).strip():
+        return []
+    if not any(term in source for term in ADDRESS_SOURCE_TERMS):
+        return []
+    if not any(term in translation for term in ADDRESS_BAD_TRANSLATIONS):
+        return []
+    return [
+        AuditIssue(
+            code="address_term",
+            cue=cue,
+            message="称谓被译成“先生/老师”",
+            hint="称谓按人物关系译，不译“先生/老师”，不写死单一译名",
+        )
+    ]
+
+
+def audit_invented_tool(
+    source: str,
+    translation: str,
+    cue: int | str,
+    nearby_sources: tuple[str, ...] = (),
+) -> list[AuditIssue]:
+    """译文出现道具词、但源文 ±3 cue 内都没有道具词时报告。
+
+    ``nearby_sources`` 是同一文件内当前 cue 前后各 3 条的其他源文（不含
+    当前条）；本函数会连同当前 ``source`` 一起查闭集。跨 cue 正确候选
+    （如 ±3 内有「綿棒で」）必须 0 命中；KU100/ASMR/NG/BGM 不在表内。
+    """
+    if not str(source).strip() or not str(translation).strip():
+        return []
+    used = [term for term in TOOL_TRANSLATION_TERMS if term in translation]
+    if not used:
+        return []
+    sources = (str(source), *(str(item) for item in nearby_sources))
+    if any(term in text for text in sources for term in TOOL_SOURCE_TERMS):
+        return []
+    return [
+        AuditIssue(
+            code="invented_tool",
+            cue=cue,
+            message=f"译文出现源文没有的道具词“{used[0]}”",
+            hint=(
+                "原文及前后 ±3 条都没有道具词；"
+                "不要凭场景补“掏耳勺/棉签/梵天”等道具，按原文直译"
+            ),
+        )
+    ]
+
+
 CUSTOMER_REVERSED_RE = re.compile(
     r"(?:我们|我)[^。！？]{0,10}(?:触碰|摸|碰|接触)[^。！？]{0,8}(?:客人|您)"
 )
@@ -665,17 +896,46 @@ def audit_translation(
     *,
     index: DuplicateIndex,
     profile: TranslationProfile,
+    short_index: DuplicateIndex | None = None,
+    window_index: DuplicateIndex | None = None,
+    nearby_sources: tuple[str, ...] = (),
+    asmr_guard: bool = False,
 ) -> list[AuditIssue]:
-    """按固定优先级汇总文档级与 P2a 语义审计；不调用模型。"""
-    return [
-        *audit_duplicate(source, translation, cue, index),
-        *audit_customer_direction(source, translation, cue),
-        *audit_quote_private(source, translation, cue),
-        *audit_negative_question(source, translation, cue),
-        *audit_first_person(source, translation, cue),
-        *audit_tag_question(source, translation, cue),
-        *audit_honorific(translation, profile, cue),
-    ]
+    """按固定优先级汇总文档级、P2a 与 T1 审计；不调用模型。
+
+    固定顺序：duplicate → short_duplicate → customer_direction →
+    quote_private → negative_question → first_person → tag_question →
+    address_term → invented_tool → honorific。T1 三个 code 只在
+    ``asmr_guard=True`` 时参与；``short_duplicate`` 需要调用方提供
+    每文件独立的 ``short_index``（min_chars=8 / translation_ratio=0.85），
+    合流批次还可传 ``window_index`` 覆盖当前窗口内已接受 cue；两者最多
+    报一条，避免同 cue 重复计费。
+    """
+    issues = [*audit_duplicate(source, translation, cue, index)]
+    if asmr_guard:
+        for candidate_index in (short_index, window_index):
+            if candidate_index is None:
+                continue
+            short_issues = audit_short_duplicate(
+                source, translation, cue, candidate_index
+            )
+            if short_issues:
+                issues.extend(short_issues)
+                break
+    issues.extend(audit_customer_direction(source, translation, cue))
+    issues.extend(audit_quote_private(source, translation, cue))
+    issues.extend(audit_negative_question(source, translation, cue))
+    issues.extend(audit_first_person(source, translation, cue))
+    issues.extend(audit_tag_question(source, translation, cue))
+    if asmr_guard:
+        issues.extend(audit_address_term(source, translation, cue))
+        issues.extend(
+            audit_invented_tool(
+                source, translation, cue, nearby_sources=nearby_sources
+            )
+        )
+    issues.extend(audit_honorific(translation, profile, cue))
+    return issues
 
 
 def audit_honorific(
