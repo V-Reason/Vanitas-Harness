@@ -52,6 +52,12 @@ from .cleaner import (
     sanitize_translation_output,
     validate_cue_translation,
 )
+from .critique import (
+    build_critique_input,
+    execute_critique_repair,
+    parse_critique_response,
+    triage_cue_risk,
+)
 from .engine import TranslationEngine, build_chat_for, extract_content, make_engine_chat
 from .entity import (
     ENTITY_CONTEXT_CHARS,
@@ -143,6 +149,8 @@ from .pipeline import (
 from .types import (
     ASR_HALLUCINATION_PATTERNS,
     BOM,
+    CritiqueBudget,
+    CritiqueEvent,
     NameMask,
     NameRename,
     NameTarget,
@@ -175,10 +183,14 @@ from .window import (
 
 __all__ = [
     # types
-    "ASR_HALLUCINATION_PATTERNS", "BOM", "NameMask", "NameRename", "NameTarget",
+    "ASR_HALLUCINATION_PATTERNS", "BOM", "CritiqueBudget", "CritiqueEvent",
+    "NameMask", "NameRename", "NameTarget",
     "NameTranslation", "Subtitle", "T1Budget", "T1Event", "TranslationFailure",
     "TranslationOptions", "TranslationOutcome", "TranslationPlan",
     "TranslationSource",
+    # critique
+    "build_critique_input", "execute_critique_repair",
+    "parse_critique_response", "triage_cue_risk",
     # cleaner
     "ARTIFACT_LATIN_RE", "BLANK_LINE_RUN_RE", "FENCE_RE", "LATIN_ALLOW",
     "LATIN_TOKEN_RE", "LEADING_INVALID_PUNCT_RE", "QUOTE_CHARS", "QUOTE_PAIRS",

@@ -73,6 +73,7 @@ class TranslationEngine:
         task_template: str = "translate",
     ) -> None:
         self._client = client
+        self._prompt_dir = prompt_dir
         self._template = prompts.load_task(prompt_dir, task_template)
         self._task_template = task_template
         self._system = system_text
@@ -82,6 +83,9 @@ class TranslationEngine:
         self._entity_engine: DynamicEntityEngine | None = None
         self._lookahead = ""
         self._on_stat = on_stat
+        # P3 复审模板按需加载：默认关闭复审时不读文件，也不影响既有配置目录
+        # （只带生产模板的隔离目录仍能正常跑翻译）。
+        self._critique_template: str | None = None
         # 术语表只在 ASMR 任务加载（生产/实验模板都算）；其余任务保持空表。
         self._glossary = Glossary()
         if prompts.is_asmr_task(task_template):
@@ -169,6 +173,39 @@ class TranslationEngine:
     def clear_lookahead(self) -> None:
         """清除后文参考；与 ``set_lookahead`` 成对使用。"""
         self._lookahead = ""
+
+    def critique(self, text: str, *, max_tokens: int = 96) -> str:
+        """P3 复审通道：独立模板、独立 token 预算，**绝不写滑动上下文**。
+
+        与 ``translate()`` 的关键区别：这里不经过 ``_translate_once``，
+        因此不 append ``_history``、不做上下文预算裁剪、也不被截断二分
+        重译接管。模型输出为空或触顶时抛 ``EngineError``，由调用方降级
+        保留初译。
+        """
+        template = self._critique_text()
+        prompt = prompts.render(template, {"input": text})
+        messages: list[dict] = []
+        if self._system.strip():
+            messages.append({"role": "system", "content": self._system})
+        messages.append({"role": "user", "content": prompt})
+        result = self._client.chat(
+            messages,
+            max_tokens=max_tokens,
+            temperature=self._options.temperature,
+        )
+        choices = result.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            if str(choices[0].get("finish_reason") or "") == "length":
+                raise OutputTruncated("复审输出达到长度上限，已保留初译")
+        return extract_content(result)
+
+    def _critique_text(self) -> str:
+        """按需加载复审模板并缓存；与翻译模板分开，互不污染。"""
+        if self._critique_template is None:
+            self._critique_template = prompts.load_task(
+                self._prompt_dir, "translate_critique"
+            )
+        return self._critique_template
 
     def translate_filename(self, filename: str) -> str:
         """用翻译模型把文件名主体译成中文；不写入正文上下文。"""

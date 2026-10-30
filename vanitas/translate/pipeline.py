@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import warnings
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Collection
 
 from .. import prompts
 from .cleaner import (
@@ -21,6 +21,7 @@ from .cleaner import (
     validate_cue_translation,
 )
 from ..cue_boundary import JoinRule, transfer_texts
+from .critique import execute_critique_repair, triage_cue_risk
 from .entity import DynamicEntityEngine
 from ..errors import EngineError, TranslateError
 from .format import chunk_text, parse_srt, rebuild_srt, split_prose
@@ -40,6 +41,7 @@ from ..quality import (
 from .types import (
     ASR_HALLUCINATION_PATTERNS,
     BOM,
+    CritiqueBudget,
     Subtitle,
     T1Budget,
     TranslationFailure,
@@ -175,8 +177,13 @@ def translate_srt(
     asmr_guard: bool = False,
     t1_budget: T1Budget | None = None,
     file_cues: int | None = None,
+    critique_budget: CritiqueBudget | None = None,
 ) -> str:
-    """翻译 SRT；ASMR 守卫开启时必须传入调用方共享的 ``t1_budget``。"""
+    """翻译 SRT；ASMR 守卫开启时必须传入调用方共享的 ``t1_budget``。
+
+    ``critique_budget`` 为空表示**不做 P3 复审**（默认）；显式传入
+    ``CritiqueBudget`` 才会对高危 cue 追加一次隔离复审请求。
+    """
     if asmr_guard and t1_budget is None:
         # ASMR 预算必须由调用方跨文件共享，禁止按文件静默新建。
         raise TranslateError(
@@ -229,6 +236,9 @@ def translate_srt(
         t1_budget.begin_file(source, file_cues)
     else:
         t1_budget.begin_file(source)
+    # P3 复审默认关闭：只有调用方显式传入 CritiqueBudget 才建预算、才发复审请求。
+    if critique_budget is not None:
+        critique_budget.begin_file(source, file_cues)
     engine_template = getattr(chat, "task_template", None)
     asmr_enabled = bool(asmr_guard) and prompts.is_asmr_task(engine_template)
     short_index = (
@@ -625,6 +635,59 @@ def translate_srt(
             return None
         return [served[subtitle.index] for _b, subtitle in window]
 
+    def apply_critique(
+        window: list[tuple[int, Subtitle]],
+        staging: list[str],
+        base: tuple[tuple[str, str], ...],
+    ) -> None:
+        """P3：对命中的高危 cue 各做一次隔离复审，原地改写 ``staging``。
+
+        复审发生在 ``audit_retry`` 之前：先修语义（主客/否定/归属），再由
+        确定性守卫做最后验收，避免复审润色时又踩术语表或自造道具。
+        """
+        if critique_budget is None:
+            return
+        context = tuple(base[-2:])
+        for position, (_block_index, subtitle) in enumerate(window):
+            source_text = subtitle.text
+            cue = window_cues[position]
+            nearby = nearby_sources_for(cue)
+            risk_codes = triage_cue_risk(
+                source_text,
+                staging[position],
+                nearby_sources=nearby,
+                duplicate_index=index,
+            )
+            if not risk_codes:
+                continue
+
+            def accept(
+                candidate_source: str,
+                original: str,
+                candidate: str,
+                trigger: Collection[str],
+            ) -> bool:
+                return candidate_ok(
+                    candidate_source,
+                    original,
+                    candidate,
+                    cue,
+                    set(trigger),
+                    nearby,
+                )
+
+            staging[position] = execute_critique_repair(
+                chat,
+                cue=cue,
+                source=source_text,
+                draft=staging[position],
+                context=context,
+                risk_codes=risk_codes,
+                critique_budget=critique_budget,
+                finalize=finalize,
+                accept=accept,
+            )
+
     try:
         windows: list[list[tuple[int, Subtitle]]] = []
         current: list[tuple[int, Subtitle]] = []
@@ -707,6 +770,8 @@ def translate_srt(
                         # 灾难性结构损坏，或损坏项单句补救失败：整窗熔断回退。
                         fallback = True
                     else:
+                        # P3：先做定向语义复审（默认关闭），再做确定性审计。
+                        apply_critique(window, staging, base_history)
                         # 审计+定点重译：每个问题 cue 最多一次，且不写 failure。
                         # 窗口内已接受项进 window_index，使同窗短重复也能在
                         # 本窗命中；窗口最终接受后才并入全局 short_index。
@@ -906,8 +971,13 @@ def translate_file(
     asmr_guard: bool = False,
     t1_budget: T1Budget | None = None,
     file_cues: int | None = None,
+    critique_budget: CritiqueBudget | None = None,
 ) -> TranslationOutcome:
-    """翻译单文件；ASMR 守卫开启时必须传入跨文件共享的 ``t1_budget``。"""
+    """翻译单文件；ASMR 守卫开启时必须传入跨文件共享的 ``t1_budget``。
+
+    ``critique_budget`` 为空表示不做 P3 复审；传入后由 ``translate_srt``
+    按文件调用 ``begin_file`` 重置单文件配额。
+    """
     source = Path(source)
     if not source.is_file():
         raise TranslateError(f"文件不存在：{source}")
@@ -946,6 +1016,7 @@ def translate_file(
             asmr_guard=asmr_guard,
             t1_budget=t1_budget,
             file_cues=file_cues,
+            critique_budget=critique_budget,
         )
     else:
         segments = sum(1 for paragraph, _ in split_prose(text) if paragraph.strip())
@@ -977,6 +1048,11 @@ def translate_file(
         segments=segments,
         failures=failures,
         t1_events=tuple(t1_budget.file_events),
+        critique_events=(
+            tuple(critique_budget.file_events)
+            if critique_budget is not None
+            else ()
+        ),
     )
     if failures:
         # 输出已写出（失败段保留原文），由调用方汇总并返回非零

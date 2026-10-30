@@ -36,6 +36,7 @@ class PromptTests(unittest.TestCase):
                 "translate",
                 "translate_asmr",
                 "translate_asmr_experimental",
+                "translate_critique",
             ],
         )
         for name in prompts.task_names(self.prompt_dir):
