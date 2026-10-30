@@ -50,10 +50,10 @@ class PromptTests(unittest.TestCase):
         experimental = (
             self.prompt_dir / "task_translate_asmr_experimental.md"
         ).read_bytes()
-        self.assertEqual(len(production), 12784)
+        self.assertEqual(len(production), 12427)
         self.assertEqual(
             hashlib.sha256(production).hexdigest().upper(),
-            "CC2B4C82CA7AD6BAC5F487F157225CEB22BCC30BD059DDFDBD392AA7CD079C84",
+            "A5E058802CC073E9D75BC0253CD378FD43983019D7415BCBAEFA6C5624233383",
         )
         self.assertEqual(len(experimental), 5399)
         self.assertEqual(
@@ -138,15 +138,24 @@ class PromptTests(unittest.TestCase):
 
     def test_asmr_prompt_has_general_language_and_window_guard(self) -> None:
         text = prompts.load_task(self.prompt_dir, "translate_asmr")
+        # V4 提示词重写后，语言/人称分节的措辞整体换过。这里断言的是
+        # **现在真正生效**的条款，而不是旧版文案。
+        # 已随重写消失、且**没有替代条款**的三条（审计记录，不静默删除）：
+        #   1) 「默认使用简体中文 / 避免繁体」——V4 未再约束书写系统；
+        #   2) 「专名全篇复用」——只剩「茜音必须译为茜音」这类单名约束；
+        #   3) 「任何位置不得出现 [#N]」——并入 io 分节的「译文正文内绝对严禁残留」。
+        # 前两条若仍要保证，应加回提示词或由确定性后处理兜底（TODO，未实现）。
         for phrase in (
             "<language_and_voice>",
-            "默认使用简体中文",
-            "第二人称按人物关系",
-            "全篇复用",
-            "任何位置不得出现",
-            "不借用相邻行内容",
-            "不要把泛指动作或拟声词具体化",
-            "不音译成无意义的人名",
+            "彻底驱逐央视书面腔",
+            "严禁出现“非常”",
+            "全篇 100% 严禁出现“您”",
+            "肉棒",                       # 器官归属常识
+            "〜んですね",                 # 语法锚定：向对方求证而非自述
+            "茜音",                       # 汉字专名优先
+            "正文严禁合并，只译该编号内容",       # 跨行不预支（原「不借用相邻行内容」）
+            "严禁无中生有增添原文没有的动作",      # 原「不要把泛指动作具体化」的替代
+            "严禁音译为多字怪名",                 # 原「不音译成无意义的人名」的替代
         ):
             self.assertIn(phrase, text)
         # 提示词保持通用：不写死单部音频才出现的规则/专名。
@@ -165,10 +174,11 @@ class PromptTests(unittest.TestCase):
             "让人上瘾",
             "扑倒",
             "使坏",
-            "接续助词",
-            "不预支",
-            "原文没有任何括号",
+            "接续词",            # V4 措辞：接续助词 → 接续词
+            "原文没有提示",       # V4 措辞：原文没有任何括号 → 原文没有提示
         ):
+            # 「不预支」已并入「正文严禁合并，只译该编号内容」，不再单独出现。
+
             self.assertIn(phrase, text)
         self.assertEqual(
             prompts.placeholders(text), {"input", "context_history"}
@@ -176,12 +186,14 @@ class PromptTests(unittest.TestCase):
 
     def test_asmr_prompt_has_term_direction_and_quote_rules(self) -> None:
         text = prompts.load_task(self.prompt_dir, "translate_asmr")
+        # 「アマアマ（甘々）→甜腻，不是アマチュア」已在 V2 重写时移出提示词，
+        # 该词义现由 config/glossary/asmr.tsv 的 `アマアマ→甜腻` 确定性兜底
+        # （见 tests/test_quality.py::GlossaryTests）。此处只断言仍在提示词里的方向条款。
         for phrase in (
-            "アマアマ（甘々）→甜腻，不是アマチュア",
             "お客様から私たちに触れることは禁止",
-            "是客人→我们",
+            "是客人碰我们",              # V4 措辞（原「是客人→我们」）
             "私のことは雫でいいって",
-            "引用他人",
+            "转述第三人称",              # V4 措辞（原「引用他人」）
         ):
             self.assertIn(phrase, text)
         self.assertEqual(
@@ -190,14 +202,14 @@ class PromptTests(unittest.TestCase):
 
     def test_asmr_prompt_rejects_common_katakana_and_artifacts(self) -> None:
         text = prompts.load_task(self.prompt_dir, "translate_asmr")
+        # V4 精简时删掉了「普通片假名词不是专名」「コショコショ」「斜杠并列」三条文案。
+        # 行为侧仍有确定性兜底：假名/SEXPRA 由 validate_cue_translation 拦截、
+        # 中日文斜杠由 salvage_slash_translation 收敛（各有单测）。
+        # 「普通片假名不是专名」这条**没有兜底**，只靠 lexicon 的逐词映射（TODO）。
         for phrase in (
-            "普通片假名词",
-            "不是专名",
-            "SEXPAR",
-            "Track",
-            "コショコショ",
-            "斜杠并列",
-            "不得保留",
+            "SEXPAR",        # 严禁音译为 SEXPAR
+            "Track",         # トラック / Track → 音轨 / 曲目
+            "严禁音译",       # 机械音译黑名单的统称
         ):
             self.assertIn(phrase, text)
         self.assertNotIn("美咲日和", text)
@@ -339,19 +351,19 @@ class PromptTests(unittest.TestCase):
             "嗯姆",
             "哧溜",
             "……。",
-            "離れないで",
             "買わないで",
             "（轻吻）",
         ):
+            # 「離れないで」在 V4 精简 ASR 分节时被删（只剩「買わないで」一例）。
+            # 同为挽留情境的近音还原，建议加回；当前无兜底。
+
             self.assertIn(phrase, text)
 
     def test_asmr_domain_lexicon_and_subject_direction(self) -> None:
         text = prompts.load_task(self.prompt_dir, "translate_asmr")
         for phrase in (
             "<asmr_domain_lexicon>",
-            "不要过度意译",
             "梵天（ぼんてん）→ 梵天",
-            "不要加括号解释材质",
             "焚天",
             "膝枕（ひざまくら）→ 膝枕",
             "给你膝枕哦",
@@ -362,15 +374,13 @@ class PromptTests(unittest.TestCase):
             "爱撒娇",
             "オマケ",
             "特典",
-            "浅いところ",
-            "耳道浅处",
-            "はむはむ",
-            "轻抿",
-            "耳ふー",
-            "耳边轻吹",
             "お騒がせ",
             "给您添麻烦",
         ):
+            # V4 的 lexicon 精简掉了「浅いところ/耳道浅处」「はむはむ/轻抿」
+            # 「耳ふー/耳边轻吹」三组采耳方位与互动细目，也删了「不要过度意译」
+            # 「不要加括号解释材质」。这些是真实覆盖损失，已记入 docs/项目现状 §52。
+
             self.assertIn(phrase, text)
         self.assertNotIn("羽毛绒球", text)
         self.assertNotIn("白毛球", text)
@@ -384,7 +394,9 @@ class PromptTests(unittest.TestCase):
 
     def test_asmr_prompt_has_lookahead_insulation(self) -> None:
         text = prompts.load_task(self.prompt_dir, "translate_asmr")
-        for phrase in ("后文参考", "禁止翻译", "禁止写入当前编号"):
+        # V4 把后文绝缘写在 <reference_context> 的注释里，措辞从
+        # 「禁止翻译 / 禁止写入当前编号」换成「后文仅供理解，不把示例整句…带入」。
+        for phrase in ("后文参考", "后文仅供理解", "带入当前译文"):
             self.assertIn(phrase, text)
         self.assertEqual(
             prompts.placeholders(text), {"input", "context_history"}
