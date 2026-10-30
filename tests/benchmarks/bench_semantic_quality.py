@@ -787,6 +787,8 @@ def render_repeat_summary(report: RepeatReport) -> str:
 def repeat_payload(report: RepeatReport) -> dict[str, Any]:
     return {
         "n": report.repeat,
+        # 顶层 categories/cues 描述的是第 1 轮明细（与控制台看板同源）。
+        "detail_run": 1,
         "mean_rate": report.mean_rate,
         "std_rate": report.std_rate,
         "runs": [
@@ -1022,13 +1024,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         item.model = model_id
         item.profile = profile_key
         item.port = port
-    report = repeated.reports[-1]
+    # 明细（控制台看板 + JSON 的 categories/cues）必须指向**同一轮**：否则
+    # 屏幕上是第 1 轮、JSON 是第 N 轮，同为 65 分却分区分布不同，无法对账。
+    report = repeated.reports[0]
     print(render_repeat_summary(repeated))
     if args.repeat > 1:
         print("下方为第 1 轮明细看板（均值以多轮汇总为准）")
-        print(render_dashboard(repeated.reports[0]))
-    else:
-        print(render_dashboard(report))
+    print(render_dashboard(report))
 
     out_path = args.out
     if out_path is None:
@@ -1038,7 +1040,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         payload = report_payload(report)
         if args.repeat > 1:
-            # 单轮明细仍写 `cues`；多轮指标另开 `repeat` 段，不混进 totals。
+            # 单轮明细仍写 `cues`（第 1 轮，与看板一致）；多轮指标另开
+            # `repeat` 段，不混进 totals。
             payload["repeat"] = repeat_payload(repeated)
         out_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
