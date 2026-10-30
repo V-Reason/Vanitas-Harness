@@ -12,9 +12,11 @@ import re
 import time
 import unicodedata
 import uuid
+import warnings
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
+from math import ceil
 from pathlib import Path
 from typing import Callable
 
@@ -30,6 +32,7 @@ from .metrics import (
     translation_budget,
 )
 from .quality import (
+    ASMR_T1_CODES,
     DuplicateIndex,
     Glossary,
     TranslationProfile,
@@ -51,6 +54,9 @@ ASR_HALLUCINATION_PATTERNS = re.compile(
     r"(?:ご視聴ありがとうございました|チャンネル登録|高評価|ベルマーク|Thank you for watching|Please subscribe|Sous-titres)",
     re.IGNORECASE,
 )
+# T1 预算按候选级：整包最多 5 次、单文件最多 2 次（514 口径 5/514=0.97%）；
+# 由 CLI 创建一个 T1Budget 跨文件共享，translate_srt 每次文件 begin_file。
+T1_NEARBY_RADIUS = 3
 BOM = b"\xef\xbb\xbf"
 FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)\n```$", re.DOTALL)
 QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’", "「": "」", "『": "』"}
@@ -145,12 +151,100 @@ class TranslationFailure:
     reason: str
 
 
+@dataclass(frozen=True)
+class T1Event:
+    """一条 T1 守卫命中记录；P4 用 (source, cue) join 评委结果。"""
+
+    cue: int | str
+    code: str
+    outcome: str  # accepted / rejected / error / budget
+    detail: str = ""
+    source: str = ""
+
+
+@dataclass
+class T1Budget:
+    """候选级 T1 重译预算：整包 max_total，单文件 per_file。
+
+    由 CLI 在候选开始时创建一个对象并跨文件复用；``translate_srt`` 每次
+    文件开始调用 ``begin_file(source)`` 重置单文件计数与来源，``total``
+    保留整包计数。``file_events`` 只保留当前文件的事件，供
+    ``TranslationOutcome`` 回传；事件带 ``source`` 以区分同号 cue。
+    """
+
+    max_total: int = 5
+    per_file: int = 2
+    total: int = 0
+    file_total: int = 0
+    file_events: list[T1Event] = field(default_factory=list)
+    current_source: str = ""
+
+    @classmethod
+    def for_corpus(cls, total_cues: int | None) -> "T1Budget":
+        """按整包非空 cue 数缩放整包预算；未知/非正数回退 5/514 默认值。
+
+        514 → round(5.14)=5（保持预注册 5/514）；1404 → round(14.04)=14。
+        """
+        try:
+            cues = int(total_cues) if total_cues is not None else 0
+        except (TypeError, ValueError):
+            cues = 0
+        if cues <= 0:
+            return cls()
+        return cls(max_total=max(5, round(cues * 0.01)))
+
+    def begin_file(
+        self, source: str = "", file_cues: int | None = None
+    ) -> None:
+        """重置单文件计数；file_cues 已知时按 1% 缩放 per_file。
+
+        file_cues=712 → ceil(7.12)=8；149/51 → max(2, ceil(…))=2。
+        未知/非正数保持旧默认 per_file=2。
+        """
+        self.file_total = 0
+        self.file_events.clear()
+        self.current_source = str(source)
+        try:
+            cues = int(file_cues) if file_cues is not None else 0
+        except (TypeError, ValueError):
+            cues = 0
+        self.per_file = max(2, ceil(cues * 0.01)) if cues > 0 else 2
+
+    def can_retry(self) -> bool:
+        return self.total < max(0, int(self.max_total)) and self.file_total < max(
+            0, int(self.per_file)
+        )
+
+    def record_attempt(self) -> None:
+        self.total += 1
+        self.file_total += 1
+
+    def record_event(
+        self,
+        cue: int | str,
+        codes: set[str] | frozenset[str],
+        outcome: str,
+        detail: str = "",
+    ) -> None:
+        for code in sorted(codes):
+            self.file_events.append(
+                T1Event(
+                    cue=cue,
+                    code=code,
+                    outcome=outcome,
+                    detail=detail,
+                    source=self.current_source,
+                )
+            )
+
+
 @dataclass
 class TranslationOutcome:
     source: Path
     output: Path | None
     segments: int
     failures: list[TranslationFailure] = field(default_factory=list)
+    t1_events: tuple[T1Event, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -980,6 +1074,7 @@ class TranslationEngine:
     ) -> None:
         self._client = client
         self._template = prompts.load_task(prompt_dir, task_template)
+        self._task_template = task_template
         self._system = system_text
         self._options = options
         window = max(0, int(self._options.context_window))
@@ -1004,6 +1099,11 @@ class TranslationEngine:
     def glossary(self) -> Glossary:
         """只读术语表；translate_srt 通过它做 cue 级确定性后处理。"""
         return self._glossary
+
+    @property
+    def task_template(self) -> str:
+        """只读任务模板名；T1 守卫用它确认只对 translate_asmr 生效。"""
+        return self._task_template
 
     @property
     def join_rules(self) -> tuple[JoinRule, ...]:
@@ -1725,7 +1825,17 @@ def translate_srt(
     max_window_chars: int = 250,
     join_rules: tuple[JoinRule, ...] = (),
     lookahead_cues: int = 0,
+    asmr_guard: bool = False,
+    t1_budget: T1Budget | None = None,
+    file_cues: int | None = None,
 ) -> str:
+    """翻译 SRT；ASMR 守卫开启时必须传入调用方共享的 ``t1_budget``。"""
+    if asmr_guard and t1_budget is None:
+        # ASMR 预算必须由调用方跨文件共享，禁止按文件静默新建。
+        raise TranslateError(
+            "ASMR 守卫需要调用方显式传入共享 T1Budget；"
+            "不要按文件静默新建预算"
+        )
     blocks = parse_srt(text, eol)
     valid_items = [
         (index, block)
@@ -1765,6 +1875,20 @@ def translate_srt(
         pronoun="你" if register == "intimate" else "auto",
     )
     index = DuplicateIndex()
+    # T1 只对 ASMR 模板启用：显式 asmr_guard=True 且引擎模板精确为
+    # translate_asmr；没有 task_template 属性的 duck-typed chat 不启用。
+    t1_budget = t1_budget if t1_budget is not None else T1Budget()
+    if asmr_guard:
+        t1_budget.begin_file(source, file_cues)
+    else:
+        t1_budget.begin_file(source)
+    engine_template = getattr(chat, "task_template", None)
+    asmr_enabled = bool(asmr_guard) and engine_template == "translate_asmr"
+    short_index = (
+        DuplicateIndex(min_chars=8, translation_ratio=0.85)
+        if asmr_enabled
+        else None
+    )
     glossary = getattr(chat, "glossary", None)
     snapshot_history = getattr(chat, "history_snapshot", None)
     reset_history = getattr(chat, "reset_history", None)
@@ -1803,13 +1927,44 @@ def translate_srt(
         elif callable(reset_history):
             reset_history()
 
-    def audit(source_text: str, translation: str, cue: int) -> list:
+    # invented_tool 的 ±3 cue 视野：按文档原始 cue 顺序建表（ASR 幻觉置空
+    # 的 cue 仍占位，避免把距离算近）。nearby 不含当前 cue，当前源文由
+    # audit_invented_tool 自己查。
+    all_cues = [(cue_of(subtitle), subtitle.text) for _i, subtitle in valid_items]
+    cue_positions = {
+        cue: position for position, (cue, _text) in enumerate(all_cues)
+    }
+
+    def nearby_sources_for(cue: int) -> tuple[str, ...]:
+        position = cue_positions.get(cue)
+        if position is None:
+            return ()
+        start = max(0, position - T1_NEARBY_RADIUS)
+        end = min(len(all_cues), position + T1_NEARBY_RADIUS + 1)
+        window = all_cues[start:end]
+        return tuple(
+            text
+            for offset, (_cue, text) in enumerate(window, start=start)
+            if offset != position
+        )
+
+    def audit(
+        source_text: str,
+        translation: str,
+        cue: int,
+        nearby_sources: tuple[str, ...] = (),
+        window_index: DuplicateIndex | None = None,
+    ) -> list:
         return audit_translation(
             source_text,
             translation,
             cue,
             index=index,
             profile=profile,
+            short_index=short_index,
+            window_index=window_index,
+            nearby_sources=nearby_sources,
+            asmr_guard=asmr_enabled,
         )
 
     def candidate_ok(
@@ -1818,6 +1973,8 @@ def translate_srt(
         candidate: str,
         cue: int,
         trigger_codes: set[str],
+        nearby_sources: tuple[str, ...] = (),
+        window_index: DuplicateIndex | None = None,
     ) -> bool:
         """审计重译候选的统一验收：硬校验、长度/换行与残余问题。"""
         if validate_cue_translation(candidate) is not None:
@@ -1830,20 +1987,29 @@ def translate_srt(
         sn = normalize_compare(source_text)
         if len(cn) > max(12, int(1.6 * len(sn))):
             return False
-        # 标签问/引用/主客方向类问题本来就会显著改变句长，不做原文长度
-        # 比例限制；其余场景防止“修掉一个问题却扩写成另一句”。
+        # 标签问/引用/主客方向与 T1 守卫本来就会显著改变句长（短重复重译
+        # 可能远短于原译），不做原文长度比例限制；其余场景防止“修掉一个
+        # 问题却扩写成另一句”。
         semantic_codes = {
             "tag_question",
             "quote_private",
             "customer_direction",
             "first_person",
+            *ASMR_T1_CODES,
         }
         if not (trigger_codes & semantic_codes):
             on = normalize_compare(original)
             if len(on) >= 6 and not (0.5 <= len(cn) / len(on) <= 3.0):
                 return False
-        codes = {issue.code for issue in audit(source_text, candidate, cue)}
-        if codes & (set(trigger_codes) | {"duplicate_translation"}):
+        codes = {
+            issue.code
+            for issue in audit(
+                source_text, candidate, cue, nearby_sources, window_index
+            )
+        }
+        if codes & (
+            set(trigger_codes) | {"duplicate_translation"} | ASMR_T1_CODES
+        ):
             return False
         return True
 
@@ -1869,6 +2035,118 @@ def translate_srt(
             return None
         finally:
             restore(base)
+
+    t1_budget_warned = False
+
+    def warn_t1(
+        cue: int, trigger_codes: set[str], reason: str
+    ) -> None:
+        """T1 重译失败/候选被拒时写 RuntimeWarning，不写 failure。"""
+        if not asmr_enabled:
+            return
+        t1_codes = trigger_codes & ASMR_T1_CODES
+        if not t1_codes:
+            return
+        names = "/".join(sorted(t1_codes))
+        warnings.warn(
+            f"ASMR 守卫 {names} 在 cue {cue} 命中后{reason}，保留原译",
+            RuntimeWarning,
+            stacklevel=4,
+        )
+
+    def limit_t1_issues(cue: int, issues: list) -> list:
+        """候选级 T1 预算耗尽后只保留非 T1 问题，避免继续产生调用。"""
+        nonlocal t1_budget_warned
+        if not asmr_enabled:
+            return issues
+        t1_codes = {
+            issue.code for issue in issues if issue.code in ASMR_T1_CODES
+        }
+        if not t1_codes:
+            return issues
+        if t1_budget.can_retry():
+            return issues
+        scope = (
+            "per_file"
+            if t1_budget.file_total >= t1_budget.per_file
+            else "total"
+        )
+        t1_budget.record_event(cue, t1_codes, "budget", scope)
+        if not t1_budget_warned:
+            warnings.warn(
+                "ASMR 守卫达到候选级预算"
+                f"（整包 {t1_budget.max_total} / 单文件 {t1_budget.per_file}）"
+                f"，cue {cue} 起后续命中保留原译",
+                RuntimeWarning,
+                stacklevel=4,
+            )
+            t1_budget_warned = True
+        return [
+            issue for issue in issues if issue.code not in ASMR_T1_CODES
+        ]
+
+    def audit_retry(
+        subtitle: Subtitle,
+        source_text: str,
+        current_text: str,
+        cue: int,
+        entity: DynamicEntityEngine | None,
+        base: tuple[tuple[str, str], ...],
+        window_index: DuplicateIndex | None = None,
+    ) -> str:
+        """命中审计时做且仅做一次定点重译；失败/拒绝保留原译并告警。"""
+        nearby = nearby_sources_for(cue)
+        issues = audit(
+            source_text, current_text, cue, nearby, window_index
+        )
+        if not issues:
+            return current_text
+        issues = limit_t1_issues(cue, issues)
+        if not issues:
+            return current_text
+        trigger_codes = {issue.code for issue in issues}
+        t1_codes = (
+            trigger_codes & ASMR_T1_CODES if asmr_enabled else set()
+        )
+        if t1_codes:
+            t1_budget.record_attempt()
+        retry = retry_for_audit(
+            subtitle, source_text, combine_hints(issues), base
+        )
+        if retry is None:
+            if t1_codes:
+                t1_budget.record_event(
+                    cue, t1_codes, "error", "retry_failed"
+                )
+            warn_t1(cue, trigger_codes, "重译失败")
+            return current_text
+        candidate = finalize(retry, source_text, entity)
+        if candidate_ok(
+            source_text,
+            current_text,
+            candidate,
+            cue,
+            trigger_codes,
+            nearby,
+            window_index,
+        ):
+            if t1_codes:
+                t1_budget.record_event(
+                    cue, t1_codes, "accepted", "retranslated"
+                )
+            return candidate
+        if t1_codes:
+            t1_budget.record_event(
+                cue, t1_codes, "rejected", "candidate_rejected"
+            )
+        warn_t1(cue, trigger_codes, "候选未通过")
+        return current_text
+
+    def add_indexes(cue: int, source_text: str, translation: str) -> None:
+        """只登记最终接受的译文；short_index 仅 ASMR 门控开启时存在。"""
+        index.add(cue, source_text, translation)
+        if short_index is not None:
+            short_index.add(cue, source_text, translation)
 
     if window_size <= 1:
         clear_entity = getattr(chat, "set_entity_engine", None)
@@ -1910,28 +2188,12 @@ def translate_srt(
                         )
                     )
                 else:
-                    issues = audit(source_text, result, cue)
-                    if issues:
-                        trigger_codes = {issue.code for issue in issues}
-                        retry = retry_for_audit(
-                            subtitle,
-                            source_text,
-                            combine_hints(issues),
-                            base,
-                        )
-                        if retry is not None:
-                            candidate = finalize(retry, source_text)
-                            if candidate_ok(
-                                source_text,
-                                result,
-                                candidate,
-                                cue,
-                                trigger_codes,
-                            ):
-                                result = candidate
+                    result = audit_retry(
+                        subtitle, source_text, result, cue, None, base
+                    )
                     subtitle.text = result
                     accepted_text = result
-                    index.add(cue, source_text, result)
+                    add_indexes(cue, source_text, result)
             # 失败时保留原文，并把失败的调用从滑动上下文里剔除。
             if accepted_text:
                 restore(base + ((source_text, accepted_text),))
@@ -2051,37 +2313,33 @@ def translate_srt(
                             fallback = True
                         else:
                             # 审计+定点重译：每个问题 cue 最多一次，且不写 failure。
+                            # 窗口内已接受项进 window_index，使同窗短重复也能在
+                            # 本窗命中；窗口最终接受后才并入全局 short_index。
+                            window_short_index = (
+                                DuplicateIndex(
+                                    min_chars=8, translation_ratio=0.85
+                                )
+                                if asmr_enabled
+                                else None
+                            )
                             for position, (_block_index, subtitle) in (
                                 enumerate(window)
                             ):
                                 source_text = window_sources[position]
                                 cue = window_cues[position]
-                                issues = audit(source_text, staging[position], cue)
-                                if not issues:
-                                    continue
-                                trigger_codes = {
-                                    issue.code for issue in issues
-                                }
-                                retry = retry_for_audit(
+                                staging[position] = audit_retry(
                                     subtitle,
                                     source_text,
-                                    combine_hints(issues),
-                                    base_history,
-                                )
-                                if retry is None:
-                                    continue
-                                candidate = finalize(
-                                    retry, source_text, entity_engine
-                                )
-                                if not candidate_ok(
-                                    source_text,
                                     staging[position],
-                                    candidate,
                                     cue,
-                                    trigger_codes,
-                                ):
-                                    continue
-                                staging[position] = candidate
+                                    entity_engine,
+                                    base_history,
+                                    window_short_index,
+                                )
+                                if window_short_index is not None:
+                                    window_short_index.add(
+                                        cue, source_text, staging[position]
+                                    )
                             entity_engine.capture_translations(
                                 window_sources, staging
                             )
@@ -2092,7 +2350,7 @@ def translate_srt(
                                 + tuple(zip(window_sources, staging))
                             )
                             for position in range(len(window)):
-                                index.add(
+                                add_indexes(
                                     window_cues[position],
                                     window_sources[position],
                                     staging[position],
@@ -2164,33 +2422,18 @@ def translate_srt(
                             # 风险消失，命中时同样只做一次定点重译。
                             cue = window_cues[position]
                             source_text = window_sources[position]
-                            issues = audit(source_text, result, cue)
-                            if issues:
-                                trigger_codes = {
-                                    issue.code for issue in issues
-                                }
-                                retry = retry_for_audit(
-                                    subtitle,
-                                    source_text,
-                                    combine_hints(issues),
-                                    base_history,
-                                )
-                                if retry is not None:
-                                    candidate = finalize(
-                                        retry, subtitle.text, entity_engine
-                                    )
-                                    if candidate_ok(
-                                        source_text,
-                                        result,
-                                        candidate,
-                                        cue,
-                                        trigger_codes,
-                                    ):
-                                        result = candidate
+                            result = audit_retry(
+                                subtitle,
+                                source_text,
+                                result,
+                                cue,
+                                entity_engine,
+                                base_history,
+                            )
                             entity_engine.capture_translations(
                                 [source_text], [result]
                             )
-                            index.add(cue, source_text, result)
+                            add_indexes(cue, source_text, result)
                             subtitle.text = result
                             accepted.append((source_text, result))
                 restore(base_history + tuple(accepted))
@@ -2600,7 +2843,11 @@ def translate_file(
     max_window_chars: int = 250,
     join_rules: tuple[JoinRule, ...] = (),
     lookahead_cues: int = 0,
+    asmr_guard: bool = False,
+    t1_budget: T1Budget | None = None,
+    file_cues: int | None = None,
 ) -> TranslationOutcome:
+    """翻译单文件；ASMR 守卫开启时必须传入跨文件共享的 ``t1_budget``。"""
     source = Path(source)
     if not source.is_file():
         raise TranslateError(f"文件不存在：{source}")
@@ -2611,6 +2858,14 @@ def translate_file(
             f"允许：{'、'.join(settings.source_suffixes)}"
         )
     text, has_bom, eol = _read_text(source)
+    if asmr_guard and t1_budget is None:
+        # ASMR 预算必须由调用方跨文件共享，禁止按文件静默新建。
+        raise TranslateError(
+            "ASMR 守卫需要调用方显式传入共享 T1Budget；"
+            "不要按文件静默新建预算"
+        )
+    t1_budget = t1_budget if t1_budget is not None else T1Budget()
+    t1_budget.begin_file(str(source), file_cues)
     failures: list[TranslationFailure] = []
     segments = 0
     if suffix == ".srt":
@@ -2628,6 +2883,9 @@ def translate_file(
             max_window_chars=max_window_chars,
             join_rules=join_rules,
             lookahead_cues=lookahead_cues,
+            asmr_guard=asmr_guard,
+            t1_budget=t1_budget,
+            file_cues=file_cues,
         )
     else:
         segments = sum(1 for paragraph, _ in split_prose(text) if paragraph.strip())
@@ -2654,7 +2912,11 @@ def translate_file(
         raise TranslateError(f"写入失败：{target}；{exc.strerror or exc}") from exc
 
     outcome = TranslationOutcome(
-        source=source, output=target, segments=segments, failures=failures
+        source=source,
+        output=target,
+        segments=segments,
+        failures=failures,
+        t1_events=tuple(t1_budget.file_events),
     )
     if failures:
         # 输出已写出（失败段保留原文），由调用方汇总并返回非零

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -187,6 +188,34 @@ def _resolve_cli_path(raw: str | Path) -> Path:
     if not path.is_absolute():
         path = _invocation_cwd() / path
     return path
+
+
+def _count_asmr_cues(paths: list[Path]) -> tuple[int, dict[str, int]]:
+    """0 模型调用预扫描 .srt 非空 cue；非 SRT/不可读文件跳过。
+
+    返回 ``(总非空 cue 数, {str(path): 文件非空 cue 数})``。只用于
+    ``T1Budget.for_corpus`` 与 ``begin_file(file_cues)``；不解析正文语义。
+    """
+    total = 0
+    counts: dict[str, int] = {}
+    for raw in paths:
+        path = Path(raw)
+        if path.suffix.lower() != ".srt":
+            continue
+        try:
+            text = path.read_bytes().decode("utf-8-sig")
+        except (OSError, UnicodeDecodeError):
+            continue
+        eol = "\r\n" if "\r\n" in text else "\n"
+        blocks = translate.parse_srt(text, eol)
+        count = sum(
+            1
+            for subtitle, _separator in blocks
+            if subtitle.index and subtitle.text.strip()
+        )
+        counts[str(path)] = count
+        total += count
+    return total, counts
 
 
 def _resolve_model(
@@ -538,6 +567,30 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
         )
     )
     report = TranslationReport()
+    total_cues = 0
+    file_cue_counts: dict[str, int] = {}
+    if task_template == "translate_asmr" and plans:
+        total_cues, file_cue_counts = _count_asmr_cues(
+            [plan.source.path for plan in plans]
+        )
+        t1_budget = translate.T1Budget.for_corpus(total_cues)
+    else:
+        t1_budget = translate.T1Budget()
+    t1_counts: dict[str, int] = {}
+    t1_details: list[str] = []
+    t1_records: list[dict] = []
+    t1_unique: set[tuple[str, str]] = set()
+    if out_dir is not None:
+        t1_events_path: Path | None = out_dir / "t1_events.jsonl"
+        t1_budget_path: Path | None = out_dir / "t1_budget.json"
+    elif plans:
+        parents = {plan.target.parent for plan in plans}
+        parent = next(iter(parents)) if len(parents) == 1 else Path.cwd()
+        t1_events_path = parent / "t1_events.jsonl"
+        t1_budget_path = parent / "t1_budget.json"
+    else:
+        t1_events_path = None
+        t1_budget_path = None
     total = len(plans)
     current_index = 0
     current_started = 0.0
@@ -567,6 +620,9 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                     window_size=window_size,
                     max_window_chars=max_window_chars,
                     lookahead_cues=lookahead_cues,
+                    asmr_guard=(task_template == "translate_asmr"),
+                    t1_budget=t1_budget,
+                    file_cues=file_cue_counts.get(str(source)),
                     join_rules=(
                         getattr(chat, "join_rules", ())
                         if window_size > 1
@@ -642,6 +698,38 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                     overwrote=will_overwrite,
                 )
             )
+            events = getattr(outcome, "t1_events", ())
+            if isinstance(events, (list, tuple)):
+                outcome_source = getattr(outcome, "source", "")
+                if not isinstance(outcome_source, (str, Path)):
+                    outcome_source = ""
+                for event in events:
+                    key = getattr(event, "outcome", "")
+                    if not key:
+                        continue
+                    event_source = str(
+                        getattr(event, "source", "") or outcome_source
+                    )
+                    cue = getattr(event, "cue", "?")
+                    code = getattr(event, "code", "?")
+                    detail = str(getattr(event, "detail", "") or "")
+                    t1_counts[key] = t1_counts.get(key, 0) + 1
+                    t1_unique.add((event_source, str(cue)))
+                    t1_records.append(
+                        {
+                            "source": event_source,
+                            "cue": cue,
+                            "code": code,
+                            "outcome": key,
+                            "detail": detail,
+                        }
+                    )
+                    source_label = (
+                        Path(event_source).name if event_source else "?"
+                    )
+                    t1_details.append(
+                        f"{source_label} cue {cue} {code} {key}"
+                    )
             current_index = 0
     except KeyboardInterrupt:
         interrupted = True
@@ -663,6 +751,49 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                 )
             )
     total_elapsed = max(0.0, time.perf_counter() - batch_started)
+    if t1_budget_path is not None and (t1_records or out_dir is not None):
+        try:
+            t1_budget_path.parent.mkdir(parents=True, exist_ok=True)
+            t1_budget_path.write_text(
+                json.dumps(
+                    {
+                        "total": t1_budget.total,
+                        "max_total": t1_budget.max_total,
+                        "per_file": t1_budget.per_file,
+                        "total_cues": total_cues,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+        except OSError as exc:
+            print(
+                palette.warn(
+                    f"T1 预算写入失败：{t1_budget_path}；"
+                    f"{exc.strerror or exc}"
+                ),
+                file=sys.stderr,
+            )
+    if t1_events_path is not None and (t1_records or out_dir is not None):
+        try:
+            t1_events_path.parent.mkdir(parents=True, exist_ok=True)
+            with t1_events_path.open(
+                "w", encoding="utf-8", newline="\n"
+            ) as handle:
+                for record in t1_records:
+                    handle.write(
+                        json.dumps(record, ensure_ascii=False) + "\n"
+                    )
+        except OSError as exc:
+            print(
+                palette.warn(
+                    f"T1 事件写入失败：{t1_events_path}；"
+                    f"{exc.strerror or exc}"
+                ),
+                file=sys.stderr,
+            )
     print(
         "\n".join(
             report.render(
@@ -673,6 +804,29 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
             )
         )
     )
+    if t1_counts:
+        labels = (
+            ("accepted", "接受"),
+            ("rejected", "拒绝"),
+            ("error", "异常"),
+            ("budget", "超预算"),
+        )
+        parts = [
+            f"{label} {t1_counts[key]}"
+            for key, label in labels
+            if t1_counts.get(key)
+        ]
+        print(
+            palette.muted(
+                f"T1 守卫 · 事件 {sum(t1_counts.values())}"
+                f" · 唯一 cue {len(t1_unique)}"
+                f" · {' · '.join(parts)}"
+                f" · 重译 {t1_budget.total}/{t1_budget.max_total}"
+            )
+        )
+        if t1_details:
+            print(palette.muted("  " + " · ".join(t1_details)))
+
     if name_failures:
         print(
             palette.warn(f"文件名翻译失败 {name_failures} 处"),

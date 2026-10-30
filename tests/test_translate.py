@@ -6,13 +6,16 @@ import re
 import sys
 import tempfile
 import unittest
+import warnings
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from vanitas import translate as translate_module  # noqa: E402
 from vanitas.config import TranslateSettings  # noqa: E402
 from vanitas.cue_boundary import load_joins  # noqa: E402
 from vanitas.errors import EngineError, TranslateError  # noqa: E402
@@ -20,6 +23,8 @@ from vanitas.translate import (  # noqa: E402
     DynamicEntityEngine,
     NameTarget,
     Subtitle,
+    T1Budget,
+    T1Event,
     TranslationEngine,
     TranslationOptions,
     apply_name_renames,
@@ -1904,9 +1909,12 @@ class QualityGuardTests(unittest.TestCase):
             task_template="translate_asmr",
         )
 
-    def run_translate(self, client, *texts: str, window_size: int = 2):
+    def run_translate(
+        self, client, *texts: str, window_size: int = 2, asmr_guard: bool = False
+    ):
         engine = self.engine(client)
         failures: list = []
+        budget = T1Budget()
         output = translate_srt(
             engine,
             self.srt_text(*texts),
@@ -1916,12 +1924,23 @@ class QualityGuardTests(unittest.TestCase):
             failures=failures,
             window_size=window_size,
             max_window_chars=1000,
+            asmr_guard=asmr_guard,
+            t1_budget=budget,
         )
         return engine, output, failures
 
-    def run_translate_text(self, client, text: str, *, window_size: int = 2):
-        engine = self.engine(client)
+    def run_translate_text(
+        self,
+        client,
+        text: str,
+        *,
+        window_size: int = 2,
+        asmr_guard: bool = False,
+        engine=None,
+    ):
+        engine = engine or self.engine(client)
         failures: list = []
+        budget = T1Budget()
         output = translate_srt(
             engine,
             text,
@@ -1931,6 +1950,8 @@ class QualityGuardTests(unittest.TestCase):
             failures=failures,
             window_size=window_size,
             max_window_chars=1000,
+            asmr_guard=asmr_guard,
+            t1_budget=budget,
         )
         return engine, output, failures
 
@@ -2335,6 +2356,776 @@ class QualityGuardTests(unittest.TestCase):
             self.assertEqual(block.index, "1")
             self.assertEqual(block.timing, "00:00:01,000 --> 00:00:02,500")
             self.assertEqual(block.text, "说叫我雫就好")
+
+    # ------------------------------------------------------------------ #
+    # T1：short_duplicate / address_term / invented_tool
+    # ------------------------------------------------------------------ #
+
+    T1_TRANSLATION = "今天真的非常开心呀"
+
+    def test_engine_exposes_task_template_and_asmr_assets(self) -> None:
+        engine = self.engine(ScriptedTranslationClient([]))
+        self.assertEqual(engine.task_template, "translate_asmr")
+        self.assertEqual(len(engine.glossary.entries), 3)
+        self.assertTrue(engine.join_rules)
+        plain = TranslationEngine(
+            ScriptedTranslationClient([]),
+            ROOT / "config" / "prompts",
+            "",
+            options=translation_options(),
+        )
+        self.assertEqual(plain.task_template, "translate")
+
+    def test_short_duplicate_hits_once_and_accepts_shorter_candidate(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                f"[#1] {self.T1_TRANSLATION}\n[#2] 译二",
+                f"[#3] {self.T1_TRANSLATION}",
+                "[#3] 嗯嗯",
+            ]
+        )
+        _engine, output, failures = self.run_translate(
+            client, "はい", "うん", "そう", asmr_guard=True
+        )
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(failures, [])
+        self.assertIn("短句", client.calls[2])
+        self.assertIn("禁止复用", client.calls[2])
+        # 原译 9 字、候选 2 字：short_duplicate 在 semantic_codes 内，
+        # candidate_ok 不应再用 0.5–3.0 比例闸拒绝。
+        self.assertEqual(
+            self.block_texts(output),
+            [self.T1_TRANSLATION, "译二", "嗯嗯"],
+        )
+
+    def test_short_duplicate_same_window_hits(self) -> None:
+        # 同窗两条 2 字源文得到同一长译文：window_index 让第二条当场命中，
+        # 不必等下一窗或窗口守卫回退。
+        client = ScriptedTranslationClient(
+            [
+                f"[#1] {self.T1_TRANSLATION}\n[#2] {self.T1_TRANSLATION}",
+                "[#2] 嗯嗯",
+            ]
+        )
+        _engine, output, failures = self.run_translate(
+            client, "はい", "うん", asmr_guard=True
+        )
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(failures, [])
+        self.assertIn("短句", client.calls[1])
+        self.assertEqual(
+            self.block_texts(output), [self.T1_TRANSLATION, "嗯嗯"]
+        )
+
+    def test_short_duplicate_gate_off_has_no_retry(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                f"[#1] {self.T1_TRANSLATION}\n[#2] {self.T1_TRANSLATION}",
+                f"[#3] {self.T1_TRANSLATION}",
+            ]
+        )
+        _engine, output, failures = self.run_translate(
+            client, "はい", "うん", "そう", asmr_guard=False
+        )
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            self.block_texts(output),
+            [self.T1_TRANSLATION, self.T1_TRANSLATION, self.T1_TRANSLATION],
+        )
+
+    def test_clean_cues_with_asmr_guard_have_no_extra_calls(self) -> None:
+        client = ScriptedTranslationClient(
+            ["[#1] 译一\n[#2] 译二", "[#3] 译三\n[#4] 译四"]
+        )
+        _engine, output, failures = self.run_translate(
+            client, "一", "二", "三", "四", asmr_guard=True
+        )
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            self.block_texts(output), ["译一", "译二", "译三", "译四"]
+        )
+
+    def test_short_duplicate_retries_at_most_once_per_cue(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                f"[#1] {self.T1_TRANSLATION}\n[#2] {self.T1_TRANSLATION}",
+                # 重译仍复用同一译文：候选被 candidate_ok 拒绝，不再重试。
+                f"[#2] {self.T1_TRANSLATION}",
+            ]
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _engine, output, failures = self.run_translate(
+                client, "はい", "うん", asmr_guard=True
+            )
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            self.block_texts(output),
+            [self.T1_TRANSLATION, self.T1_TRANSLATION],
+        )
+        self.assertTrue(
+            any("候选未通过" in str(item.message) for item in caught)
+        )
+
+    def test_short_duplicate_exception_keeps_original_without_failure(self) -> None:
+        client = FailingTranslationClient(
+            [
+                f"[#1] {self.T1_TRANSLATION}\n[#2] {self.T1_TRANSLATION}",
+            ],
+            fail_at={2},
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _engine, output, failures = self.run_translate(
+                client, "はい", "うん", asmr_guard=True
+            )
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            self.block_texts(output),
+            [self.T1_TRANSLATION, self.T1_TRANSLATION],
+        )
+        self.assertTrue(any("重译失败" in str(item.message) for item in caught))
+
+    def test_short_duplicate_fallback_accepts_one_retry(self) -> None:
+        # 同窗两条 4+ 字短源文得到同一长译文：窗口守卫先回退逐句，T1 在
+        # fallback 接受点登记 short_index 后仍只重译一次。
+        client = ScriptedTranslationClient(
+            [
+                f"[#1] {self.T1_TRANSLATION}\n[#2] {self.T1_TRANSLATION}",
+                self.T1_TRANSLATION,
+                self.T1_TRANSLATION,
+                "[#2] 嗯嗯",
+            ]
+        )
+        _engine, output, failures = self.run_translate(
+            client, "はいそうですね", "うんそうですね", asmr_guard=True
+        )
+        self.assertEqual(len(client.calls), 4)
+        self.assertEqual(failures, [])
+        self.assertIn("短句", client.calls[3])
+        self.assertEqual(
+            self.block_texts(output), [self.T1_TRANSLATION, "嗯嗯"]
+        )
+
+    def test_t1_candidate_budget_five_total_and_two_per_file(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                # file1: cue2/3 各重译 1 次，cue4 被单文件 2 次上限拦住。
+                self.T1_TRANSLATION,
+                self.T1_TRANSLATION,
+                "第二句",
+                self.T1_TRANSLATION,
+                "第三句",
+                self.T1_TRANSLATION,
+                # file2: cue2 再重译 1 次（累计 3）。
+                self.T1_TRANSLATION,
+                self.T1_TRANSLATION,
+                "第二文件",
+                # file3: cue2/3 各 1 次（累计 5），cue4 被整包 5 次上限拦住。
+                self.T1_TRANSLATION,
+                self.T1_TRANSLATION,
+                "第三文件",
+                self.T1_TRANSLATION,
+                "第三文件二",
+                self.T1_TRANSLATION,
+            ]
+        )
+        engine = self.engine(client)
+        budget = T1Budget.for_corpus(514)
+        self.assertEqual((budget.max_total, budget.per_file), (5, 2))
+        # 单文件 ≤2 时两个文件最多 4 次；验证整包 5 次必须跨 3 个文件。
+        files = (
+            ("f1.srt", ("はい", "うん", "そう", "だよね")),
+            ("f2.srt", ("まあね", "いいよ")),
+            ("f3.srt", ("そっか", "ほんと", "まじで", "うそでしょ")),
+        )
+        outcomes = []
+        with tempfile.TemporaryDirectory() as tmp, warnings.catch_warnings(
+            record=True
+        ) as caught:
+            warnings.simplefilter("always")
+            root = Path(tmp)
+            for name, texts in files:
+                source = root / name
+                source.write_text(self.srt_text(*texts), encoding="utf-8")
+                engine.reset_history()
+                outcomes.append(
+                    translate_file(
+                        engine,
+                        source,
+                        SETTINGS,
+                        window_size=1,
+                        asmr_guard=True,
+                        t1_budget=budget,
+                    )
+                )
+            blocks = [
+                self.block_texts(
+                    outcome.output.read_text(encoding="utf-8")
+                )
+                for outcome in outcomes
+            ]
+
+        # 整包 5 次：file1 2 + file2 1 + file3 2；第 6 次不重译。
+        self.assertEqual(len(client.calls), 15)
+        self.assertEqual(budget.total, 5)
+        self.assertEqual(
+            blocks[0],
+            [self.T1_TRANSLATION, "第二句", "第三句", self.T1_TRANSLATION],
+        )
+        self.assertEqual(blocks[1], [self.T1_TRANSLATION, "第二文件"])
+        self.assertEqual(
+            blocks[2],
+            [
+                self.T1_TRANSLATION,
+                "第三文件",
+                "第三文件二",
+                self.T1_TRANSLATION,
+            ],
+        )
+        self.assertTrue(all(outcome.failures == [] for outcome in outcomes))
+        accepted = [
+            (event.cue, event.outcome)
+            for outcome in outcomes
+            for event in outcome.t1_events
+            if event.outcome == "accepted"
+        ]
+        budget_events = [
+            (event.cue, event.outcome)
+            for outcome in outcomes
+            for event in outcome.t1_events
+            if event.outcome == "budget"
+        ]
+        self.assertEqual(len(accepted), 5)
+        self.assertEqual(len(budget_events), 2)
+        self.assertEqual(budget_events, [(4, "budget"), (4, "budget")])
+        self.assertTrue(
+            all(
+                event.detail == "per_file"
+                for outcome in outcomes
+                for event in outcome.t1_events
+                if event.outcome == "budget"
+            )
+        )
+        for outcome, name in zip(
+            outcomes, ("f1.srt", "f2.srt", "f3.srt")
+        ):
+            self.assertTrue(
+                all(
+                    Path(event.source).name == name
+                    for event in outcome.t1_events
+                )
+            )
+        self.assertTrue(
+            any("候选级预算" in str(item.message) for item in caught)
+        )
+
+    def test_t1_events_record_accepted_rejected_error(self) -> None:
+        cases = (
+            ("accepted", ScriptedTranslationClient(
+                [
+                    f"[#1] {self.T1_TRANSLATION}\n[#2] {self.T1_TRANSLATION}",
+                    "[#2] 嗯嗯",
+                ]
+            )),
+            ("rejected", ScriptedTranslationClient(
+                [
+                    f"[#1] {self.T1_TRANSLATION}\n[#2] {self.T1_TRANSLATION}",
+                    f"[#2] {self.T1_TRANSLATION}",
+                ]
+            )),
+            ("error", FailingTranslationClient(
+                [
+                    f"[#1] {self.T1_TRANSLATION}\n[#2] {self.T1_TRANSLATION}",
+                ],
+                fail_at={2},
+            )),
+        )
+        for expected, client in cases:
+            with self.subTest(expected=expected):
+                engine = self.engine(client)
+                budget = T1Budget()
+                failures: list = []
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    translate_srt(
+                        engine,
+                        self.srt_text("はい", "うん"),
+                        chunk_chars=800,
+                        source="quality.srt",
+                        eol="\n",
+                        failures=failures,
+                        window_size=2,
+                        max_window_chars=1000,
+                        asmr_guard=True,
+                        t1_budget=budget,
+                    )
+                self.assertEqual(failures, [])
+                events = [
+                    (event.cue, event.code, event.outcome)
+                    for event in budget.file_events
+                ]
+                self.assertIn((2, "short_duplicate", expected), events)
+                self.assertEqual(budget.total, 1)
+
+    def test_t1_budget_scales_by_corpus_and_file_cues(self) -> None:
+        self.assertEqual(T1Budget.for_corpus(514).max_total, 5)
+        self.assertEqual(T1Budget.for_corpus(1404).max_total, 14)
+        self.assertEqual(T1Budget.for_corpus(None).max_total, 5)
+        self.assertEqual(T1Budget.for_corpus(0).max_total, 5)
+
+        budget = T1Budget.for_corpus(1404)
+        budget.begin_file("a.srt", 712)
+        self.assertEqual(budget.per_file, 8)
+        self.assertEqual(budget.total, 0)
+        budget.record_attempt()
+        budget.begin_file("b.srt", 149)
+        self.assertEqual(budget.per_file, 2)
+        self.assertEqual(budget.total, 1)
+        budget.begin_file("c.srt", 51)
+        self.assertEqual(budget.per_file, 2)
+        budget.begin_file("d.srt", None)
+        self.assertEqual(budget.per_file, 2)
+
+        frozen = T1Budget.for_corpus(514)
+        frozen.begin_file("e.srt", 86)
+        self.assertEqual(frozen.max_total, 5)
+        self.assertEqual(frozen.per_file, 2)
+
+    def test_t1_long_file_eight_hits_no_budget(self) -> None:
+        sources = (
+            "はい",
+            "うん",
+            "そう",
+            "だよね",
+            "まあね",
+            "いいよ",
+            "そっか",
+            "ほんと",
+            "まじで",
+        )
+        contents: list[str] = [self.T1_TRANSLATION]
+        for number in range(2, 10):
+            contents.append(self.T1_TRANSLATION)
+            contents.append(f"第{number}句")
+        client = ScriptedTranslationClient(contents)
+        engine = self.engine(client)
+        budget = T1Budget.for_corpus(1404)
+        failures: list = []
+        output = translate_srt(
+            engine,
+            self.srt_text(*sources),
+            chunk_chars=800,
+            source="long.srt",
+            eol="\n",
+            failures=failures,
+            window_size=1,
+            max_window_chars=1000,
+            asmr_guard=True,
+            t1_budget=budget,
+            file_cues=712,
+        )
+        self.assertEqual(len(client.calls), 17)
+        self.assertEqual(failures, [])
+        self.assertEqual(budget.total, 8)
+        self.assertEqual(budget.file_total, 8)
+        self.assertFalse(
+            any(event.outcome == "budget" for event in budget.file_events)
+        )
+        self.assertEqual(
+            [event.outcome for event in budget.file_events],
+            ["accepted"] * 8,
+        )
+        self.assertEqual(
+            self.block_texts(output),
+            [self.T1_TRANSLATION]
+            + [f"第{number}句" for number in range(2, 10)],
+        )
+
+    def test_t1_max_total_scope_is_total(self) -> None:
+        sources = ("はい", "うん", "そう", "だよね", "まあね")
+        contents = [
+            self.T1_TRANSLATION,
+            self.T1_TRANSLATION,
+            "第2句",
+            self.T1_TRANSLATION,
+            "第3句",
+            self.T1_TRANSLATION,
+            "第4句",
+            self.T1_TRANSLATION,
+        ]
+        client = ScriptedTranslationClient(contents)
+        engine = self.engine(client)
+        budget = T1Budget(max_total=3, per_file=10)
+        failures: list = []
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            output = translate_srt(
+                engine,
+                self.srt_text(*sources),
+                chunk_chars=800,
+                source="total-cap.srt",
+                eol="\n",
+                failures=failures,
+                window_size=1,
+                max_window_chars=1000,
+                asmr_guard=True,
+                t1_budget=budget,
+                file_cues=1000,
+            )
+        self.assertEqual(len(client.calls), 8)
+        self.assertEqual(failures, [])
+        self.assertEqual(budget.total, 3)
+        self.assertEqual(budget.per_file, 10)
+        budget_events = [
+            event
+            for event in budget.file_events
+            if event.outcome == "budget"
+        ]
+        self.assertEqual(len(budget_events), 1)
+        self.assertEqual(budget_events[0].detail, "total")
+        self.assertEqual(budget_events[0].code, "short_duplicate")
+        self.assertEqual(self.block_texts(output)[-1], self.T1_TRANSLATION)
+
+    def test_short_duplicate_cross_code_candidate_rejected(self) -> None:
+        # short_duplicate 重译若引入 invented_tool，candidate_ok 必须拒绝，
+        # 不能只按原 trigger code 放行。
+        client = ScriptedTranslationClient(
+            [
+                f"[#1] {self.T1_TRANSLATION}\n[#2] {self.T1_TRANSLATION}",
+                "[#2] 用掏耳勺掏一下",
+            ]
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _engine, output, failures = self.run_translate(
+                client, "はい", "うん", asmr_guard=True
+            )
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            self.block_texts(output),
+            [self.T1_TRANSLATION, self.T1_TRANSLATION],
+        )
+        self.assertTrue(
+            any("候选未通过" in str(item.message) for item in caught)
+        )
+
+    def test_invented_tool_fallback_retries(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                # 批次缺 #2 -> 逐句 fallback。
+                "[#1] 用掏耳勺轻轻掏一下",
+                "用掏耳勺轻轻掏一下",
+                "轻轻动一下",
+                "普通的话",
+            ]
+        )
+        _engine, output, failures = self.run_translate(
+            client,
+            "ここで静かにするのを",
+            "もういいですか",
+            asmr_guard=True,
+        )
+        self.assertEqual(len(client.calls), 4)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            self.block_texts(output), ["轻轻动一下", "普通的话"]
+        )
+
+    def test_invented_tool_nearby_radius_three_not_four(self) -> None:
+        sources = (
+            "綿棒でいきますね",
+            "これは二番目の台詞です",
+            "これは三番目の台詞です",
+            "これは四番目の台詞です",
+            "これは五番目の台詞です",
+        )
+        client = ScriptedTranslationClient(
+            [
+                "[#1] 用棉签来哦\n"
+                "[#2] 第二句\n"
+                "[#3] 第三句\n"
+                "[#4] 用棉签轻轻转一下\n"
+                "[#5] 把棉签递给我吧",
+                "[#5] 递给我吧",
+            ]
+        )
+        _engine, output, failures = self.run_translate(
+            client, *sources, window_size=5, asmr_guard=True
+        )
+        # cue4 距 cue1 正好 3 条：有綿棒依据，不报；cue5 距 4 条：报并重译。
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(failures, [])
+        self.assertIn("道具", client.calls[1])
+        self.assertEqual(
+            self.block_texts(output),
+            [
+                "用棉签来哦",
+                "第二句",
+                "第三句",
+                "用棉签轻轻转一下",
+                "递给我吧",
+            ],
+        )
+
+    def test_fake_chat_without_task_template_does_not_enable_t1(self) -> None:
+        calls: list[str] = []
+
+        def chat(prompt: str) -> str:
+            calls.append(prompt)
+            return (
+                f"[#1] {self.T1_TRANSLATION}\n"
+                f"[#2] {self.T1_TRANSLATION}"
+            )
+
+        _engine, output, failures = self.run_translate_text(
+            None,
+            self.srt_text("はい", "うん"),
+            window_size=2,
+            asmr_guard=True,
+            engine=chat,
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            self.block_texts(output),
+            [self.T1_TRANSLATION, self.T1_TRANSLATION],
+        )
+
+    def test_translate_file_passes_asmr_guard_and_budget(self) -> None:
+        budget = T1Budget()
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "a.srt"
+            source.write_text(self.srt_text("はい"), encoding="utf-8")
+            with mock.patch.object(
+                translate_module, "translate_srt", return_value=""
+            ) as patched:
+                translate_file(
+                    ScriptedTranslationClient([]),
+                    source,
+                    SETTINGS,
+                    asmr_guard=True,
+                    t1_budget=budget,
+                )
+        self.assertTrue(patched.call_args.kwargs["asmr_guard"])
+        self.assertIs(patched.call_args.kwargs["t1_budget"], budget)
+
+    def test_t1_multi_code_same_cue_is_one_unique_cue(self) -> None:
+        # 同一 cue 同时 address_term + invented_tool：两个 code、两个事件，
+        # 但唯一 cue 仍为 1；source 随事件回传，供 P4 (source,cue) join。
+        client = ScriptedTranslationClient(
+            ["先生，用掏耳勺", "当家的，你回来了"]
+        )
+        engine = self.engine(client)
+        budget = T1Budget()
+        failures: list = []
+        output = translate_srt(
+            engine,
+            self.srt_text("旦那様、おかえり"),
+            chunk_chars=800,
+            source="quality.srt",
+            eol="\n",
+            failures=failures,
+            window_size=1,
+            max_window_chars=1000,
+            asmr_guard=True,
+            t1_budget=budget,
+        )
+        self.assertEqual(failures, [])
+        self.assertEqual(self.block_texts(output), ["当家的，你回来了"])
+        codes = {event.code for event in budget.file_events}
+        self.assertEqual(codes, {"address_term", "invented_tool"})
+        self.assertEqual(len(budget.file_events), 2)
+        self.assertEqual(
+            {(event.source, event.cue) for event in budget.file_events},
+            {("quality.srt", 1)},
+        )
+        self.assertTrue(
+            all(event.outcome == "accepted" for event in budget.file_events)
+        )
+
+    def test_asmr_guard_requires_explicit_shared_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self.engine(ScriptedTranslationClient([]))
+            for name in ("a.srt", "b.srt"):
+                source = Path(tmp) / name
+                source.write_text(self.srt_text("はい"), encoding="utf-8")
+                with self.assertRaises(TranslateError) as file_error:
+                    translate_file(
+                        engine,
+                        source,
+                        SETTINGS,
+                        window_size=1,
+                        asmr_guard=True,
+                    )
+                self.assertIn("T1Budget", str(file_error.exception))
+            with self.assertRaises(TranslateError) as srt_error:
+                translate_srt(
+                    engine,
+                    self.srt_text("はい"),
+                    chunk_chars=800,
+                    source="a.srt",
+                    eol="\n",
+                    failures=[],
+                    window_size=1,
+                    max_window_chars=1000,
+                    asmr_guard=True,
+                )
+            self.assertIn("T1Budget", str(srt_error.exception))
+
+    def test_t1_retry_output_passes_qc_structure(self) -> None:
+        from scripts import qc_srt  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "t1.srt"
+            source.write_text(
+                self.srt_text("ここで静かにするのを"), encoding="utf-8"
+            )
+            client = ScriptedTranslationClient(
+                ["用掏耳勺轻轻掏一下", "轻轻动一下"]
+            )
+            engine = self.engine(client)
+            budget = T1Budget()
+            outcome = translate_file(
+                engine,
+                source,
+                SETTINGS,
+                window_size=1,
+                asmr_guard=True,
+                t1_budget=budget,
+            )
+            blocks = parse_srt(
+                outcome.output.read_text(encoding="utf-8"), "\n"
+            )
+            self.assertEqual(len(blocks), 1)
+            block, _separator = blocks[0]
+            self.assertEqual(block.index, "1")
+            self.assertEqual(block.timing, "00:00:01,000 --> 00:00:02,000")
+            self.assertEqual(block.text, "轻轻动一下")
+            self.assertEqual(outcome.failures, [])
+            self.assertEqual(
+                [(event.cue, event.code, event.outcome)
+                 for event in outcome.t1_events],
+                [(1, "invented_tool", "accepted")],
+            )
+            qc = qc_srt.check_pair(source, outcome.output)
+            self.assertEqual(qc.errors, [])
+            self.assertEqual(qc.cues, 1)
+
+    def test_address_term_hits_once_and_retries(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                "[#1] 先生，您回来了\n[#2] 你好",
+                "[#1] 当家的，你回来了",
+            ]
+        )
+        _engine, output, failures = self.run_translate(
+            client, "旦那様、おかえりなさい", "こんにちは", asmr_guard=True
+        )
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(failures, [])
+        self.assertIn("不译“先生/老师”", client.calls[1])
+        self.assertEqual(
+            self.block_texts(output), ["当家的，你回来了", "你好"]
+        )
+
+    def test_address_term_persistent_violation_keeps_original(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                "[#1] 先生，您回来了",
+                "[#1] 老师，你回来了",
+            ]
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _engine, output, failures = self.run_translate(
+                client, "旦那様、おかえりなさい", window_size=1, asmr_guard=True
+            )
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(failures, [])
+        self.assertEqual(self.block_texts(output), ["先生，您回来了"])
+        self.assertTrue(
+            any("候选未通过" in str(item.message) for item in caught)
+        )
+
+    def test_invented_tool_retries_once_and_keeps_single_block(self) -> None:
+        client = ScriptedTranslationClient(
+            ["用掏耳勺轻轻掏一下", "轻轻动一下"]
+        )
+        _engine, output, failures = self.run_translate(
+            client,
+            "ここで静かにするのを",
+            window_size=1,
+            asmr_guard=True,
+        )
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(failures, [])
+        blocks = parse_srt(output, "\n")
+        self.assertEqual(len(blocks), 1)
+        block, _separator = blocks[0]
+        self.assertEqual(block.index, "1")
+        self.assertEqual(block.timing, "00:00:01,000 --> 00:00:02,000")
+        self.assertEqual(block.text, "轻轻动一下")
+
+    def test_invented_tool_cross_cue_candidate_has_no_extra_call(self) -> None:
+        client = ScriptedTranslationClient(
+            ["[#1] 用棉签来哦\n[#2] 深处也用棉签哦"]
+        )
+        _engine, output, failures = self.run_translate(
+            client,
+            "綿棒でいきますね",
+            "奥の方もお願いします",
+            asmr_guard=True,
+        )
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            self.block_texts(output), ["用棉签来哦", "深处也用棉签哦"]
+        )
+
+    def test_window_one_and_non_asmr_template_have_no_t1_extra_calls(self) -> None:
+        clean = ScriptedTranslationClient(["译一", "译二", "译三", "译四"])
+        _engine, output, failures = self.run_translate(
+            clean, "一", "二", "三", "四", window_size=1, asmr_guard=True
+        )
+        self.assertEqual(len(clean.calls), 4)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            self.block_texts(output), ["译一", "译二", "译三", "译四"]
+        )
+
+        plain_client = ScriptedTranslationClient(
+            [
+                self.T1_TRANSLATION,
+                self.T1_TRANSLATION,
+            ]
+        )
+        plain_engine = TranslationEngine(
+            plain_client,
+            ROOT / "config" / "prompts",
+            "",
+            options=translation_options(),
+            task_template="translate",
+        )
+        _engine, output, failures = self.run_translate_text(
+            plain_client,
+            self.srt_text("はい", "うん"),
+            window_size=1,
+            asmr_guard=True,
+            engine=plain_engine,
+        )
+        # 显式 asmr_guard=True 但引擎模板是 translate：门控必须拒绝。
+        self.assertEqual(len(plain_client.calls), 2)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            self.block_texts(output),
+            [self.T1_TRANSLATION, self.T1_TRANSLATION],
+        )
 
 
 class DynamicEntityEngineTests(unittest.TestCase):

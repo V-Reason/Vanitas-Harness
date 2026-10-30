@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import re
 import sys
@@ -20,6 +21,7 @@ if str(ROOT) not in sys.path:
 from vanitas import cli  # noqa: E402
 from vanitas.config import DEFAULT_THEME, load_config  # noqa: E402
 from vanitas.errors import GuardError  # noqa: E402
+from vanitas.translate import T1Budget, T1Event  # noqa: E402
 from vanitas.ui import Palette  # noqa: E402
 
 ENV_KEYS = (
@@ -430,6 +432,280 @@ class CliSmokeTests(unittest.TestCase):
                 self.assertEqual(
                     translate_file.call_args.kwargs["max_window_chars"], 250
                 )
+
+    def test_count_asmr_cues_ignores_non_srt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            srt = root / "a.srt"
+            body = (
+                "1\n00:00:01,000 --> 00:00:02,000\n你好\n\n"
+                "2\n00:00:03,000 --> 00:00:04,000\n再见\n"
+            )
+            srt.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+            markdown = root / "b.md"
+            markdown.write_text(
+                "1\n00:00:01,000 --> 00:00:02,000\n不是字幕\n",
+                encoding="utf-8",
+            )
+            total, counts = cli._count_asmr_cues([srt, markdown])
+        self.assertEqual(total, 2)
+        self.assertEqual(counts, {str(srt): 2})
+        self.assertNotIn(str(markdown), counts)
+
+    def test_translate_asmr_precount_budget(self) -> None:
+        source = self.dir / "long.srt"
+        blocks = [
+            f"{index}\n00:00:01,000 --> 00:00:02,000\n第{index}句"
+            for index in range(1, 1405)
+        ]
+        source.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
+        out_dir = self.dir / "out"
+        outcome = mock.Mock()
+        outcome.source = source
+        outcome.output = out_dir / "long.zh.srt"
+        outcome.segments = 1404
+        outcome.failures = []
+        outcome.t1_events = ()
+        with clean_env():
+            with (
+                mock.patch.object(
+                    cli, "_ensure_engine", return_value=(FakeClient(), 4060)
+                ),
+                mock.patch.object(
+                    cli.translate,
+                    "translate_file",
+                    return_value=outcome,
+                ) as translate_file,
+            ):
+                code, _out, err = run(
+                    [
+                        "translate",
+                        str(source),
+                        "--preset",
+                        "asmr",
+                        "--out-dir",
+                        str(out_dir),
+                    ]
+                )
+        self.assertEqual(code, 0, err)
+        budget = translate_file.call_args.kwargs["t1_budget"]
+        self.assertEqual(budget.max_total, 14)
+        self.assertEqual(
+            translate_file.call_args.kwargs["file_cues"], 1404
+        )
+        budget_file = out_dir / "t1_budget.json"
+        data = json.loads(budget_file.read_text(encoding="utf-8"))
+        self.assertEqual(data["max_total"], 14)
+        self.assertEqual(data["total_cues"], 1404)
+
+    def test_translate_asmr_guard_passthrough(self) -> None:
+        cases = (
+            ([], False),
+            (["--preset", "subtitle"], False),
+            (["--preset", "prose"], False),
+            (["--preset", "general"], False),
+            (["--preset", "asmr"], True),
+        )
+        for extra, expected in cases:
+            with self.subTest(extra=extra):
+                outcome = mock.Mock()
+                outcome.source = Path("a.srt")
+                outcome.output = Path("a.zh.srt")
+                outcome.segments = 1
+                outcome.failures = []
+                with clean_env():
+                    with (
+                        mock.patch.object(
+                            cli,
+                            "_ensure_engine",
+                            return_value=(FakeClient(), 4060),
+                        ),
+                        mock.patch.object(
+                            cli.translate,
+                            "translate_file",
+                            return_value=outcome,
+                        ) as translate_file,
+                    ):
+                        code, _out, err = run(
+                            ["translate", "a.srt", *extra]
+                        )
+                self.assertEqual(code, 0, err)
+                self.assertIs(
+                    translate_file.call_args.kwargs["asmr_guard"], expected
+                )
+                self.assertIsInstance(
+                    translate_file.call_args.kwargs["t1_budget"], T1Budget
+                )
+
+    def test_translate_reports_t1_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            outcome = mock.Mock()
+            outcome.source = Path("a.srt")
+            outcome.output = Path(tmp) / "a.zh.srt"
+            outcome.segments = 1
+            outcome.failures = []
+            outcome.t1_events = (
+                T1Event(2, "short_duplicate", "accepted"),
+                T1Event(4, "address_term", "budget"),
+            )
+            with clean_env():
+                with (
+                    mock.patch.object(
+                        cli,
+                        "_ensure_engine",
+                        return_value=(FakeClient(), 4060),
+                    ),
+                    mock.patch.object(
+                        cli.translate, "translate_file", return_value=outcome
+                    ),
+                ):
+                    code, out, err = run(
+                        [
+                            "translate",
+                            "a.srt",
+                            "--preset",
+                            "asmr",
+                            "--out-dir",
+                            tmp,
+                        ]
+                    )
+        self.assertEqual(code, 0, err)
+        self.assertIn("T1 守卫", out)
+        self.assertIn("接受 1", out)
+        self.assertIn("超预算 1", out)
+        self.assertIn("cue 2 short_duplicate accepted", out)
+
+    def test_translate_t1_events_file_scoped_and_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+
+            def fake_translate(chat, source, settings, **kwargs):
+                outcome = mock.Mock()
+                outcome.source = Path(source)
+                outcome.output = out_dir / (
+                    Path(source).stem + ".zh.srt"
+                )
+                outcome.segments = 1
+                outcome.failures = []
+                outcome.t1_events = (
+                    T1Event(
+                        2,
+                        "short_duplicate",
+                        "accepted",
+                        source=str(source),
+                    ),
+                )
+                return outcome
+
+            with clean_env():
+                with (
+                    mock.patch.object(
+                        cli,
+                        "_ensure_engine",
+                        return_value=(FakeClient(), 4060),
+                    ),
+                    mock.patch.object(
+                        cli.translate,
+                        "translate_file",
+                        side_effect=fake_translate,
+                    ),
+                ):
+                    code, out, err = run(
+                        [
+                            "translate",
+                            "a.srt",
+                            "b.srt",
+                            "--preset",
+                            "asmr",
+                            "--out-dir",
+                            str(out_dir),
+                        ]
+                    )
+            self.assertEqual(code, 0, err)
+            self.assertIn("a.srt cue 2 short_duplicate accepted", out)
+            self.assertIn("b.srt cue 2 short_duplicate accepted", out)
+            self.assertIn("事件 2", out)
+            self.assertIn("唯一 cue 2", out)
+
+            events_file = out_dir / "t1_events.jsonl"
+            self.assertTrue(events_file.is_file())
+            records = [
+                json.loads(line)
+                for line in events_file.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(records), 2)
+            self.assertEqual(
+                {Path(record["source"]).name for record in records},
+                {"a.srt", "b.srt"},
+            )
+            self.assertTrue(
+                all(
+                    record["cue"] == 2
+                    and record["code"] == "short_duplicate"
+                    and record["outcome"] == "accepted"
+                    for record in records
+                )
+            )
+            budget_file = out_dir / "t1_budget.json"
+            self.assertTrue(budget_file.is_file())
+            budget = json.loads(
+                budget_file.read_text(encoding="utf-8")
+            )
+            self.assertEqual(budget["total"], 0)
+            self.assertEqual(budget["max_total"], 5)
+            self.assertIn("total_cues", budget)
+
+    def test_translate_t1_summary_counts_unique_cues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            outcome = mock.Mock()
+            outcome.source = Path("a.srt")
+            outcome.output = out_dir / "a.zh.srt"
+            outcome.segments = 1
+            outcome.failures = []
+            outcome.t1_events = (
+                T1Event(
+                    2,
+                    "short_duplicate",
+                    "accepted",
+                    source="a.srt",
+                ),
+                T1Event(
+                    2,
+                    "invented_tool",
+                    "accepted",
+                    source="a.srt",
+                ),
+            )
+            with clean_env():
+                with (
+                    mock.patch.object(
+                        cli,
+                        "_ensure_engine",
+                        return_value=(FakeClient(), 4060),
+                    ),
+                    mock.patch.object(
+                        cli.translate,
+                        "translate_file",
+                        return_value=outcome,
+                    ),
+                ):
+                    code, out, err = run(
+                        [
+                            "translate",
+                            "a.srt",
+                            "--preset",
+                            "asmr",
+                            "--out-dir",
+                            str(out_dir),
+                        ]
+                    )
+            self.assertEqual(code, 0, err)
+            self.assertIn("事件 2", out)
+            self.assertIn("唯一 cue 1", out)
+            self.assertIn("a.srt cue 2 short_duplicate accepted", out)
+            self.assertIn("a.srt cue 2 invented_tool accepted", out)
 
     def test_translate_explicit_profile_overrides_preset(self) -> None:
         outcome = mock.Mock()
