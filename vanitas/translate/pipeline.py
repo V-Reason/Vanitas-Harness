@@ -69,6 +69,22 @@ SINGLE_RETRY_HINT = (
     "不得保留任何假名或整句日文。）"
 )
 
+# 失败原因回灌：把**本次**硬校验的具体原因临时拼进重译请求，让模型知道错在哪，
+# 而不是只给它一句泛泛的"译得不对"。这条提示只进当前这一次请求（调用方先
+# reset_history、事后 restore），不进 `_history`，也不污染后续窗口。
+REASON_RETRY_HINT = (
+    "（上一版译文未通过写回校验：{reason}。"
+    "请针对该问题重译这一句，只输出中文译文，不要解释。）"
+)
+
+
+def _reason_retry_hint(reason: str, previous: str = "") -> str:
+    """拼装一次性的重译提示：通用假名提示 + 本次失败原因（+ 上一句译文）。"""
+    hint = f"{SINGLE_RETRY_HINT}\n{REASON_RETRY_HINT.format(reason=reason)}"
+    if previous and validate_cue_translation(previous) is None:
+        hint += f" 上一句译文：{_clip(previous, 80)}"
+    return hint
+
 # 断点快照：显式可见的 <output>.part.srt，只收已接受条目，完成后由调用方删除。
 PARTIAL_SUFFIX = ".part.srt"
 
@@ -147,7 +163,7 @@ def _translate_chunks(
     """按 chunk 顺序翻译并拼接；任一分块失败即记 failure 并返回 None。
 
     逐块失败不中断整篇：已翻译分块保留在本地列表里，但仍整体判失败，
-    由调用方决定“保留原文”还是“整段回退”，避免半译半原的混合写回。
+    由调用方决定"丢弃该段"还是"整段回退"，避免半译半原的混合写回。
     """
     translated: list[str] = []
     for position, chunk in enumerate(chunk_text(text, chunk_chars), start=1):
@@ -209,7 +225,7 @@ def _translate_single_cue(
                 )
             )
         return None
-    # 没有编号却返回多个编号/多行，说明模型仍在续写相邻行；宁可保留原文，不写入错位内容。
+    # 没有编号却返回多个编号/多行，说明模型仍在续写相邻行；宁可丢弃该句，不写入错位内容。
     source_lines = len([line for line in subtitle.text.splitlines() if line.strip()])
     leaked_ids = WINDOW_ID_ANY_RE.findall(raw)
     if len(leaked_ids) > 1 or (
@@ -220,11 +236,23 @@ def _translate_single_cue(
                 TranslationFailure(
                     source=source,
                     segment=f"line {subtitle.index}",
-                    reason="单句回退疑似续写相邻行，已保留原文",
+                    reason="单句回退疑似续写相邻行，已回退为原文（无可用候选）",
                 )
             )
         return None
     return cleaned
+
+
+def _fill_failed_cue(subtitle: Subtitle, candidate: str) -> None:
+    """失败兜底：把这次尝试的文本填回去，**绝不输出空行、也不默认搬日文原文**。
+
+    优先填模型自己产出的候选：它没过硬校验（可能带 kana / SEXPRA 之类），但至少
+    是目标语言的成品雏形，QC 会按 `kana` / `latin` 把它点名，观众也不会读到整句
+    日语。只有在连候选都没有（引擎异常、一字未出）时，`candidate` 会退回到原
+    正文——那种情况下没有任何可用文本，空行只会把失败藏起来。
+    """
+    if candidate:
+        subtitle.text = candidate
 
 
 def translate_srt(
@@ -649,6 +677,26 @@ def translate_srt(
                         result = salvaged
                         reason = None
                 if reason:
+                    # 把**本次**的具体失败原因临时回灌，隔离重译一次；前提是调用方
+                    # 不把这次提示写进历史（reset + 末尾 restore）。
+                    if callable(reset_history):
+                        reset_history()
+                    retry = _translate_single_cue(
+                        chat,
+                        subtitle,
+                        source=source,
+                        failures=failures,
+                        correction=_reason_retry_hint(reason),
+                        record_failure=False,
+                    )
+                    if retry is not None:
+                        retry = finalize(retry, source_text)
+                        if validate_cue_translation(retry) is None:
+                            result = retry
+                            reason = None
+                if reason:
+                    # 重译仍不合格：填回这次尝试的文本（非空、非日文原文），并记失败。
+                    _fill_failed_cue(subtitle, result)
                     failures.append(
                         TranslationFailure(
                             source=source,
@@ -663,7 +711,7 @@ def translate_srt(
                     subtitle.text = result
                     accepted_text = result
                     add_indexes(cue, source_text, result)
-            # 失败时保留原文，并把失败的调用从滑动上下文里剔除。
+            # 失败段保持非空（填候选）或原文（无候选），并把失败的调用从上下文里剔除。
             if accepted_text:
                 restore(base + ((source_text, accepted_text),))
                 completed_indexes.add(subtitle.index)
@@ -972,16 +1020,18 @@ def translate_srt(
                         source=source,
                         failures=failures,
                     )
+                    if result is None:
+                        # 一字未出（引擎异常/疑似续写相邻行）：没有可用候选，
+                        # 只能保留原文；失败已由 _translate_single_cue 记录。
+                        continue
                     if result is not None:
                         result = finalize(result, subtitle.text, entity_engine)
                         reason = validate_cue_translation(result)
                         if reason:
-                            # 给自造词/未本地化专名一次纠偏机会；仍不合格则保留原文。
+                            # 给自造词/未本地化专名一次纠偏机会；原因临时回灌。
                             if callable(reset_history):
                                 reset_history()
-                            retry_hint = SINGLE_RETRY_HINT
-                            if previous and validate_cue_translation(previous) is None:
-                                retry_hint += f" 上一句译文：{_clip(previous, 80)}"
+                            retry_hint = _reason_retry_hint(reason, previous)
                             retry = _translate_single_cue(
                                 chat,
                                 subtitle,
@@ -1003,6 +1053,8 @@ def translate_srt(
                                 result = salvaged
                                 reason = None
                         if reason:
+                            # 重译仍不合格：填回候选（非空、非日文原文），并记失败。
+                            _fill_failed_cue(subtitle, result)
                             failures.append(
                                 TranslationFailure(
                                     source=source,
@@ -1085,6 +1137,8 @@ def translate_prose(
             label=f"block {position}",
             failures=failures,
         )
+        # 散文块没有"候选文本"可填（分块调用直接返回 None），失败块保留原文：
+        # 空段会在文档里挖洞，且散文没有 cue 级的 blank 审计通道。
         output.append(leading + (result if result is not None else core) + trailing)
         output.append(separator)
         done += 1
@@ -1241,6 +1295,6 @@ def translate_file(
         ),
     )
     if failures:
-        # 输出已写出（失败段保留原文），由调用方汇总并返回非零
+        # 输出已写出（失败段已置空、不回填原文），由调用方汇总并返回非零
         return outcome
     return outcome

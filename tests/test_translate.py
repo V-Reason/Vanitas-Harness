@@ -89,6 +89,16 @@ def echo_chat(text: str) -> str:
     return "译" + text
 
 
+def srt_block(*texts: str) -> str:
+    """按顺序生成每 2 秒一条的 SRT 文本（失败回填用例的最小夹具）。"""
+    blocks = []
+    for index, text in enumerate(texts, start=1):
+        start = f"00:00:{index * 2 - 1:02d},000"
+        end = f"00:00:{index * 2:02d},000"
+        blocks.append(f"{index}\n{start} --> {end}\n{text}")
+    return "\n\n".join(blocks) + "\n"
+
+
 class LookaheadChat:
     """记录每窗被设置的后文参考，并返回与输入编号对齐的译文。"""
 
@@ -664,7 +674,8 @@ class TranslateTests(unittest.TestCase):
         self.assertEqual(len(client.calls), 3)
         self.assertIn("做爱啦", output)
 
-    def test_fallback_validation_keeps_source_and_records_failure(self) -> None:
+    def test_fallback_validation_fills_candidate_and_records_failure(self) -> None:
+        """两次都过不了硬校验：填回模型候选（不是日文原文、也不是空行）。"""
         source = "1\n00:00:01,000 --> 00:00:02,000\nこんにちは\n"
         client = ScriptedTranslationClient(
             ["[#1] 做SEXPAR啦", "[#1] 做SEXPAR啦"]
@@ -688,8 +699,9 @@ class TranslateTests(unittest.TestCase):
         )
         self.assertEqual(len(failures), 1)
         self.assertIn("臆造", failures[0].reason)
-        self.assertIn("こんにちは", output)
-        self.assertNotIn("SEXPAR", output)
+        # 填的是候选（含臆造词的准成品），既不搬日文原文，也不留空行
+        self.assertIn("做SEXPAR啦", output)
+        self.assertNotIn("こんにちは", output)
 
     def test_validate_cue_translation_rejects_kana_sexpar_and_slash(self) -> None:
         self.assertIn("假名", validate_cue_translation("まだ仮名") or "")
@@ -1125,7 +1137,61 @@ class TranslateTests(unittest.TestCase):
         self.assertEqual(blocks[2][0].timing, "00:00:05,000 --> 00:00:06,000")
         self.assertEqual(blocks[2][0].text, "")
 
-    def test_srt_segment_failure_keeps_original_and_reports(self) -> None:
+    def test_validation_failure_retries_with_reason_then_accepts(self) -> None:
+        """失败原因要临时回灌进重译请求，模型据此改对后直接采纳。"""
+        prompts: list[str] = []
+
+        def chat(prompt: str) -> str:
+            prompts.append(prompt)
+            if "未通过写回校验" in prompt:
+                return "光溜溜的做爱"
+            return "ツルペタオセックス"
+
+        source = self.write("retry.srt", srt_block("こんにちは"))
+        failures: list = []
+        output = translate_srt(
+            chat,
+            source.read_text(encoding="utf-8"),
+            chunk_chars=800,
+            source="retry.srt",
+            eol="\n",
+            failures=failures,
+            window_size=1,
+        )
+        self.assertEqual(failures, [])
+        self.assertEqual(len(prompts), 2)
+        # 第二次请求必须带上本次的具体原因，且是**临时**注入（不进历史）
+        self.assertIn("未通过写回校验", prompts[1])
+        self.assertIn("日文假名", prompts[1])
+        self.assertIn("光溜溜的做爱", output)
+
+    def test_validation_failure_twice_fills_candidate_not_source(self) -> None:
+        """两次都不过硬校验时，填回模型候选——非空、且不是整句日文原文。"""
+
+        def chat(prompt: str) -> str:
+            return "这是SEXPAR"  # 每次都是臆造拉丁词，重译也改不掉
+
+        source = self.write("fill.srt", srt_block("こんにちは、いい天気ですね"))
+        failures: list = []
+        output = translate_srt(
+            chat,
+            source.read_text(encoding="utf-8"),
+            chunk_chars=800,
+            source="fill.srt",
+            eol="\n",
+            failures=failures,
+            window_size=1,
+        )
+        self.assertEqual([item.segment for item in failures], ["line 1"])
+        self.assertIn("臆造拉丁词", failures[0].reason)
+        blocks = parse_srt(output, "\n")
+        self.assertEqual(blocks[0][0].text, "这是SEXPAR")
+        self.assertNotIn("こんにちは", output)
+        self.assertNotEqual(blocks[0][0].text, "")
+
+    def test_cue_failure_without_candidate_keeps_source(self) -> None:
+        """引擎异常时模型一字未出，没有候选可填，只能保留原文并记失败。"""
+
         def failing_chat(text: str) -> str:
             if "Goodbye" in text:
                 raise EngineError("模拟引擎失败")
@@ -1137,8 +1203,39 @@ class TranslateTests(unittest.TestCase):
         self.assertIn("模拟引擎失败", outcome.failures[0].reason)
         self.assertEqual(outcome.failures[0].segment, "line 2#1")
         text = outcome.output.read_text(encoding="utf-8")
-        self.assertIn("Goodbye", text)
         self.assertIn("译Hello world", text)
+        # 物理结构不变；该句保留原文（无候选可填），并由 failures 点名
+        self.assertIn("Goodbye", text)
+        blocks = parse_srt(text, "\r\n")
+        self.assertEqual([block.index for block, _ in blocks], ["1", "2"])
+
+    def test_batch_repair_failure_fills_candidate(self) -> None:
+        """合流窗口内单句补救也失败时，填回候选而不是回退整句日文。"""
+
+        def chat(prompt: str) -> str:
+            if prompt.count("[#") >= 2:  # 批次调用
+                return "[#1] 译一\n[#2] 这是SEXPAR"
+            if "こんにちは" in prompt:
+                return "译一"
+            return "还是SEXPAR"  # 单句补救也带臆造拉丁词
+
+        failures: list = []
+        output = translate_srt(
+            chat,
+            srt_block("こんにちは", "さようなら"),
+            chunk_chars=800,
+            source="fill-batch.srt",
+            eol="\n",
+            failures=failures,
+            window_size=2,
+            max_window_chars=1000,
+        )
+        self.assertEqual([item.segment for item in failures], ["line 2"])
+        self.assertIn("译一", output)
+        self.assertIn("还是SEXPAR", output)
+        self.assertNotIn("さようなら", output)
+        blocks = parse_srt(output, "\n")
+        self.assertEqual(blocks[1][0].text, "还是SEXPAR")
 
     def test_prose_preserves_blank_lines(self) -> None:
         text = "## Title\n\nParagraph one.\n\n\nParagraph two.\n"
