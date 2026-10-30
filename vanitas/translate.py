@@ -1082,15 +1082,15 @@ class TranslationEngine:
         self._entity_engine: DynamicEntityEngine | None = None
         self._lookahead = ""
         self._on_stat = on_stat
-        # 术语表只在 ASMR 任务加载；其余任务保持空表，后处理零成本。
+        # 术语表只在 ASMR 任务加载（生产/实验模板都算）；其余任务保持空表。
         self._glossary = Glossary()
-        if task_template == "translate_asmr":
+        if prompts.is_asmr_task(task_template):
             self._glossary = Glossary.load(
                 prompt_dir.parent / "glossary" / "asmr.tsv"
             )
         # 合并表与术语表同级：仅 ASMR 任务且表存在时启用，缺失时保持旧行为。
         self._join_rules: tuple[JoinRule, ...] = ()
-        if task_template == "translate_asmr":
+        if prompts.is_asmr_task(task_template):
             joins_path = prompt_dir.parent / "asr_joins.tsv"
             if joins_path.exists():
                 self._join_rules = load_joins(joins_path)
@@ -1102,7 +1102,7 @@ class TranslationEngine:
 
     @property
     def task_template(self) -> str:
-        """只读任务模板名；T1 守卫用它确认只对 translate_asmr 生效。"""
+        """只读任务模板名；T1 守卫用它识别生产/实验 ASMR 模板。"""
         return self._task_template
 
     @property
@@ -1875,15 +1875,15 @@ def translate_srt(
         pronoun="你" if register == "intimate" else "auto",
     )
     index = DuplicateIndex()
-    # T1 只对 ASMR 模板启用：显式 asmr_guard=True 且引擎模板精确为
-    # translate_asmr；没有 task_template 属性的 duck-typed chat 不启用。
+    # T1 只对 ASMR 模板启用：生产/实验模板都算 ASMR；没有
+    # task_template 属性的 duck-typed chat 不启用。
     t1_budget = t1_budget if t1_budget is not None else T1Budget()
     if asmr_guard:
         t1_budget.begin_file(source, file_cues)
     else:
         t1_budget.begin_file(source)
     engine_template = getattr(chat, "task_template", None)
-    asmr_enabled = bool(asmr_guard) and engine_template == "translate_asmr"
+    asmr_enabled = bool(asmr_guard) and prompts.is_asmr_task(engine_template)
     short_index = (
         DuplicateIndex(min_chars=8, translation_ratio=0.85)
         if asmr_enabled

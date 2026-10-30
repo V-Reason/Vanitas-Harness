@@ -1900,13 +1900,19 @@ class QualityGuardTests(unittest.TestCase):
             blocks.append(f"{index}\n{start} --> {end}\n{text}")
         return "\n\n".join(blocks) + "\n"
 
-    def engine(self, client, *, context_window: int = 5) -> TranslationEngine:
+    def engine(
+        self,
+        client,
+        *,
+        context_window: int = 5,
+        task_template: str = "translate_asmr",
+    ) -> TranslationEngine:
         return TranslationEngine(
             client,
             ROOT / "config" / "prompts",
             "",
             options=translation_options(context_window=context_window),
-            task_template="translate_asmr",
+            task_template=task_template,
         )
 
     def run_translate(
@@ -2375,6 +2381,49 @@ class QualityGuardTests(unittest.TestCase):
             options=translation_options(),
         )
         self.assertEqual(plain.task_template, "translate")
+
+    def test_experimental_asmr_template_enables_t1(self) -> None:
+        client = ScriptedTranslationClient(
+            [
+                f"[#1] {self.T1_TRANSLATION}\n[#2] {self.T1_TRANSLATION}",
+                "[#2] 嗯嗯",
+            ]
+        )
+        engine = self.engine(
+            client, task_template="translate_asmr_experimental"
+        )
+        self.assertEqual(
+            engine.task_template, "translate_asmr_experimental"
+        )
+        self.assertEqual(len(engine.glossary.entries), 3)
+        self.assertTrue(engine.join_rules)
+        budget = T1Budget()
+        failures: list = []
+        output = translate_srt(
+            engine,
+            self.srt_text("はい", "うん"),
+            chunk_chars=800,
+            source="experimental.srt",
+            eol="\n",
+            failures=failures,
+            window_size=2,
+            max_window_chars=1000,
+            asmr_guard=True,
+            t1_budget=budget,
+            file_cues=2,
+        )
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            self.block_texts(output), [self.T1_TRANSLATION, "嗯嗯"]
+        )
+        self.assertIn(
+            ("accepted", 2),
+            {
+                (event.outcome, int(event.cue))
+                for event in budget.file_events
+            },
+        )
 
     def test_short_duplicate_hits_once_and_accepts_shorter_candidate(self) -> None:
         client = ScriptedTranslationClient(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sys
 import tempfile
@@ -28,11 +29,58 @@ class PromptTests(unittest.TestCase):
         self.assertTrue(prompts.system_prompt(self.prompt_dir).strip())
         self.assertEqual(
             prompts.task_names(self.prompt_dir),
-            ["agent", "chat", "code", "translate", "translate_asmr"],
+            [
+                "agent",
+                "chat",
+                "code",
+                "translate",
+                "translate_asmr",
+                "translate_asmr_experimental",
+            ],
         )
         for name in prompts.task_names(self.prompt_dir):
             text = prompts.load_task(self.prompt_dir, name)
             self.assertIn("{input}", text)
+
+    def test_asmr_prompt_environments_are_byte_locked(self) -> None:
+        production = (
+            self.prompt_dir / "task_translate_asmr.md"
+        ).read_bytes()
+        experimental = (
+            self.prompt_dir / "task_translate_asmr_experimental.md"
+        ).read_bytes()
+        self.assertEqual(len(production), 12784)
+        self.assertEqual(
+            hashlib.sha256(production).hexdigest().upper(),
+            "CC2B4C82CA7AD6BAC5F487F157225CEB22BCC30BD059DDFDBD392AA7CD079C84",
+        )
+        self.assertEqual(len(experimental), 5399)
+        self.assertEqual(
+            hashlib.sha256(experimental).hexdigest().upper(),
+            "7E589E421627645D622E353309039047FFD56F020824FB73DA3EA22F8B66C795",
+        )
+        self.assertNotEqual(production, experimental)
+        self.assertEqual(
+            prompts.placeholders(
+                prompts.load_task(self.prompt_dir, "translate_asmr_experimental")
+            ),
+            {"input", "context_history"},
+        )
+
+    def test_asmr_template_helper_is_single_source(self) -> None:
+        self.assertEqual(
+            prompts.asmr_template("production"), "translate_asmr"
+        )
+        self.assertEqual(
+            prompts.asmr_template("experimental"),
+            "translate_asmr_experimental",
+        )
+        self.assertTrue(prompts.is_asmr_task("translate_asmr"))
+        self.assertTrue(prompts.is_asmr_task("translate_asmr_experimental"))
+        self.assertFalse(prompts.is_asmr_task("translate"))
+        self.assertFalse(prompts.is_asmr_task(None))
+        with self.assertRaises(ConfigError):
+            prompts.asmr_template("bogus")
 
     def test_render_substitutes_all_placeholders(self) -> None:
         template = "日期 {date} / 模型 {model} / 上文 {context}\n{input}"

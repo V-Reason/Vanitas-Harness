@@ -13,6 +13,7 @@ from .schema import (
     MODEL_FIELDS, PROFILE_FIELDS, SETTINGS_FIELDS, REQUEST_FIELDS,
     LAUNCHER_FIELDS, REPL_FIELDS, CHAT_FIELDS, AGENT_FIELDS,
     TOOLS_FIELDS, BATCH_FIELDS, TRANSLATE_FIELDS, PRESET_FIELDS,
+    ENVIRONMENT_NAMES,
     DEFAULTS_FIELDS, DEFAULTS_ROLE_FALLBACK, UI_FIELDS, THEME_KEYS,
     COLOR_MODES, COLOR_NAMES, DEFAULT_THEME, AGENT_ACTION_NAMES,
     DEFAULT_AUTO_ACTIONS, DEFAULT_CONFIRM_ACTIONS, DEFAULT_ACTION_ALIASES,
@@ -896,6 +897,17 @@ def _load_settings(document: dict) -> Settings:
         _fail("settings.translate.default_preset", "必须是非空字符串")
     default_preset = default_preset.strip()
 
+    environment = translate.get("environment", "production")
+    if (
+        not isinstance(environment, str)
+        or environment.strip() not in ENVIRONMENT_NAMES
+    ):
+        _fail(
+            "settings.translate.environment",
+            "必须是 production 或 experimental",
+        )
+    environment = environment.strip()
+
     raw_presets = translate.get("presets", {})
     if not isinstance(raw_presets, dict):
         _fail("settings.translate.presets", "必须是 JSON 对象")
@@ -967,6 +979,7 @@ def _load_settings(document: dict) -> Settings:
         temperature=translate_temperature,
         max_split_depth=max_split_depth,
         default_preset=default_preset,
+        environment=environment,
         presets=presets,
     )
 
