@@ -464,9 +464,10 @@ ASMR_T1_CODES = frozenset(
 )
 
 # short_duplicate：只抓“短源文却得到同一个长译文”的跨 cue 复用。
-# 较短源文 ≤8 字是 roadmap v2 §4 / B8 写死的边界；9 字的近义源文对
-# （17/9 字、相似 0.46）落在阈值外，必须 0 命中。
-SHORT_DUPLICATE_MAX_SOURCE_CHARS = 8
+# 上限由 8 提到 11：真实语料里 `ご無理はなさらずに`(9 字) 这类短句确实跨 cue
+# 复用了同一译文，旧上限 8 漏报（V3 实测 6 条 duplicate_translation 多数落在
+# 9~11 字）。11 字以上很少再"短到可以整句复用"，继续放大只会把合法近义对判成重复。
+SHORT_DUPLICATE_MAX_SOURCE_CHARS = 11
 
 # 纯拟声/叠词的常见汉字。只用于 T1 的反例放行，不参与翻译或替换。
 # 来源：提示词 sfx 分节列出的“沙沙/簌簌/咕噜/哧溜/嗯姆”等拟声词与
