@@ -31,11 +31,18 @@ ENV_KEYS = (
     "VANITAS_PROFILE",
     "VANITAS_CONFIG_DIR",
     "VANITAS_ORIG_CWD",
+    "VANITAS_HOME",
 )
+
+# 每个用例的临时 home；clean_env 会把它注入 VANITAS_HOME，确保过程文件
+# 永远不写进跑测试的人的真实 ~/.vanitas。
+_TEST_HOME: Path | None = None
 
 
 @contextmanager
 def clean_env(**values):
+    if "VANITAS_HOME" not in values and _TEST_HOME is not None:
+        values = {**values, "VANITAS_HOME": str(_TEST_HOME)}
     saved = {key: os.environ.get(key) for key in ENV_KEYS}
     for key in ENV_KEYS:
         os.environ.pop(key, None)
@@ -111,9 +118,18 @@ def run(argv: list[str]) -> tuple[int, str, str]:
 
 class CliSmokeTests(unittest.TestCase):
     def setUp(self) -> None:
+        global _TEST_HOME
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.dir = Path(self._tmp.name)
+        self.home = self.dir / "home"
+        _TEST_HOME = self.home
+
+    def run_dir(self, home: Path) -> Path:
+        """本次 translate 的过程文件目录（~/.vanitas/translate/<stamp>）。"""
+        dirs = sorted((home / "translate").glob("*"))
+        self.assertEqual(len(dirs), 1, [path.name for path in dirs])
+        return dirs[0]
 
     def test_version(self) -> None:
         with clean_env():
@@ -200,6 +216,30 @@ class CliSmokeTests(unittest.TestCase):
         # 第 1 条来自快照（FakeClient 只会返回“译文”），第 2 条才是新译。
         self.assertEqual([block.text for block, _ in blocks], ["断点译文", "译文"])
         self.assertFalse(snapshot.is_file())
+
+    def test_translate_artifacts_do_not_pollute_out_dir(self) -> None:
+        """过程文件必须落在 ~/.vanitas/translate，不得写进输出目录。"""
+        source = self.dir / "clean.srt"
+        source.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8"
+        )
+        out_dir = self.dir / "out"
+        with clean_env():
+            with mock.patch.object(
+                cli, "_ensure_engine", return_value=(FakeClient(), 4060)
+            ):
+                code, out, err = run(
+                    ["translate", str(source), "--out-dir", str(out_dir)]
+                )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            sorted(path.name for path in out_dir.iterdir()), ["clean.zh.srt"]
+        )
+        run_dir = self.run_dir(self.home)
+        self.assertTrue((run_dir / "translation_meta.json").is_file())
+        # 过程文件搬走了，就必须在收尾告诉用户去哪儿找。
+        self.assertIn("过程文件", out)
+        self.assertIn(str(run_dir), out)
 
     def test_translate_with_fake_engine(self) -> None:
         source = self.dir / "sample.srt"
@@ -496,13 +536,14 @@ class CliSmokeTests(unittest.TestCase):
         ]
         source.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
         out_dir = self.dir / "out"
+        home = self.dir / "home"
         outcome = mock.Mock()
         outcome.source = source
         outcome.output = out_dir / "long.zh.srt"
         outcome.segments = 1404
         outcome.failures = []
         outcome.t1_events = ()
-        with clean_env():
+        with clean_env(VANITAS_HOME=str(home)):
             with (
                 mock.patch.object(
                     cli, "_ensure_engine", return_value=(FakeClient(), 4060)
@@ -529,7 +570,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(
             translate_file.call_args.kwargs["file_cues"], 1404
         )
-        budget_file = out_dir / "t1_budget.json"
+        budget_file = self.run_dir(home) / "t1_budget.json"
         data = json.loads(budget_file.read_text(encoding="utf-8"))
         self.assertEqual(data["max_total"], 14)
         self.assertEqual(data["total_cues"], 1404)
@@ -582,30 +623,36 @@ class CliSmokeTests(unittest.TestCase):
         outcome.segments = 1
         outcome.failures = []
         outcome.t1_events = ()
-        with clean_env():
-            with (
-                mock.patch.object(
-                    cli, "_ensure_engine", return_value=(FakeClient(), 4060)
-                ),
-                mock.patch.object(
-                    cli.translate, "translate_file", return_value=outcome
-                ),
-            ):
-                code, _out, err = run(
-                    [
-                        "translate",
-                        "a.srt",
-                        "--preset",
-                        "asmr",
-                        "--out-dir",
-                        str(out_dir),
-                        *extra,
-                    ]
+        with tempfile.TemporaryDirectory() as home_tmp:
+            home = Path(home_tmp)
+            with clean_env(VANITAS_HOME=str(home)):
+                with (
+                    mock.patch.object(
+                        cli,
+                        "_ensure_engine",
+                        return_value=(FakeClient(), 4060),
+                    ),
+                    mock.patch.object(
+                        cli.translate, "translate_file", return_value=outcome
+                    ),
+                ):
+                    code, _out, err = run(
+                        [
+                            "translate",
+                            "a.srt",
+                            "--preset",
+                            "asmr",
+                            "--out-dir",
+                            str(out_dir),
+                            *extra,
+                        ]
+                    )
+            self.assertEqual(code, 0, err)
+            return json.loads(
+                (self.run_dir(home) / "translation_meta.json").read_text(
+                    encoding="utf-8"
                 )
-        self.assertEqual(code, 0, err)
-        return json.loads(
-            (out_dir / "translation_meta.json").read_text(encoding="utf-8")
-        )
+            )
 
     def test_translate_meta_production_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -798,7 +845,8 @@ class CliSmokeTests(unittest.TestCase):
 
     def test_translate_t1_events_file_scoped_and_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            out_dir = Path(tmp)
+            out_dir = Path(tmp) / "out"
+            home = Path(tmp) / "home"
 
             def fake_translate(chat, source, settings, **kwargs):
                 outcome = mock.Mock()
@@ -818,7 +866,7 @@ class CliSmokeTests(unittest.TestCase):
                 )
                 return outcome
 
-            with clean_env():
+            with clean_env(VANITAS_HOME=str(home)):
                 with (
                     mock.patch.object(
                         cli,
@@ -848,7 +896,7 @@ class CliSmokeTests(unittest.TestCase):
             self.assertIn("事件 2", out)
             self.assertIn("唯一 cue 2", out)
 
-            events_file = out_dir / "t1_events.jsonl"
+            events_file = self.run_dir(home) / "t1_events.jsonl"
             self.assertTrue(events_file.is_file())
             records = [
                 json.loads(line)
@@ -868,7 +916,7 @@ class CliSmokeTests(unittest.TestCase):
                     for record in records
                 )
             )
-            budget_file = out_dir / "t1_budget.json"
+            budget_file = self.run_dir(home) / "t1_budget.json"
             self.assertTrue(budget_file.is_file())
             budget = json.loads(
                 budget_file.read_text(encoding="utf-8")
