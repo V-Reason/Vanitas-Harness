@@ -220,6 +220,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.settings.batch.max_tokens_limit, 8192)
         self.assertEqual(config.settings.translate.max_split_depth, 3)
         self.assertEqual(config.settings.translate.default_preset, "subtitle")
+        self.assertEqual(config.settings.translate.environment, "production")
         self.assertEqual(
             config.settings.translate.presets["general"]["task_template"],
             "translate",
@@ -267,6 +268,26 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.settings.translate.output_ratio, 2.5)
         self.assertEqual(config.settings.translate.prompt_safety_tokens, 64)
         self.assertEqual(config.settings.translate.monitor_lines, 5)
+
+    def test_environment_defaults_and_rejects_invalid(self) -> None:
+        del self.settings["translate"]["environment"]
+        self.write_settings()
+        with clean_env():
+            config = self.load()
+        self.assertEqual(config.settings.translate.environment, "production")
+
+        self.settings["translate"]["environment"] = "experimental"
+        self.write_settings()
+        with clean_env():
+            config = self.load()
+        self.assertEqual(config.settings.translate.environment, "experimental")
+
+        self.settings["translate"]["environment"] = "bogus"
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError) as ctx:
+                self.load()
+        self.assertIn("environment", str(ctx.exception))
 
     def test_new_operational_fields_are_optional(self) -> None:
         for section in ("chat", "agent", "batch"):

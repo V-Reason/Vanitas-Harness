@@ -141,9 +141,11 @@ TRANSLATE_FIELDS = frozenset(
         "temperature",
         "max_split_depth",
         "default_preset",
+        "environment",
         "presets",
     }
 )
+ENVIRONMENT_NAMES = frozenset({"production", "experimental"})
 PRESET_FIELDS = frozenset(
     {
         "task_template",
@@ -445,6 +447,7 @@ class TranslateSettings:
     temperature: float = 0.2
     max_split_depth: int = 3
     default_preset: str = "general"
+    environment: str = "production"
     presets: dict = field(default_factory=dict)
 
 

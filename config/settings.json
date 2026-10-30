@@ -93,6 +93,7 @@
     "temperature": 0.2,
     "max_split_depth": 3,
     "default_preset": "subtitle",
+    "environment": "production",
     "presets": {
       "subtitle": {
         "task_template": "translate",

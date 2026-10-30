@@ -18,6 +18,29 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 VAR_RE = re.compile(r"\{([a-z][a-z0-9_]*)\}")
 DEFAULT_SYSTEM = "system_default"
 
+# ASMR 生产/实验模板的唯一识别源：environment 名到 task_template 的映射。
+ASMR_ENVIRONMENT_TEMPLATES = {
+    "production": "translate_asmr",
+    "experimental": "translate_asmr_experimental",
+}
+ASMR_TASK_TEMPLATES = frozenset(ASMR_ENVIRONMENT_TEMPLATES.values())
+
+
+def asmr_template(environment: str) -> str:
+    """把运行环境映射为 ASMR 任务模板；非法环境给可读 ConfigError。"""
+    try:
+        return ASMR_ENVIRONMENT_TEMPLATES[environment]
+    except (KeyError, TypeError):
+        choices = "、".join(ASMR_ENVIRONMENT_TEMPLATES)
+        raise ConfigError(
+            f"未知运行环境 {environment!r}；可用：{choices}"
+        ) from None
+
+
+def is_asmr_task(name: str | None) -> bool:
+    """生产/实验 ASMR 模板都算 ASMR；其余模板（含 None）为 False。"""
+    return str(name or "") in ASMR_TASK_TEMPLATES
+
 
 def template_path(prompt_dir: Path, name: str) -> Path:
     """把模板名解析为 <prompt_dir>/<name>.md，拒绝任何路径穿越。"""

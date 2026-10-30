@@ -7,10 +7,12 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -20,7 +22,7 @@ if str(ROOT) not in sys.path:
 
 from vanitas import cli  # noqa: E402
 from vanitas.config import DEFAULT_THEME, load_config  # noqa: E402
-from vanitas.errors import GuardError  # noqa: E402
+from vanitas.errors import ConfigError, GuardError  # noqa: E402
 from vanitas.translate import T1Budget, T1Event  # noqa: E402
 from vanitas.ui import Palette  # noqa: E402
 
@@ -504,7 +506,9 @@ class CliSmokeTests(unittest.TestCase):
             (["--preset", "subtitle"], False),
             (["--preset", "prose"], False),
             (["--preset", "general"], False),
+            (["--preset", "subtitle", "--env", "production"], False),
             (["--preset", "asmr"], True),
+            (["--preset", "asmr", "--env", "experimental"], True),
         )
         for extra, expected in cases:
             with self.subTest(extra=extra):
@@ -536,6 +540,189 @@ class CliSmokeTests(unittest.TestCase):
                 self.assertIsInstance(
                     translate_file.call_args.kwargs["t1_budget"], T1Budget
                 )
+
+    def _run_asmr_meta(self, extra: list[str], out_dir: Path):
+        outcome = mock.Mock()
+        outcome.source = Path("a.srt")
+        outcome.output = out_dir / "a.zh.srt"
+        outcome.segments = 1
+        outcome.failures = []
+        outcome.t1_events = ()
+        with clean_env():
+            with (
+                mock.patch.object(
+                    cli, "_ensure_engine", return_value=(FakeClient(), 4060)
+                ),
+                mock.patch.object(
+                    cli.translate, "translate_file", return_value=outcome
+                ),
+            ):
+                code, _out, err = run(
+                    [
+                        "translate",
+                        "a.srt",
+                        "--preset",
+                        "asmr",
+                        "--out-dir",
+                        str(out_dir),
+                        *extra,
+                    ]
+                )
+        self.assertEqual(code, 0, err)
+        return json.loads(
+            (out_dir / "translation_meta.json").read_text(encoding="utf-8")
+        )
+
+    def test_translate_meta_production_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta = self._run_asmr_meta([], Path(tmp) / "out")
+        self.assertEqual(meta["environment"], "production")
+        self.assertEqual(
+            set(meta),
+            {
+                "environment",
+                "task_template",
+                "prompt_sha256",
+                "prompt_bytes",
+                "preset",
+                "temperature",
+                "model",
+                "started_at",
+            },
+        )
+        self.assertEqual(meta["task_template"], "translate_asmr")
+        self.assertEqual(meta["prompt_bytes"], 12784)
+        self.assertEqual(
+            meta["prompt_sha256"],
+            "CC2B4C82CA7AD6BAC5F487F157225CEB22BCC30BD059DDFDBD392AA7CD079C84",
+        )
+        self.assertEqual(meta["preset"], "asmr")
+        self.assertEqual(meta["temperature"], 0.2)
+        self.assertEqual(meta["model"], "hymt")
+        self.assertTrue(meta["started_at"])
+
+    def test_translate_meta_experimental_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta = self._run_asmr_meta(
+                ["--env", "experimental"], Path(tmp) / "out"
+            )
+        self.assertEqual(meta["environment"], "experimental")
+        self.assertEqual(meta["task_template"], "translate_asmr_experimental")
+        self.assertEqual(meta["prompt_bytes"], 5399)
+        self.assertEqual(
+            meta["prompt_sha256"],
+            "7E589E421627645D622E353309039047FFD56F020824FB73DA3EA22F8B66C795",
+        )
+
+    def test_translate_environment_rejects_invalid_and_unimplemented(self) -> None:
+        cases = (
+            (["--env", "bogus"], "未知运行环境"),
+            (["--env", ""], "未知运行环境"),
+            (
+                ["--preset", "subtitle", "--env", "experimental"],
+                "experimental 环境未实现",
+            ),
+            (
+                ["--preset", "prose", "--env", "experimental"],
+                "experimental 环境未实现",
+            ),
+            (
+                ["--preset", "general", "--env", "experimental"],
+                "experimental 环境未实现",
+            ),
+        )
+        for extra, message in cases:
+            with self.subTest(extra=extra):
+                with clean_env():
+                    code, _out, err = run(["translate", "a.srt", *extra])
+                self.assertEqual(code, 4)
+                self.assertIn(message, err)
+
+    def test_translate_prompt_resolution_is_isolated(self) -> None:
+        config = load_config()
+        settings = config.settings.translate
+        prompt_dir = config.config_dir / "prompts"
+        with mock.patch.object(
+            cli.prompts, "load_task", wraps=cli.prompts.load_task
+        ) as load:
+            name, _entry, template = cli._resolve_translate_preset(
+                settings,
+                "asmr",
+                prompt_dir,
+                environment=cli.environments.PRODUCTION,
+            )
+        self.assertEqual(name, "asmr")
+        self.assertEqual(template, "translate_asmr")
+        self.assertEqual(
+            load.call_args_list,
+            [mock.call(prompt_dir, "translate_asmr")],
+        )
+
+        with mock.patch.object(
+            cli.prompts, "load_task", wraps=cli.prompts.load_task
+        ) as load:
+            _name, _entry, template = cli._resolve_translate_preset(
+                settings,
+                "asmr",
+                prompt_dir,
+                environment=cli.environments.EXPERIMENTAL,
+            )
+        self.assertEqual(template, "translate_asmr_experimental")
+        self.assertEqual(
+            load.call_args_list,
+            [mock.call(prompt_dir, "translate_asmr_experimental")],
+        )
+
+        experimental_settings = replace(settings, environment="experimental")
+        with mock.patch.object(
+            cli.prompts, "load_task", wraps=cli.prompts.load_task
+        ) as load:
+            _name, _entry, template = cli._resolve_translate_preset(
+                experimental_settings,
+                "asmr",
+                prompt_dir,
+            )
+        self.assertEqual(template, "translate_asmr_experimental")
+        self.assertEqual(
+            load.call_args_list,
+            [mock.call(prompt_dir, "translate_asmr_experimental")],
+        )
+        with self.assertRaises(ConfigError) as ctx:
+            cli._resolve_translate_preset(
+                experimental_settings,
+                "subtitle",
+                prompt_dir,
+            )
+        self.assertIn("experimental 环境未实现", str(ctx.exception))
+
+        with mock.patch.object(
+            cli.prompts, "load_task", wraps=cli.prompts.load_task
+        ):
+            with self.assertRaises(ConfigError) as ctx:
+                cli._resolve_translate_preset(
+                    settings,
+                    "subtitle",
+                    prompt_dir,
+                    environment=cli.environments.EXPERIMENTAL,
+                )
+        self.assertIn("experimental 环境未实现", str(ctx.exception))
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            cli.prompts, "load_task", wraps=cli.prompts.load_task
+        ):
+            isolated = Path(tmp)
+            shutil.copyfile(
+                prompt_dir / "task_translate_asmr.md",
+                isolated / "task_translate_asmr.md",
+            )
+            with self.assertRaises(ConfigError) as ctx:
+                cli._resolve_translate_preset(
+                    settings,
+                    "asmr",
+                    isolated,
+                    environment=cli.environments.EXPERIMENTAL,
+                )
+        self.assertIn("translate_asmr_experimental", str(ctx.exception))
 
     def test_translate_reports_t1_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

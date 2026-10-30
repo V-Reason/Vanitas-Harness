@@ -10,14 +10,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 import time
 from dataclasses import asdict, replace
+from datetime import datetime
 from pathlib import Path
 
-from . import __version__, agent as agent_mod, batch as batch_mod, guard, launcher, prompts, translate
+from . import __version__, agent as agent_mod, batch as batch_mod, environments, guard, launcher, prompts, translate
 from .client import LlamaClient
 from .config import (
     AppConfig,
@@ -157,6 +159,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "翻译场景预设：prose（小说/散文）| subtitle（普通字幕，默认）"
             " | asmr（ASMR）| general（旧版 4K/5）"
         ),
+    )
+    translate_cmd.add_argument(
+        "--env",
+        dest="environment",
+        default=None,
+        help="运行环境：production（默认）| experimental；experimental 当前仅 ASMR 实现",
     )
     _add_verbose(translate_cmd, "显示完整逐文件报告")
 
@@ -384,8 +392,15 @@ def _resolve_translate_preset(
     settings: TranslateSettings,
     requested: str | None,
     prompt_dir: Path,
+    *,
+    environment: environments.EnvironmentProfile | None = None,
 ) -> tuple[str, dict, str]:
-    """把 --preset 解析为 (预设名, 预设配置, 任务模板名)。"""
+    """把 --preset 解析为 (预设名, 预设配置, 任务模板名)。
+
+    environment 独立于 preset：production 原样使用 preset 模板；experimental
+    由 profile 决定覆盖，未实现的 preset 直接 ConfigError，不 fallback。
+    """
+    profile = environment or environments.get_environment(settings.environment)
     presets = settings.presets or {}
     if requested is None:
         name = (settings.default_preset or "general").strip()
@@ -400,6 +415,8 @@ def _resolve_translate_preset(
         template = "translate"
     else:
         template = str(entry.get("task_template") or "translate").strip()
+
+    template = profile.resolve_task_template(name, template)
     try:
         prompts.load_task(prompt_dir, template)
     except ConfigError as exc:
@@ -407,6 +424,40 @@ def _resolve_translate_preset(
             f"翻译预设 {name!r} 的模板 {template!r} 不可用：{exc}"
         ) from exc
     return name, entry, template
+
+
+def _write_translation_meta(
+    out_dir: Path,
+    *,
+    environment: str,
+    task_template: str,
+    prompt_dir: Path,
+    preset: str,
+    temperature: float,
+    model_id: str,
+    started_at: str,
+) -> Path:
+    """写 A/B 元数据；只含环境/模板/预设/模型，不含正文或 blind 标识。"""
+    prompt_path = Path(prompt_dir) / f"task_{task_template}.md"
+    raw = prompt_path.read_bytes()
+    payload = {
+        "environment": environment,
+        "task_template": task_template,
+        "prompt_sha256": hashlib.sha256(raw).hexdigest().upper(),
+        "prompt_bytes": len(raw),
+        "preset": preset,
+        "temperature": float(temperature),
+        "model": str(model_id),
+        "started_at": str(started_at),
+    }
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "translation_meta.json"
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    return path
 
 
 def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette) -> int:
@@ -419,15 +470,28 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
             file=sys.stderr,
         )
     settings = config.settings.translate
+    started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    requested_environment = getattr(args, "environment", None)
+    try:
+        environment = environments.get_environment(
+            requested_environment
+            if requested_environment is not None
+            else settings.environment
+        )
+    except ConfigError as exc:
+        print(palette.err(str(exc)), file=sys.stderr)
+        return 4
     try:
         preset_name, preset_info, task_template = _resolve_translate_preset(
             settings,
             getattr(args, "preset", None),
             config.config_dir / "prompts",
+            environment=environment,
         )
     except ConfigError as exc:
         print(palette.err(str(exc)), file=sys.stderr)
         return 4
+    environment_name = environment.name
     effective = replace(
         settings,
         context_window=int(
@@ -486,6 +550,26 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
         except TranslateError as exc:
             print(palette.err(str(exc)), file=sys.stderr)
             return 5
+    if out_dir is not None:
+        try:
+            _write_translation_meta(
+                out_dir,
+                environment=environment_name,
+                task_template=task_template,
+                prompt_dir=config.config_dir / "prompts",
+                preset=preset_name,
+                temperature=effective.temperature,
+                model_id=model.id,
+                started_at=started_at,
+            )
+        except OSError as exc:
+            print(
+                palette.warn(
+                    f"translation_meta.json 写入失败：{out_dir}；"
+                    f"{exc.strerror or exc}"
+                ),
+                file=sys.stderr,
+            )
     monitor = TranslationMonitor(
         stream=sys.stderr,
         enabled=palette.enabled,
@@ -569,7 +653,7 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
     report = TranslationReport()
     total_cues = 0
     file_cue_counts: dict[str, int] = {}
-    if task_template == "translate_asmr" and plans:
+    if prompts.is_asmr_task(task_template) and plans:
         total_cues, file_cue_counts = _count_asmr_cues(
             [plan.source.path for plan in plans]
         )
@@ -620,7 +704,7 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                     window_size=window_size,
                     max_window_chars=max_window_chars,
                     lookahead_cues=lookahead_cues,
-                    asmr_guard=(task_template == "translate_asmr"),
+                    asmr_guard=prompts.is_asmr_task(task_template),
                     t1_budget=t1_budget,
                     file_cues=file_cue_counts.get(str(source)),
                     join_rules=(
