@@ -159,12 +159,15 @@ from .types import (
 from .window import (
     WINDOW_ID_ANY_RE,
     WINDOW_ID_RE,
+    WindowAlignment,
     _copies_history,
     _normalize_for_compare,
     _parse_window_items,
     _source_texts_are_similar,
     _translation_is_too_short,
     _window_translation_is_suspicious,
+    align_window_response,
+    identify_suspicious_cues,
     parse_window_response,
     recover_window_response,
     strip_window_id_prefix,
@@ -192,6 +195,7 @@ __all__ = [
     "WINDOW_ID_ANY_RE", "WINDOW_ID_RE", "_copies_history",
     "_normalize_for_compare", "_parse_window_items", "_source_texts_are_similar",
     "_translation_is_too_short", "_window_translation_is_suspicious",
+    "WindowAlignment", "align_window_response", "identify_suspicious_cues",
     "parse_window_response", "recover_window_response", "strip_window_id_prefix",
     # entity
     "ENTITY_CONTEXT_CHARS", "ENTITY_EXAMPLE_CHARS", "ENTITY_HONORIFIC_SUFFIXES",
