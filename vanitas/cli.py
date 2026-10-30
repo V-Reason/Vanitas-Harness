@@ -431,8 +431,26 @@ def _resolve_translate_preset(
     return name, entry, template
 
 
+def _vanitas_home() -> Path:
+    """``~/.vanitas`` 根；``VANITAS_HOME`` 可覆盖（测试与迁移用）。"""
+    raw = os.environ.get("VANITAS_HOME")
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / ".vanitas"
+
+
+def _translate_artifacts_dir(stamp: str) -> Path:
+    """单次 translate 的过程文件目录：``~/.vanitas/translate/<stamp>/``。
+
+    ``translation_meta.json`` / ``t1_events.jsonl`` / ``t1_budget.json`` 一律放
+    这里，绝不写进源目录或 ``--out-dir``：翻译产物目录只留译文，过程文件不
+    污染用户工作区。
+    """
+    return _vanitas_home() / "translate" / stamp
+
+
 def _write_translation_meta(
-    out_dir: Path,
+    directory: Path,
     *,
     environment: str,
     task_template: str,
@@ -455,8 +473,8 @@ def _write_translation_meta(
         "model": str(model_id),
         "started_at": str(started_at),
     }
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / "translation_meta.json"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "translation_meta.json"
     path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -475,7 +493,10 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
             file=sys.stderr,
         )
     settings = config.settings.translate
-    started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    started = datetime.now().astimezone()
+    started_at = started.isoformat(timespec="seconds")
+    # 过程文件（meta / T1 事件 / T1 预算）统一落在 ~/.vanitas/translate/<stamp>/。
+    artifacts_dir = _translate_artifacts_dir(started.strftime("%Y%m%d-%H%M%S"))
     requested_environment = getattr(args, "environment", None)
     try:
         environment = environments.get_environment(
@@ -555,26 +576,25 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
         except TranslateError as exc:
             print(palette.err(str(exc)), file=sys.stderr)
             return 5
-    if out_dir is not None:
-        try:
-            _write_translation_meta(
-                out_dir,
-                environment=environment_name,
-                task_template=task_template,
-                prompt_dir=config.config_dir / "prompts",
-                preset=preset_name,
-                temperature=effective.temperature,
-                model_id=model.id,
-                started_at=started_at,
-            )
-        except OSError as exc:
-            print(
-                palette.warn(
-                    f"translation_meta.json 写入失败：{out_dir}；"
-                    f"{exc.strerror or exc}"
-                ),
-                file=sys.stderr,
-            )
+    try:
+        _write_translation_meta(
+            artifacts_dir,
+            environment=environment_name,
+            task_template=task_template,
+            prompt_dir=config.config_dir / "prompts",
+            preset=preset_name,
+            temperature=effective.temperature,
+            model_id=model.id,
+            started_at=started_at,
+        )
+    except OSError as exc:
+        print(
+            palette.warn(
+                f"translation_meta.json 写入失败：{artifacts_dir}；"
+                f"{exc.strerror or exc}"
+            ),
+            file=sys.stderr,
+        )
     monitor = TranslationMonitor(
         stream=sys.stderr,
         enabled=palette.enabled,
@@ -669,17 +689,9 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
     t1_details: list[str] = []
     t1_records: list[dict] = []
     t1_unique: set[tuple[str, str]] = set()
-    if out_dir is not None:
-        t1_events_path: Path | None = out_dir / "t1_events.jsonl"
-        t1_budget_path: Path | None = out_dir / "t1_budget.json"
-    elif plans:
-        parents = {plan.target.parent for plan in plans}
-        parent = next(iter(parents)) if len(parents) == 1 else Path.cwd()
-        t1_events_path = parent / "t1_events.jsonl"
-        t1_budget_path = parent / "t1_budget.json"
-    else:
-        t1_events_path = None
-        t1_budget_path = None
+    # 过程文件与输出目录解耦：一律写到 artifacts_dir，不落源目录/--out-dir。
+    t1_events_path: Path = artifacts_dir / "t1_events.jsonl"
+    t1_budget_path: Path = artifacts_dir / "t1_budget.json"
     total = len(plans)
     current_index = 0
     current_started = 0.0
@@ -841,7 +853,8 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                 )
             )
     total_elapsed = max(0.0, time.perf_counter() - batch_started)
-    if t1_budget_path is not None and (t1_records or out_dir is not None):
+    write_t1 = bool(t1_records) or prompts.is_asmr_task(task_template)
+    if write_t1:
         try:
             t1_budget_path.parent.mkdir(parents=True, exist_ok=True)
             t1_budget_path.write_text(
@@ -866,7 +879,7 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
                 ),
                 file=sys.stderr,
             )
-    if t1_events_path is not None and (t1_records or out_dir is not None):
+    if write_t1:
         try:
             t1_events_path.parent.mkdir(parents=True, exist_ok=True)
             with t1_events_path.open(
@@ -894,6 +907,9 @@ def _cmd_translate(config: AppConfig, args: argparse.Namespace, palette: Palette
             )
         )
     )
+    if artifacts_dir.is_dir():
+        # 过程文件搬出了工作区，就必须告诉用户去哪儿找。
+        print(palette.muted(f"过程文件 {artifacts_dir}"))
     if t1_counts:
         labels = (
             ("accepted", "接受"),
