@@ -47,7 +47,9 @@ from .types import (
 )
 from .window import (
     WINDOW_ID_ANY_RE,
-    _window_translation_is_suspicious,
+    WindowAlignment,
+    align_window_response,
+    identify_suspicious_cues,
     parse_window_response,
     recover_window_response,
     strip_window_id_prefix,
@@ -555,6 +557,74 @@ def translate_srt(
     setter = getattr(chat, "set_entity_engine", None)
     if callable(setter):
         setter(entity_engine)
+
+    def partial_window_staging(
+        window: list[tuple[int, Subtitle]],
+        alignment: WindowAlignment,
+        base: tuple[tuple[str, str], ...],
+    ) -> list[str] | None:
+        """局部回退：只对损坏 cue 发单编号请求；任一修不回来就整窗熔断。
+
+        返回按 ``window`` 原始顺序排好的译文；返回 None 表示调用方必须走整窗
+        逐句回退。损坏项来自三处：编号缺失、语义可疑（泄漏/空译/漏译/跨窗
+        复制/同窗成对重复）、以及 ``finalize`` 后仍过不了写回硬校验。
+        """
+        aligned = alignment.aligned
+        corrupted = set(alignment.missing_ids)
+        corrupted |= identify_suspicious_cues(window, aligned, base)
+        served: dict[str, str] = {}
+        for _block_index, subtitle in window:
+            raw = aligned.get(subtitle.index)
+            if raw is None:
+                continue
+            text = finalize(
+                strip_window_id_prefix(raw), subtitle.text, entity_engine
+            )
+            if validate_cue_translation(text) is not None:
+                corrupted.add(subtitle.index)
+                continue
+            served[subtitle.index] = text
+        if not corrupted:
+            return [served[subtitle.index] for _b, subtitle in window]
+        if len(corrupted) * 2 >= len(window):
+            # 半数及以上损坏 ⇒ 这一批整体不可信：模型退化通常整窗一致，只是
+            # 只有少数行能被确定性检出（长句被压成拟声词时，同窗短句照样过
+            # 硬校验）。此时保留任何“看起来干净”的批次译文都会放过脏文本，
+            # 因此整窗回退；只有损坏项在少数时，其余条目才值得采信。
+            return None
+
+        # 只补损坏项：先丢掉整窗调用留下的滑动上下文痕迹，再逐条隔离重译，
+        # 避免上一句单编号译文被当成“前文”影响下一句，也避免整窗记录被放大。
+        restore(base)
+        for _block_index, subtitle in window:
+            if subtitle.index not in corrupted:
+                continue
+            if callable(reset_history):
+                reset_history()
+            recovered = _translate_single_cue(
+                chat,
+                subtitle,
+                source=source,
+                failures=failures,
+                record_failure=False,
+            )
+            if recovered is None:
+                return None
+            text = finalize(recovered, subtitle.text, entity_engine)
+            if validate_cue_translation(text) is not None:
+                # 单句补救也做一次斜杠兜底；仍不合格就整窗熔断，绝不留半窗脏文本。
+                salvaged = salvage_slash_translation(text)
+                if validate_cue_translation(salvaged) is not None:
+                    return None
+                text = salvaged
+            served[subtitle.index] = text
+        restore(base)
+        if any(
+            subtitle.index not in served for _b, subtitle in window
+        ):
+            return None
+        return [served[subtitle.index] for _b, subtitle in window]
+
     try:
         windows: list[list[tuple[int, Subtitle]]] = []
         current: list[tuple[int, Subtitle]] = []
@@ -625,85 +695,65 @@ def translate_srt(
                     if callable(clear_lookahead):
                         clear_lookahead()
                 try:
-                    ok, aligned, _missing = parse_window_response(
-                        batch_output, expected_ids
-                    )
-                    if not ok:
-                        ok, aligned, _missing = recover_window_response(
-                            batch_output, expected_ids
+                    alignment = align_window_response(batch_output, expected_ids)
+                    staging = (
+                        None
+                        if alignment.is_catastrophic
+                        else partial_window_staging(
+                            window, alignment, base_history
                         )
-                    if ok and _window_translation_is_suspicious(
-                        window, aligned, base_history
-                    ):
-                        ok = False
-                    if not ok:
+                    )
+                    if staging is None:
+                        # 灾难性结构损坏，或损坏项单句补救失败：整窗熔断回退。
                         fallback = True
                     else:
-                        staging: list[str] = []
-                        for _block_index, subtitle in window:
-                            text = strip_window_id_prefix(
-                                aligned[subtitle.index]
+                        # 审计+定点重译：每个问题 cue 最多一次，且不写 failure。
+                        # 窗口内已接受项进 window_index，使同窗短重复也能在
+                        # 本窗命中；窗口最终接受后才并入全局 short_index。
+                        window_short_index = (
+                            DuplicateIndex(
+                                min_chars=8, translation_ratio=0.85
                             )
-                            text = finalize(text, subtitle.text, entity_engine)
-                            staging.append(text)
-                        bad = next(
-                            (
-                                reason
-                                for text in staging
-                                if (reason := validate_cue_translation(text))
-                            ),
-                            None,
+                            if asmr_enabled
+                            else None
                         )
-                        if bad:
-                            fallback = True
-                        else:
-                            # 审计+定点重译：每个问题 cue 最多一次，且不写 failure。
-                            # 窗口内已接受项进 window_index，使同窗短重复也能在
-                            # 本窗命中；窗口最终接受后才并入全局 short_index。
-                            window_short_index = (
-                                DuplicateIndex(
-                                    min_chars=8, translation_ratio=0.85
-                                )
-                                if asmr_enabled
-                                else None
+                        for position, (_block_index, subtitle) in (
+                            enumerate(window)
+                        ):
+                            source_text = window_sources[position]
+                            cue = window_cues[position]
+                            staging[position] = audit_retry(
+                                subtitle,
+                                source_text,
+                                staging[position],
+                                cue,
+                                entity_engine,
+                                base_history,
+                                window_short_index,
                             )
-                            for position, (_block_index, subtitle) in (
-                                enumerate(window)
-                            ):
-                                source_text = window_sources[position]
-                                cue = window_cues[position]
-                                staging[position] = audit_retry(
-                                    subtitle,
-                                    source_text,
-                                    staging[position],
-                                    cue,
-                                    entity_engine,
-                                    base_history,
-                                    window_short_index,
+                            if window_short_index is not None:
+                                window_short_index.add(
+                                    cue, source_text, staging[position]
                                 )
-                                if window_short_index is not None:
-                                    window_short_index.add(
-                                        cue, source_text, staging[position]
-                                    )
-                            entity_engine.capture_translations(
-                                window_sources, staging
+                        entity_engine.capture_translations(
+                            window_sources, staging
+                        )
+                        # 无条件恢复批前上下文：干净窗口也要回到 batch 前语义，
+                        # 否则整窗记录会把 context_window 的 cue 语义放大。
+                        restore(
+                            base_history
+                            + tuple(zip(window_sources, staging))
+                        )
+                        for position in range(len(window)):
+                            add_indexes(
+                                window_cues[position],
+                                window_sources[position],
+                                staging[position],
                             )
-                            # 无条件恢复批前上下文：干净窗口也要回到 batch 前语义，
-                            # 否则整窗记录会把 context_window 的 cue 语义放大。
-                            restore(
-                                base_history
-                                + tuple(zip(window_sources, staging))
-                            )
-                            for position in range(len(window)):
-                                add_indexes(
-                                    window_cues[position],
-                                    window_sources[position],
-                                    staging[position],
-                                )
-                            for position, (_block_index, subtitle) in (
-                                enumerate(window)
-                            ):
-                                subtitle.text = staging[position]
+                        for position, (_block_index, subtitle) in (
+                            enumerate(window)
+                        ):
+                            subtitle.text = staging[position]
                 except (EngineError, TranslateError):
                     fallback = True
 

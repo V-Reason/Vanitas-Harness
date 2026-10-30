@@ -117,7 +117,7 @@ Vanitas-Harness\
 │   │   ├── types.py            # 数据契约（dataclass / 预算 / 事件）
 │   │   ├── cleaner.py          # 确定性清洗与写回硬校验（0 Token）
 │   │   ├── format.py           # SRT/纯文本解析、分块、EOL 归一化
-│   │   ├── window.py           # 微批次 [#N] 协议与窗口错位熔断
+│   │   ├── window.py           # [#N] 协议、三态对齐与逐 cue 定位
 │   │   ├── entity.py           # 文档级实体倒排与锁定名
 │   │   ├── io.py               # 输入展开、输出规划、文件名遮罩/改名
 │   │   ├── engine.py           # 单段翻译驱动（上下文/预算/截断重译）
