@@ -17,7 +17,6 @@
 | [docs/总设计方案.md](docs/总设计方案.md) | 架构、模块边界、配置/进程/接口契约、取舍 |
 | [docs/项目现状.md](docs/项目现状.md) | 实测矩阵、已知问题、未验证边界、下一步 |
 | [docs/ClaudeCode范式笔记.md](docs/ClaudeCode范式笔记.md) | 交互范式来源与 D1–D6 取舍 |
-| [docs/交接报告.md](docs/交接报告.md) | 接手必读：机器状态、最近七批、已知坑、待拍板项 |
 | [AGENTS.md](AGENTS.md) | 开发纪律、红线、验证门禁、协作契约 |
 
 ---
