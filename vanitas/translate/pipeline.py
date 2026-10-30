@@ -26,7 +26,7 @@ from .critique import execute_critique_repair, triage_cue_risk
 from .entity import DynamicEntityEngine
 from ..errors import EngineError, TranslateError
 from .format import chunk_text, parse_srt, rebuild_srt, split_prose
-from .io import _read_text, output_path
+from .io import _read_text, extract_metadata_entity_seeds, output_path
 from ..quality import (
     ASMR_T1_CODES,
     DuplicateIndex,
@@ -246,6 +246,7 @@ def translate_srt(
     critique_budget: CritiqueBudget | None = None,
     checkpoint_path: Path | None = None,
     resume: bool = False,
+    strip_trailing_periods: bool = True,
 ) -> str:
     """翻译 SRT；ASMR 守卫开启时必须传入调用方共享的 ``t1_budget``。
 
@@ -253,6 +254,8 @@ def translate_srt(
     ``CritiqueBudget`` 才会对高危 cue 追加一次隔离复审请求。
     ``checkpoint_path`` 非空时按窗口增量写 ``.part.srt``；``resume`` 为真
     且快照与源的时间轴逐条对齐时，已完成 cue 直接回填、不再请求模型。
+    ``strip_trailing_periods`` 控制短句末尾孤立句号的剥离（见
+    ``cleaner.normalize_punctuation``），由 ``settings.translate`` 透传。
     """
     if asmr_guard and t1_budget is None:
         # ASMR 预算必须由调用方跨文件共享，禁止按文件静默新建。
@@ -336,7 +339,9 @@ def translate_srt(
         entity: DynamicEntityEngine | None = None,
     ) -> str:
         """统一的 cue 级后处理顺序：清洗 → 锁定名 → 术语 → 人称 → 窄修复。"""
-        text_out = postprocess_cue_text(zh_text, source_text)
+        text_out = postprocess_cue_text(
+            zh_text, source_text, strip_trailing_period=strip_trailing_periods
+        )
         if entity is not None:
             text_out = entity.enforce_locks(text_out)
         if glossary is not None:
@@ -674,6 +679,11 @@ def translate_srt(
     # 实体索引必须从**源文**建：续传时 completed 的 subtitle.text 已被换成译文，
     # 用 subtitle.text 会把中文当成日语种子。source_snapshot 保留原始日文。
     entity_engine = DynamicEntityEngine(list(source_snapshot))
+    # 文件名元数据先验：``(茜音編).wav`` 这类作品名里的主角名比 ASR 的汉字写法
+    # 可靠；ASR 把「茜音」听成「赤音」时，只有先验能把它纠回来。
+    prior_seeds = extract_metadata_entity_seeds(Path(source))
+    if prior_seeds:
+        entity_engine.seed_prior_entities(prior_seeds)
     if resumed_pairs:
         # 让续传后的专名锁定与前文示例接上前半段，避免恢复后译名漂移。
         entity_engine.capture_translations(
@@ -1185,6 +1195,9 @@ def translate_file(
             critique_budget=critique_budget,
             checkpoint_path=snapshot,
             resume=resume,
+            strip_trailing_periods=getattr(
+                settings, "strip_trailing_periods", True
+            ),
         )
     else:
         segments = sum(1 for paragraph, _ in split_prose(text) if paragraph.strip())

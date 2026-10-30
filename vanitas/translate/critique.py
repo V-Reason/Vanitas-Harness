@@ -35,6 +35,11 @@ KEEP_WORDS = ("保持", "KEEP")
 # 以接续助词收尾却没说完的句子：初译若强行收句，说明可能臆造了结尾。
 HANGING_ENDINGS = ("から", "けど", "けれど", "のに", "ので", "って")
 TERMINAL_CHARS = "。！？!?…"
+# 收句判定不能用"末尾有没有句号"：标点归一（cleaner.normalize_punctuation）
+# 已把短句末尾的孤立句号剥离，按 TERMINAL_CHARS 判会让这条风险信号在
+# 归一之后整体失效（所有短句都"没有收句"）。改为"没有接续/拖音符号即视为
+# 收句"，两种标点形态下结论一致。
+CONTINUATION_CHARS = "，、；：,;:…—~〜♡"
 FAST_PASS_MAX_CHARS = 4
 HANGING_DRAFT_MAX_CHARS = 24
 CRITIQUE_LENGTH_LIMIT = 1.8
@@ -68,7 +73,7 @@ def _is_hanging(source: str, draft: str, nearby: Sequence[str]) -> bool:
     if not body or not body.endswith(HANGING_ENDINGS):
         return False
     tail = draft.strip()
-    if not tail or tail[-1] not in TERMINAL_CHARS:
+    if not tail or tail[-1] in CONTINUATION_CHARS:
         return False
     return len(normalize_compare(tail)) <= HANGING_DRAFT_MAX_CHARS
 

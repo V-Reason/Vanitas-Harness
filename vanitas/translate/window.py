@@ -177,7 +177,12 @@ def align_window_response(
 
 
 def strip_window_id_prefix(text: str) -> str:
-    """删除译文任意位置误带的 [#N]；编号不应进入正文。"""
+    """删除译文任意位置误带的协议编号残渣；编号不应进入正文。
+
+    ``WINDOW_ID_ANY_RE`` 已覆盖单边括号（``#84]`` / ``[#84``）、全角括号、
+    Markdown 包裹（``**[#84]**``）与列表前缀（``1. [#84]``），因此这里不再
+    逐形态打补丁：整类残渣一次剥净，模型换一种写法也不会漏。
+    """
     return WINDOW_ID_ANY_RE.sub("", text.strip()).strip()
 
 

@@ -980,6 +980,11 @@ def _load_settings(document: dict) -> Settings:
         max_split_depth=max_split_depth,
         default_preset=default_preset,
         environment=environment,
+        strip_trailing_periods=(
+            _as_bool(translate, "strip_trailing_periods", "settings.translate")
+            if "strip_trailing_periods" in translate
+            else True
+        ),
         presets=presets,
     )
 

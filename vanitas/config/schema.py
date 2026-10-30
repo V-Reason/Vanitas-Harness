@@ -142,6 +142,7 @@ TRANSLATE_FIELDS = frozenset(
         "max_split_depth",
         "default_preset",
         "environment",
+        "strip_trailing_periods",
         "presets",
     }
 )
@@ -448,6 +449,7 @@ class TranslateSettings:
     max_split_depth: int = 3
     default_preset: str = "general"
     environment: str = "production"
+    strip_trailing_periods: bool = True
     presets: dict = field(default_factory=dict)
 
 
