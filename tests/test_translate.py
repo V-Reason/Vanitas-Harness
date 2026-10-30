@@ -19,6 +19,7 @@ from vanitas.errors import EngineError, TranslateError  # noqa: E402
 from vanitas.translate import (  # noqa: E402
     DynamicEntityEngine,
     NameTarget,
+    Subtitle,
     TranslationEngine,
     TranslationOptions,
     apply_name_renames,
@@ -39,6 +40,7 @@ from vanitas.translate import (  # noqa: E402
     translate_file,
     translate_srt,
     validate_cue_translation,
+    _translate_single_cue,
 )
 
 SETTINGS = TranslateSettings(
@@ -691,6 +693,13 @@ class TranslateTests(unittest.TestCase):
         self.assertIn("斜杠", validate_cue_translation("先生/女士") or "")
         self.assertIsNone(validate_cue_translation("ASMR和NG，1/2 也可以"))
 
+    def test_validate_rejects_blank_line(self) -> None:
+        self.assertIn("空行", validate_cue_translation("A\n\nB") or "")
+        self.assertIn("空行", validate_cue_translation("A\r\n\r\nB") or "")
+        self.assertIn("空行", validate_cue_translation("A\n \nB") or "")
+        # 多行字幕的合法单换行不是空行，不能误杀。
+        self.assertIsNone(validate_cue_translation("A\nB"))
+
     def test_translate_srt_accepts_repeated_short_source_lines(self) -> None:
         source = self.write(
             "repeat.srt",
@@ -869,6 +878,64 @@ class TranslateTests(unittest.TestCase):
             [block.text for block, _ in parse_srt(output, "\n")],
             ["你的话我会听"],
         )
+        self.assertEqual(failures, [])
+
+    def test_blank_line_in_single_cue_keeps_one_block(self) -> None:
+        source = self.write(
+            "blank-line.srt",
+            "1\n00:00:01,000 --> 00:00:02,000\nこんにちは\n",
+        )
+
+        def chat(prompt: str) -> str:
+            return "A\n\nB"
+
+        outcome = translate_file(chat, source, SETTINGS, window_size=1)
+        self.assertEqual(outcome.failures, [])
+        translated = outcome.output.read_text(encoding="utf-8")
+        blocks = parse_srt(translated, "\n")
+        # 结构红线：空行若写回正文，parse_srt 会把它切成两个 block。
+        self.assertEqual(len(blocks), 1)
+        block, _separator = blocks[0]
+        self.assertEqual(block.index, "1")
+        self.assertEqual(block.timing, "00:00:01,000 --> 00:00:02,000")
+        self.assertEqual(block.text, "A\nB")
+        self.assertNotIn("\n\n", block.text)
+
+    def test_multiline_source_keeps_internal_newline(self) -> None:
+        source = self.write(
+            "multiline-keep.srt",
+            "1\n00:00:01,000 --> 00:00:02,000\nline1\nline2\n",
+        )
+
+        def chat(prompt: str) -> str:
+            return "第一行\n第二行"
+
+        outcome = translate_file(chat, source, SETTINGS, window_size=1)
+        self.assertEqual(outcome.failures, [])
+        blocks = parse_srt(outcome.output.read_text(encoding="utf-8"), "\n")
+        self.assertEqual(len(blocks), 1)
+        block, _separator = blocks[0]
+        self.assertEqual(block.index, "1")
+        self.assertEqual(block.timing, "00:00:01,000 --> 00:00:02,000")
+        # 合法的多行字幕单换行必须原样保留，只折叠空行。
+        self.assertEqual(block.text, "第一行\n第二行")
+
+    def test_single_cue_bare_text_collapses_blank_lines(self) -> None:
+        subtitle = Subtitle(
+            index="1",
+            timing="00:00:01,000 --> 00:00:02,000",
+            text="こんにちは",
+        )
+        failures: list = []
+
+        def chat(prompt: str) -> str:
+            # 无 [#N] 的裸文本走 _translate_single_cue 的最后出口。
+            return "A\n\nB"
+
+        cleaned = _translate_single_cue(
+            chat, subtitle, source="bare.srt", failures=failures
+        )
+        self.assertEqual(cleaned, "A\nB")
         self.assertEqual(failures, [])
 
     def test_entity_context_injected_into_second_window(self) -> None:
@@ -2478,6 +2545,20 @@ class PostprocessTests(unittest.TestCase):
             postprocess_cue_text("，第一行\n，第二行", "hello"),
             "第一行\n第二行",
         )
+
+    def test_blank_lines_collapsed_but_single_newline_kept(self) -> None:
+        self.assertEqual(postprocess_cue_text("A\n\nB", "src"), "A\nB")
+        self.assertEqual(postprocess_cue_text("A\r\n\r\nB", "src"), "A\nB")
+        self.assertEqual(postprocess_cue_text("A\n \n\nB", "src"), "A\nB")
+        self.assertNotIn("\n\n", postprocess_cue_text("A\n\nB", "src"))
+        # 多行字幕的合法单换行不得被压掉（Whisper 常见 20×2 多行）。
+        self.assertEqual(
+            postprocess_cue_text("，第一行\n，第二行", "src"),
+            "第一行\n第二行",
+        )
+        # 清洗后为空时保持空，不能凭空造出正文。
+        self.assertEqual(postprocess_cue_text("", "src"), "")
+        self.assertEqual(postprocess_cue_text("\n\n", "src"), "")
 
     def test_window_id_removed_at_cue_boundary(self) -> None:
         self.assertEqual(

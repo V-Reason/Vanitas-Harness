@@ -85,6 +85,11 @@ STAGING_BRACKETS_RE = re.compile(
 REPEATED_PUNCT_RE = re.compile(r"([…—~～♡❤♪])。")
 LEADING_INVALID_PUNCT_RE = re.compile(r"^[，、；：。！？!?\s]+")
 
+# 连续空行（兼容 CRLF/CR）：“换行 + 空白 + 换行”才算空行。SRT 用空行分块，
+# 正文里的空行会被重新解析成额外 block，直接破坏 cue 数/序号/时间轴；
+# 折叠与写回校验共用同一 pattern，避免两处规则漂移。
+BLANK_LINE_RUN_RE = re.compile(r"(?:\r\n|\r|\n)(?:[^\S\r\n]*(?:\r\n|\r|\n))+")
+
 FILENAME_PROMPT = (
     "翻译下面的文件名主体。[[K0]]、[[K1]] 等占位符必须原样保留。"
     "只输出结果，不要解释、不要加引号。\n"
@@ -290,17 +295,24 @@ def repair_slash_alternatives(text: str, *, fallback: bool = False) -> str:
     return text
 
 
-def postprocess_cue_text(zh_text: str, src_text: str) -> str:
-    """cue 级确定性清洗：简繁、行首标点、重复句号、未授权动作括号。
+def _collapse_blank_lines(text: str) -> str:
+    """把连续空行折叠成单个换行；多行字幕的合法单换行原样保留。"""
+    return BLANK_LINE_RUN_RE.sub("\n", text)
 
-    只改字幕正文，不碰序号/时间轴；不调用模型。清洗结果为空时保留清洗前
+
+def postprocess_cue_text(zh_text: str, src_text: str) -> str:
+    """cue 级确定性清洗：空行折叠、简繁、行首标点、重复句号、未授权动作括号。
+
+    只改字幕正文，不碰序号/时间轴；不调用模型。空行折叠在去 ``[#N]`` 之后、
+    逐行处理之前完成：模型常输出 ``A\\n\\nB``，而 SRT 以空行分块，写回会多出
+    一个正文块；多行字幕内部的单换行必须保留。清洗结果为空时保留清洗前
     文本，避免把非空原文静默写成空字幕；这类残留交给 QC 提示。
     """
     original = zh_text.strip()
     if not original:
         return ""
 
-    text = WINDOW_ID_ANY_RE.sub("", zh_text).strip()
+    text = _collapse_blank_lines(WINDOW_ID_ANY_RE.sub("", zh_text)).strip()
     if not text:
         return original
     text = text.translate(TRADITIONAL_TO_SIMPLIFIED_MAP)
@@ -331,9 +343,13 @@ LATIN_ALLOW = frozenset({"ASMR", "NG", "BGM"})
 def validate_cue_translation(text: str) -> str | None:
     """写回前的硬校验；返回原因，None 表示可写回。
 
-    只拒绝确定会破坏中文字幕的伪影：假名、SEXPAR 类臆造词、中日文斜杠
-    并列。其他拉丁词（曲名/人名）交给 QC 的 actionable 检查，避免误杀。
+    只拒绝确定会破坏中文字幕的伪影：空行、假名、SEXPAR 类臆造词、中日文斜杠
+    并列。空行在 ``postprocess_cue_text`` 之后仍要再拦一次：任何绕过后处理的
+    写回路径都会把单条 cue 拆成两个 SRT block，破坏 cue 数/序号/时间轴。
+    其他拉丁词（曲名/人名）交给 QC 的 actionable 检查，避免误杀。
     """
+    if BLANK_LINE_RUN_RE.search(text):
+        return "译文含空行"
     if UNTRANSLATED_KANA_RE.search(text):
         return "译文残留日文假名"
     if ARTIFACT_LATIN_RE.search(text):
@@ -1665,7 +1681,9 @@ def _translate_single_cue(
     if ok:
         return strip_window_id_prefix(aligned[subtitle.index])
 
-    cleaned = strip_window_id_prefix(raw)
+    # 裸文本出口不经过 parse_window_response，必须自己压空行：`A\n\nB` 写回会把
+    # 单条 cue 拆成两个 SRT block。折叠后再做续写行数守卫。
+    cleaned = _collapse_blank_lines(strip_window_id_prefix(raw))
     if not cleaned:
         if record_failure:
             failures.append(
