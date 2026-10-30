@@ -76,15 +76,13 @@ FILENAME_SYMBOL_CONNECTOR = re.compile(
 # 文件名元数据先验：音声作品的主角名几乎总写在文件名/目录名的括号里
 # （``朝のひとりごと(茜音編).wav``），而 ASR 从气声里听出正确汉字写法的概率
 # 极低（必然倾向常见字，把「茜音」听成「赤音」）。用文件系统既有元数据反哺
-# 实体引擎，是全篇专名一致性成本最低的一环。
-METADATA_BRACKET_RE = re.compile(
-    r"[（(【\[〔「『]([^）)】\]〕」』]{1,24})[）)】\]〕」』]"
-)
+# 实体引擎，是全篇专名一致性成本最低的一环。括号解析见 ``_bracket_contents``
+# （必须支持嵌套：`『晨间独白(茜音篇)』`）。
 # 作品名里的通用后缀：剥掉后剩下的才是候选人名。
 METADATA_SUFFIXES = (
     "ロングバージョン", "ショートバージョン", "ボイスドラマ", "ボイス",
     "ルート", "パート", "バージョン", "完全版", "限定版", "通常版",
-    "姐妹", "姉妹", "姊妹",
+    "版本", "姐妹", "姉妹", "姊妹",
     "編", "篇", "役", "ver", "Ver", "VER",
 )
 # 文件名主体本身当作候选的唯一理由：它带 RJ 编号或作品后缀。否则
@@ -107,6 +105,29 @@ METADATA_JUNK_RE = re.compile(r"(?:第\s*\d+\s*[話话]|[Vv]ol\.?\s*\d+|part\s*\
 METADATA_NAME_CHAR_RE = re.compile(r"^[\u3041-\u30ff\u4e00-\u9fa5]+$")
 METADATA_MIN_CHARS = 2
 METADATA_MAX_CHARS = 6
+METADATA_OPEN = "（(【[〔「『"
+METADATA_CLOSE = "）)】]〕」』"
+METADATA_MAX_CANDIDATES = 8
+
+
+def _bracket_contents(text: str) -> list[str]:
+    """按括号配对取出全部括号内容，支持嵌套（内层优先）。
+
+    非重叠正则会在真实文件名上失效：`特典4.语音①『晨间独白(茜音篇)』` 里外层
+    `『』` 把内层 `(茜音篇)` 整段吞掉，只能拿到"晨间独白(茜音篇)"（含括号，
+    字符集校验必挂），真正的人名反而取不到。这里用栈做配对，内外层都产出候选。
+    """
+    stack: list[int] = []
+    found: list[tuple[int, int, str]] = []
+    for index, char in enumerate(text):
+        if char in METADATA_OPEN:
+            stack.append(index)
+        elif char in METADATA_CLOSE and stack:
+            start = stack.pop()
+            found.append((start, index, text[start + 1 : index]))
+    # 内层（起点更靠后）优先；同起点时更靠内的闭合优先。
+    found.sort(key=lambda item: (-item[0], item[1]))
+    return [content for _start, _end, content in found][:METADATA_MAX_CANDIDATES]
 
 
 def _clean_metadata_seed(candidate: str) -> str:
@@ -149,7 +170,7 @@ def extract_metadata_entity_seeds(path: Path) -> list[str]:
     for index, raw in enumerate((path.stem, path.parent.name)):
         if not raw:
             continue
-        candidates = METADATA_BRACKET_RE.findall(raw)
+        candidates = _bracket_contents(raw)
         if not candidates and index == 0 and (
             METADATA_ID_RE.search(raw)
             or raw.rstrip().endswith(METADATA_STEM_SUFFIXES)

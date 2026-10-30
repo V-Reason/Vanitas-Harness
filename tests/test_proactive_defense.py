@@ -361,6 +361,19 @@ class MetadataSeedTests(unittest.TestCase):
             ["あかね"],
         )
 
+    def test_nested_brackets_yield_inner_name(self) -> None:
+        """真实文件名的括号是嵌套的：`『晨间独白(茜音篇)』`。
+
+        旧实现用非重叠正则，外层『』把内层 (茜音篇) 整段吞掉，只能拿到
+        "晨间独白(茜音篇)"（含括号 → 字符集校验必挂），人名反而取不到。
+        """
+        self.assertEqual(
+            extract_metadata_entity_seeds(
+                Path("特典4.语音①『晨间独白(茜音篇)』.srt")
+            ),
+            ["茜音"],
+        )
+
     def test_junk_is_rejected(self) -> None:
         for raw in (
             "<WORKSPACE>/ASMR/【本編】/01_track.srt",
