@@ -610,9 +610,11 @@ class RedLineTests(unittest.TestCase):
 
     def test_production_prompt_template_unchanged(self) -> None:
         raw = PROMPT_TEMPLATE.read_bytes()
-        self.assertEqual(len(raw), 12784)
+        # 生产模板字节锁：提示词一改就必须在这里显式同步，
+        # 避免"提示词被悄悄换了、跑分却对不上旧基线"。
+        self.assertEqual(len(raw), 12427)
         self.assertEqual(
-            hashlib.sha256(raw).hexdigest()[:8].upper(), "CC2B4C82"
+            hashlib.sha256(raw).hexdigest()[:8].upper(), "A5E05880"
         )
 
 
