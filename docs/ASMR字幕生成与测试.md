@@ -356,11 +356,11 @@ warn 5 条：
 ### 7.7 实体引擎、静默后处理与 QC 三层（2026-10-29）
 
 - **P0 修复**：旧 `sanitize_translation_output()` 全局删除 `[#N]`，导致 `TranslationEngine` 的批次响应在 `parse_window_response` 前就丢掉编号；实测 2-cue 窗口会发 3 次请求（1 批次 + 2 逐句），两条 cue 都被写成 `译一译二`。已删除全局清洗，编号只在 cue 边界由 `strip_window_id_prefix()`/`postprocess_cue_text()` 清理；新增批次编号保留与单句多编号拒绝回归测试。
-- **静默后处理**：`postprocess_cue_text()` 做简繁转换、行首 `，、；：。！？` 清理、`……。`/`~。` 等重复句号清理、原文无括号时剥离虚构动作括号；保留开头 `……`/`——`、原文已有括号，清洗为空时保留清洗前文本。只改正文，不动序号/时间轴。
+- **静默后处理**：`postprocess_cue_text()` 做空行折叠、简繁转换、行首 `，、；：。！？` 清理、`……。`/`~。` 等重复句号清理、原文无括号时剥离虚构动作括号；保留开头 `……`/`——`、原文已有括号，清洗为空时保留清洗前文本。只改正文，不动序号/时间轴。
 - **实体引擎**：`DynamicEntityEngine` 只以敬称名、`という名`/`役` 明确姓名、共同前缀汉字姓名为种子；裸片假名/拟声词/普通名词不建实体，停用表拦截 `トラック`/`セックス`/`バイバイ`/`コショコショ` 等；`チン` 不再吞并 `ノア`。`capture_translations()` 只保存洁净示例；`_extract_locked_name()` 只锁高置信裸名；`enforce_locks()` 只清未翻译日文专名；平假名写法仅通过明确姓名做别名。仅 `window_size>1`（ASMR W=6）启用，且叠加滑动前文而不是替换。
 - **Prompt**：新增 `<sensory_immersion>`（贴耳体感、体感具象、动作本土化、拟声画面、跨行语流），保留 `<asmr_domain_lexicon>`、ASR 容错、计数/IO 与多行编号项规则；明确普通片假名不是专名、拟声词不得保留假名、禁止 `SEXPAR`/`Track` 与斜杠并列；`お騒がせ` 仍保留“给您添麻烦”的敬语例外。
 - **QC**：`scripts/qc_srt.py` 三层分流；新增 `latin`/`slash` actionable；`duplicate_translation` 先抹平 `ッ`/`ー` 并把源文相似阈值降到 0.60；终端紧凑 Diff；`--json` 含 `summary`+`flagged_cues`；默认仅 error 返回 `1`，`--strict` actionable 也返回 `1`。
-- **上下文/校验**：合流 `context_window=12` 通过 `record_window_history()` 按 cue 记录，不再把 6 条窗口放大成 72 条；批次接受前 `_copies_history()` 检查跨窗复制，命中整窗回退。`validate_cue_translation()` 拒绝假名、`SEXPAR`/`Track`、中日文斜杠；批次失败整窗回退，单句失败保留原文并记 failure。
+- **上下文/校验**：合流 `context_window=12` 改用 `restore_history(批前快照 + 已接受 cue)` 按 cue 恢复（不再调用 `record_window_history()`），不再把 6 条窗口放大成 72 条；批次接受前 `_copies_history()` 检查跨窗复制，命中整窗回退。`validate_cue_translation()` 拒绝空行、假名、`SEXPAR`/`Track`、中日文斜杠；批次失败整窗回退，单句失败保留原文并记 failure。
 - **测试**：新增 17 例，总数 **502 例**；非 guard 489 例全绿（1 例 skip）；`test_guard.test_ok_single_file` 因本机 4062 被 HY-MT2 占用仍失败，未停服。
 - **未验证**：真实 696-cue 全量仍在验收中；未验证 HY-MT2 对收紧后 Prompt/实体上下文的长文本遵循度与显存/耗时；`您` 启发式、批次 `finish_reason=length` 拆分、真实 TTY 的 QC 观感未验收。
 
