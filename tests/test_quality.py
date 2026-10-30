@@ -577,20 +577,40 @@ class T1ShortDuplicateTests(unittest.TestCase):
             audit_short_duplicate("うん", self.TRANSLATION, 5, index), []
         )
 
-    def test_near_synonym_pair_outside_eight_char_ceiling_is_clean(self) -> None:
+    def test_near_synonym_pair_outside_ceiling_is_clean(self) -> None:
+        """天花板之外（源文比上限更长）的近义对不得被判 short_duplicate。
+
+        上限本身随语料演进（8→11），所以这里引用常量而不是写死数字——
+        否则每次调阈值都要改测试，测试就从契约退化成绊脚石。
+        """
+        from vanitas.quality import SHORT_DUPLICATE_MAX_SOURCE_CHARS  # noqa: PLC0415
+
         long_source = "これはとても長い原文のテストですね"
-        short_source = "これは短いテストだ"
-        self.assertEqual(len(long_source), 17)
-        self.assertEqual(len(short_source), 9)
+        short_source = "まったく別の話題を話していますよ"
+        self.assertGreater(len(short_source), SHORT_DUPLICATE_MAX_SOURCE_CHARS)
         self.assertLess(
             SequenceMatcher(None, long_source, short_source).ratio(), 0.75
         )
         index = self.index()
         index.add(1, long_source, self.TRANSLATION)
-        # 较短源文 9 字 > 8：即使译文相同也不触发 short_duplicate。
         self.assertEqual(
             audit_short_duplicate(short_source, self.TRANSLATION, 2, index), []
         )
+
+    def test_nine_char_source_is_inside_the_ceiling_and_fires(self) -> None:
+        """上限提到 11 的直接收益：9 字短句复用同一译文必须被抓到。
+
+        真实用例：`ご無理はなさらずに`(9 字) 在 V1~V3 都跨 cue 复用了同一译文。
+        """
+        from vanitas.quality import SHORT_DUPLICATE_MAX_SOURCE_CHARS  # noqa: PLC0415
+
+        short_source = "ご無理はなさらずに"
+        self.assertEqual(len(short_source), 9)
+        self.assertLessEqual(len(short_source), SHORT_DUPLICATE_MAX_SOURCE_CHARS)
+        index = self.index()
+        index.add(1, "これはとても長い原文のテストですね", self.TRANSLATION)
+        issues = audit_short_duplicate(short_source, self.TRANSLATION, 2, index)
+        self.assertEqual([issue.code for issue in issues], ["short_duplicate"])
 
     def test_shorter_source_side_at_eight_char_boundary_fires(self) -> None:
         # 契约写死“较短源文 ≤8 字”：8/9 的异质短句同译仍应命中。
