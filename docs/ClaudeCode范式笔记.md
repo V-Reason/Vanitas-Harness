@@ -80,4 +80,4 @@
 | D4 分级审批 / CWD 沙盒 | `config/settings.json` → `agent` / `tools`；`vanitas/tools.py` → `run_exec`、`AgentTools`、`is_inside_workspace`、`run_shell_ro`；`vanitas/agent.py` → `AgentRepl`、`extract_tool_calls`、`_parse_actions`、`_AgentAnswerStream` |
 | D5 会话边界 | `vanitas/session.py` + `/save` `/load` `/clear` |
 | D6 端点可见性 | `vanitas/launcher.py` → `running()`；`vanitas/repl.py` → `/model` `/status` |
-| D7 翻译上下文与看板 | `vanitas/translate.py` → `TranslationEngine`；`vanitas/monitor.py` → `TranslationMonitor` |
+| D7 翻译上下文与看板 | `vanitas/translate/engine.py` → `TranslationEngine`；`vanitas/monitor.py` → `TranslationMonitor` |

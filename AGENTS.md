@@ -15,6 +15,7 @@ vanitas\
 ├── context\    session / budget / collapse
 ├── repl\       commands / watchdog / status / lifecycle / loop
 ├── tools\      sandbox / runner / fs / shell / exec
+├── translate\  types / cleaner / format / window / entity / io / engine / pipeline
 └── cli.py / chat.py / engine.py / guard.py / launcher.py / metrics.py / ui.py 等
 ```
 
@@ -122,20 +123,22 @@ vanitas\
 ## 7. 验证门禁（合并前必须全绿）
 
 ```powershell
-# 1) 语法
-Get-ChildItem vanitas\*.py, tests\test_*.py, scripts\*.py | ForEach-Object { python -m py_compile $_.FullName }
+# 1) 语法（递归包含 vanitas\agent|config|context|repl|tools|translate 子包）
+Get-ChildItem vanitas -Recurse -Filter *.py | ForEach-Object { python -m py_compile $_.FullName }
+Get-ChildItem tests\test_*.py, scripts\*.py | ForEach-Object { python -m py_compile $_.FullName }
 
 # 2) 单测（当前 686 例）
 python -m unittest discover -s tests
 python -m unittest tests.test_agent_parser
 
-# 3) 静态红线
-Select-String -Path vanitas\*.py -Pattern '8080|8081|8082'                        # 期望空
-Select-String -Path vanitas\*.py -Pattern 'import (psutil|requests|httpx|rich|click)'  # 期望空
+# 3) 静态红线（$src 覆盖子包，否则 translate\ 等目录会漏检）
+$src = (Get-ChildItem vanitas -Recurse -Filter *.py).FullName
+Select-String -Path $src -Pattern '8080|8081|8082'                        # 期望空
+Select-String -Path $src -Pattern 'import (psutil|requests|httpx|rich|click)'  # 期望空
 Select-String -Path scripts\*.py -Pattern 'import (psutil|requests|httpx|rich|click|jieba|opencc)'  # 期望空
-Select-String -Path vanitas\*.py -Pattern '提示：'                                 # 期望空：提示行统一为 ·
-Select-String -Path vanitas\*.py -Pattern '\[GUARD-'                              # 期望空：旧守卫标签已移除
-Select-String -Path vanitas\*.py -Pattern '\[(SERVE|LAUNCH|META|HINT|ERROR|STATUS|STOP)\]'  # 期望空：旧 CLI 标签已移除
+Select-String -Path $src -Pattern '提示：'                                 # 期望空：提示行统一为 ·
+Select-String -Path $src -Pattern '\[GUARD-'                              # 期望空：旧守卫标签已移除
+Select-String -Path $src -Pattern '\[(SERVE|LAUNCH|META|HINT|ERROR|STATUS|STOP)\]'  # 期望空：旧 CLI 标签已移除
 Select-String -Path *.bat -Pattern 'llama-server'                                  # 期望空
 git ls-files | Select-String -Pattern '^(bin/|models/|tests/reports/)|\.log$'      # 期望空
 
@@ -166,7 +169,7 @@ python -m vanitas stop
 - 提示词：`system_default` 全静态；`task_chat/task_code/task_agent/task_translate_asmr` 使用 XML，`task_translate`/`agent_continue` 保持紧凑纯文本；仅 6 个占位符。`task_translate_asmr` 另含 `<asmr_domain_lexicon>`（采耳道具/解剖方位/互动动作/情境用语/声效词），保留 `梵天`/`膝枕`/`添寝`/`特典` 等圈内词并约束自然搭配，附 `お騒がせ` 自谦方向；新增 `<sensory_immersion>` 约束贴耳体感、体感具象、动作本土化与跨行语流，并明确普通片假名不是专名、拟声词不得保留假名、禁止 `SEXPAR`/`Track` 与斜杠并列，不删除既有领域词典/ASR/计数/IO 契约。`task_agent` 的批量是逐项执行而非事务，`patch_file` 只要求唯一片段、不强制固定上下行数；不提供 `_reason` 参数。
 - 翻译上下文：`TranslationEngine._history` 是文档级状态；CLI 在每个输入文件前调用 `reset_history()`，多文件不得继承上一文件的标题、摘要或人名。`sanitize_translation_output` 只清代码围栏、外层引号、重复句号与开头 `，、；：`，**不再删除 `[#N]`**；编号由 cue 边界的 `strip_window_id_prefix`/`postprocess_cue_text` 清理。ASMR 合流（`window_size>1`）构建文档级 `DynamicEntityEngine`：只有敬称名、`という名`/`役` 明确姓名和共同前缀汉字姓名为种子；裸片假名/拟声词/普通名词不建实体，停用表拦截 `トラック`/`セックス`/`バイバイ`/`コショコショ` 等。`capture_translations` 只保存洁净示例；`_extract_locked_name` 只锁高置信裸名；`enforce_locks` 只清未翻译日文专名；平假名写法仅通过明确姓名做别名。合流 `context_window=12` 按 cue 记录（每窗 `restore_history(批前快照 + 已接受 cue)`，不再调用 `record_window_history`），不再把 6 条窗口放大成 72 条；批次接受前用 `_copies_history` 查跨窗复制，命中整窗回退。`postprocess_cue_text` 之外新增 `validate_cue_translation`：空行、假名、`SEXPAR`/`Track`、中日文斜杠不写回；批次失败整窗回退，单句失败保留原文并记 failure。合流编号重置恢复、结构守卫、单句回退规则不变。ASMR 合流若模型每窗从 `[#1]` 重编号，`recover_window_response()` 仅在编号为 `1..K` 且数量一致时按位置恢复；编号完整但正文残留 `[#N]`、非空原文对应空译文，或不同原文得到相同长译文时，整窗回退为单编号窗口 `[#N] 原文`，多编号/多行单句回退记失败并保留原文。
 - 质量检查：`scripts\qc_srt.py` 三层分流——繁体/行首标点静默计数，cue 数/序号/时间轴/`[#N]`/重复译文为 error，ASR 疑词/语境“您”/未授权动作/长度/空译/假名/可疑拉丁词/斜杠为 actionable；`duplicate_translation` 对拟声词与近义源文先做 `ッ`/`ー` 归一化，阈值 0.60；`--json` 含 `summary` 与 `flagged_cues`，默认仅 error 返回 `1`，`--strict` 时 actionable 也返回 `1`。QC 的“您”检查改为文档语域优先：service 不报、intimate 必报、neutral 仍走原单句启发式。
-- 确定性质量守卫（P1）：`vanitas\quality.py`（纯标准库，不 import `translate.py`）提供 ASMR 术语表（`config\glossary\asmr.tsv`，`source<TAB>preferred<TAB>forbidden`）、文档语域检测、`您→你` 人称策略与文档级重复索引（精确哈希 + 3-gram 倒排，源文相似 ≥0.75 视为合法重复，译文 ≥12 字才判定）。`translate_srt` 的 `window_size<=1` 与合流两条路径统一走 `postprocess_cue_text → enforce_locks → glossary.apply → apply_pronoun_policy → repair_first_person_name → repair_quote_private → validate_cue_translation`；审计命中每个 cue 最多一次 `_translate_single_cue` 定点重译，前后用 `history_snapshot`/`restore_history` 隔离，失败不写 `failures`、保留原译；fallback 逐句路径硬校验通过后同样做 duplicate/honorific 审计与一次重译，最终接受项才 `index.add`。`SINGLE_RETRY_HINT` 要求人名/称谓/助词/片假名名词全部译成中文、禁止整句日文。合流每窗无条件 `restore_history(批前快照 + 已接受 cue)`，`translate_srt` 不再调用 `record_window_history`（方法保留供兼容）。术语与 Prompt 只新增 `アマアマ→甜腻`、授受/被动方向、引用句 3 条规则，`_render` 不注入术语表。跨 cue 语义、主客方向与引用归属已由 P2a 窄规则覆盖一部分；未覆盖的 residual 见 `docs\项目现状.md` 第 39、42 节。
+- 确定性质量守卫（P1）：`vanitas\quality.py`（纯标准库，不 import `vanitas.translate`）提供 ASMR 术语表（`config\glossary\asmr.tsv`，`source<TAB>preferred<TAB>forbidden`）、文档语域检测、`您→你` 人称策略与文档级重复索引（精确哈希 + 3-gram 倒排，源文相似 ≥0.75 视为合法重复，译文 ≥12 字才判定）。`translate_srt` 的 `window_size<=1` 与合流两条路径统一走 `postprocess_cue_text → enforce_locks → glossary.apply → apply_pronoun_policy → repair_first_person_name → repair_quote_private → validate_cue_translation`；审计命中每个 cue 最多一次 `_translate_single_cue` 定点重译，前后用 `history_snapshot`/`restore_history` 隔离，失败不写 `failures`、保留原译；fallback 逐句路径硬校验通过后同样做 duplicate/honorific 审计与一次重译，最终接受项才 `index.add`。`SINGLE_RETRY_HINT` 要求人名/称谓/助词/片假名名词全部译成中文、禁止整句日文。合流每窗无条件 `restore_history(批前快照 + 已接受 cue)`，`translate_srt` 不再调用 `record_window_history`（方法保留供兼容）。术语与 Prompt 只新增 `アマアマ→甜腻`、授受/被动方向、引用句 3 条规则，`_render` 不注入术语表。跨 cue 语义、主客方向与引用归属已由 P2a 窄规则覆盖一部分；未覆盖的 residual 见 `docs\项目现状.md` 第 39、42 节。
 - P2a 高置信语义审计与一次定点重译（2026-10-29）：`DuplicateIndex.find_match()` 返回 `DuplicateMatch(cue, source, translation)`，`find()` 只委托 `.cue`，阈值/顺序/并列规则不变；`audit_duplicate` 提示同时带重复条与本条原文片段（各 24 字）。重复索引另加窄规则：源文规范化相似度 ≤0.5 且译文共同前缀 ≥6 字时命中，可检测 `自由談 #80` 这类译文整体相似度不足的长共同开头；但模型一次重译仍可能复用，属“检测覆盖、修复不保证”，QC/人工仍须复核，#80 留作 residual。不改 0.75/0.80 全局阈值。五类窄规则 `customer_direction` / `quote_private` / `negative_question` / `first_person` / `tag_question` 全部 AND 触发、空源/空译直接放行；`quote_private` 的坏模式收窄为 `让我叫|我的名字|让你叫`，单独“叫我”不再自动判坏（“他说，叫我雫就好”放行）。`translate_srt` 的 `finalize` 在人称策略之后、`validate` 之前增加窄修复：仅源含 `下の名前で呼んであげて` 且源无第一人称时，把 `我的名字/让我/叫我` 收敛为 `她的名字/让她/叫她`（`学生 #8`）。`audit_translation` 固定按 duplicate → customer_direction → quote_private → negative_question → first_person → tag_question → honorific 汇总（T1 开启时在 duplicate 后插 `short_duplicate`、在 tag_question 后插 `address_term`/`invented_tool`），`combine_hints` 去重取前 2 条。单句、合流与 fallback 三处候选统一走 `candidate_ok()`（硬校验、空译、换行、长度、触发码与 duplicate 残余），每 cue 仍最多一次重译，异常保留原译且不写 failure；正确候选不产生额外调用。术语表追加 `お耳をマッサージ→耳朵按摩`（专用行在前）与 `マッサージ→按摩`，`耳かき` 不受影响。
 - P2b ASR 断词修复（2026-10-29）：新增纯函数 `vanitas\asr_repair.py` 与 CLI `scripts\repair_asr_srt.py`，表 `config\asr_joins.tsv`（3 列、`#` 注释、坏行/重复键带 `文件:行号`）。`parse_srt` 后正文多行无空格拼接并压成单行；相邻 cue 按 `left.endswith(tail) and right.startswith(head)` 贪心合并，守卫为左前缀非空、timing 可解析、`right.start >= left.end`、gap ≤1000ms、合并后 ≤8s；合并后 start=左.start、end=右.end，右 cue 删除，序号连续重排 1..N，链式跑到不动点且二次运行 0 变更。CLI 默认 dry-run，`--write` 才写；`--out-dir` 必填且不得等于源目录，拒绝覆盖 `.zh.srt`/已存在目标/输出冲突；`--check` 有待合并返回 `1`，坏表/IO/覆盖返回 `2`；不原地、不产出 `.join.srt`。
 - V5 跨 cue 右吸附（2026-10-29）：新增 `vanitas\cue_boundary.py`，共享规则器从 `asr_repair.py` 抽出；`asr_repair.py` 的 merge CLI 语义不变，但不进入默认 `translate_srt`。`TranslationEngine` 仅 ASMR 且 `config\asr_joins.tsv` 存在时暴露只读 `join_rules`；`translate_srt(..., join_rules=())`/`translate_file(..., join_rules=())` 为向后兼容可选参数，CLI 仅在 `window_size>1` 传入。`translate_srt` 在幻觉置空、`translatable` 构建后、`source_snapshot`/`detect_register` 前把左 cue 末尾 `tail` 右吸附到右 cue 开头（右 = `replacement + 右去 head`），cue 数/序号/时间轴不变；守卫为 `replacement == tail+head`、`tail≤2`/`head≤4`、tail 非助词、左前缀可收尾、`gap≤500ms`、timing 不重叠，多行源文保留换行；不满足只 skip。批量窗口另有 `_translation_is_too_short()`：源文规范化 ≥30 字且译文 ≤6 字整窗回退逐句。`QUOTE_PRIVATE_BAD_RE` 增加 `叫我叫`，`repair_quote_private()` 仅在 `私のことは…って` 场景收敛为“叫我”，在 `finalize` 的人称修复之后调用。另加 `audit_negative_question()`：源文 `〜ていませんか/ではありませんか` 的否定疑问若译文缺否定标记则报 `negative_question`，只做一次定点重译；不覆盖 `〜ませんか` 邀请句。硬校验因中日文斜杠失败时，`salvage_slash_translation()` 优先唯一中文项、否则取第一个非空项，避免把整句日文源写回；正常后处理的保守斜杠规则不变。首批只放行 1ms 治疗例；1479/5240ms 断词保留 residual。
