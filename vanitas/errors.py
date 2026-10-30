@@ -19,7 +19,7 @@ class GuardError(VanitasError):
     """守卫拒绝启动；code 沿用 0/1/2/3/4/9 契约，messages 为待打印的行。"""
 
     def __init__(self, code: int, messages: list[str]) -> None:
-        super().__init__("；".join(messages) or f"守卫失败（code={code}）")
+        super().__init__("；".join(messages) or f"守卫失败：code={code}")
         self.code = code
         self.messages = list(messages)
 

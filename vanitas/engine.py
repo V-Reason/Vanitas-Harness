@@ -18,7 +18,6 @@ from .config import AppConfig, ModelSpec, RequestSettings
 from .errors import EngineError
 
 DONE_TYPES = frozenset({"done"})
-PROGRESS_INTERVAL_SEC = 0.2
 
 
 def _build_opener() -> urllib.request.OpenerDirector:
@@ -125,11 +124,11 @@ class EngineClient:
                 )
             except urllib.error.URLError as exc:
                 last_failure = EngineError(
-                    f"无法连接 {request.full_url}：{exc.reason}（服务端未启动？）"
+                    f"无法连接 {request.full_url}：{exc.reason}；服务端未启动？"
                 )
             except (TimeoutError, OSError) as exc:
                 last_failure = EngineError(
-                    f"请求 {request.full_url} 超时或中断（{timeout}s）：{exc}"
+                    f"请求 {request.full_url} 超时或中断，{timeout}s：{exc}"
                 )
             if attempt + 1 >= attempts:
                 break
@@ -154,7 +153,7 @@ class EngineClient:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise EngineError(
-                f"{path} 返回非 JSON（前 200 字节：{raw[:200]!r}）：{exc}"
+                f"{path} 返回非 JSON；前 200 字节：{raw[:200]!r}；{exc}"
             ) from exc
         if not isinstance(payload, dict):
             raise EngineError(f"{path} 返回的顶层不是 JSON 对象")
@@ -167,8 +166,13 @@ class EngineClient:
     def health(self, timeout: float | None = None) -> bool:
         """加载期 503 属于正常中间态，这里只回答「现在能不能用」。"""
         request = urllib.request.Request(self._url("/health"), method="GET")
+        read_timeout = (
+            self._settings.health_timeout_sec
+            if timeout is None
+            else timeout
+        )
         try:
-            response = self._open(request, timeout or 3.0, retries=0)
+            response = self._open(request, read_timeout, retries=0)
         except EngineError:
             return False
         try:
@@ -196,7 +200,7 @@ class EngineClient:
         messages: list[dict],
         *,
         max_tokens: int,
-        temperature: float = 0.2,
+        temperature: float,
         response_format: dict | None = None,
         timeout: float | None = None,
     ) -> dict:
@@ -222,7 +226,7 @@ class EngineClient:
             result = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise EngineError(
-                f"/v1/chat/completions 返回非 JSON（前 200 字节：{raw[:200]!r}）：{exc}"
+                f"/v1/chat/completions 返回非 JSON；前 200 字节：{raw[:200]!r}；{exc}"
             ) from exc
         if not isinstance(result, dict) or not result.get("choices"):
             raise EngineError("/v1/chat/completions 返回体缺少 choices")
@@ -233,7 +237,7 @@ class EngineClient:
         messages: list[dict],
         *,
         max_tokens: int,
-        temperature: float = 0.2,
+        temperature: float,
         timeout: float | None = None,
         on_progress: Callable[[dict], None] | None = None,
     ) -> Iterator[dict]:
@@ -322,6 +326,7 @@ class EngineClient:
         started = time.perf_counter()
         first_at: float | None = None
         last_progress = started
+        progress_interval = self._settings.progress_interval_ms / 1000.0
         try:
             for raw_line in response:  # type: ignore[union-attr]
                 line = raw_line.decode("utf-8", "replace").strip()
@@ -360,7 +365,7 @@ class EngineClient:
                         first_at = now
                     if (
                         on_progress is not None
-                        and now - last_progress >= PROGRESS_INTERVAL_SEC
+                        and now - last_progress >= progress_interval
                     ):
                         last_progress = now
                         elapsed = max(1e-9, now - started)
@@ -381,7 +386,7 @@ class EngineClient:
                     yield {"type": "reasoning", "content": reasoning}
         except (OSError, http.client.HTTPException) as exc:
             raise EngineError(
-                f"流式读取中断（超时 {read_timeout}s）：{exc}"
+                f"流式读取中断，超时 {read_timeout}s：{exc}"
             ) from exc
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0

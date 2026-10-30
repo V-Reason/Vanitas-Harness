@@ -6,6 +6,7 @@ import contextlib
 import io
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +17,7 @@ from vanitas.chat import ChatRunner  # noqa: E402
 from vanitas.config import load_config  # noqa: E402
 from vanitas.errors import EngineError  # noqa: E402
 from vanitas.metrics import MESSAGE_OVERHEAD, chat_max_tokens, estimate_tokens  # noqa: E402
-from vanitas.session import Session  # noqa: E402
+from vanitas.context import Session  # noqa: E402
 from vanitas.ui import Palette  # noqa: E402
 
 
@@ -65,6 +66,24 @@ class ChatRunnerTests(unittest.TestCase):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             result = runner.run("hi")
         return result, out.getvalue(), err.getvalue()
+
+    def test_temperature_comes_from_settings(self) -> None:
+        self.config = replace(
+            self.config,
+            settings=replace(
+                self.config.settings,
+                chat=replace(self.config.settings.chat, temperature=0.9),
+            ),
+        )
+        client = FakeClient(
+            [
+                {"type": "delta", "content": "ok"},
+                {"type": "done", "tokens": 1, "tps": 1.0, "finish_reason": "stop"},
+            ]
+        )
+        runner = self.make_runner(client)
+        self.run_turn(runner)
+        self.assertEqual(client.calls[0]["temperature"], 0.9)
 
     def test_usage_metrics_and_history(self) -> None:
         client = FakeClient(
@@ -153,6 +172,51 @@ class ChatRunnerTests(unittest.TestCase):
         runner = self.make_runner(client)
         result, _out, _err = self.run_turn(runner)
         self.assertEqual(result.finish_reason, "length")
+
+    def test_display_false_does_not_write_model_text(self) -> None:
+        client = FakeClient(
+            [
+                {"type": "delta", "content": '{"action":"shell"}'},
+                {"type": "done", "tokens": 3, "tps": 1.0, "finish_reason": "stop"},
+            ]
+        )
+        runner = self.make_runner(client)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            result = runner.run("hi", display=False)
+        self.assertEqual(result.text, '{"action":"shell"}')
+        self.assertNotIn('{"action"', out.getvalue())
+        self.assertEqual(self.session.messages[-1]["content"], '{"action":"shell"}')
+
+    def test_display_false_can_stream_to_explicit_sink(self) -> None:
+        client = FakeClient(
+            [
+                {"type": "delta", "content": "流式"},
+                {"type": "done", "tokens": 2, "tps": 1.0, "finish_reason": "stop"},
+            ]
+        )
+        runner = self.make_runner(client)
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = runner.run("hi", display=False, stream=sink)
+        self.assertEqual(result.text, "流式")
+        self.assertIn("流式", sink.getvalue())
+
+    def test_followup_appends_raw_system_feedback(self) -> None:
+        client = FakeClient(
+            [
+                {"type": "delta", "content": "完成"},
+                {"type": "done", "tokens": 2, "tps": 1.0, "finish_reason": "stop"},
+            ]
+        )
+        runner = self.make_runner(client)
+        feedback = "<tool_result>\n执行成功：已写入 a.txt\n</tool_result>"
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            runner.run_followup(feedback, display=False)
+        self.assertEqual(self.session.messages[0]["role"], "user")
+        self.assertEqual(self.session.messages[0]["content"], feedback)
+        self.assertEqual(self.session.messages[1]["content"], "完成")
+        self.assertEqual(client.calls[0]["messages"][-1]["content"], feedback)
 
     def test_no_client_raises_engine_error(self) -> None:
         runner = ChatRunner(

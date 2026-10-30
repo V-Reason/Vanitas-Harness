@@ -1,28 +1,84 @@
 {
   "version": 1,
   "host": "127.0.0.1",
+  "defaults": {
+    "agent": "qwen_coder",
+    "chat": "qwen7b",
+    "translate": "hymt",
+    "batch": "qwen7b"
+  },
   "request": {
     "timeout_sec": 60,
     "max_retries": 3,
     "backoff_base_ms": 300,
-    "backoff_jitter_ms": 200
+    "backoff_jitter_ms": 200,
+    "health_timeout_sec": 3.0,
+    "status_probe_timeout_sec": 0.6,
+    "progress_interval_ms": 200
   },
   "launcher": {
     "health_timeout_sec": 120,
     "health_poll_interval_ms": 500,
-    "kill_wait_sec": 5
+    "kill_wait_sec": 5,
+    "log_tail_lines": 15
   },
   "repl": {
-    "history_file": "~/.vanitas_history",
+    "history_file": "~/.vanitas/history",
     "max_context_tokens": 8192,
     "stream": true,
     "context_reserve_tokens": 512,
-    "min_output_tokens": 256
+    "min_output_tokens": 256,
+    "idle_timeout_sec": 600,
+    "watchdog_interval_sec": 10,
+    "context_collapse_ratio": 0.65,
+    "context_collapse_keep_rounds": 2,
+    "context_collapse_min_chars": 1000,
+    "ctx_warn_pct": 60,
+    "ctx_danger_pct": 80,
+    "status_bar_width": 20
+  },
+  "chat": {
+    "temperature": 0.2
+  },
+  "agent": {
+    "max_steps": 10,
+    "max_batch_actions": 100,
+    "max_feedback_chars": 8000,
+    "max_parse_retries": 2,
+    "stagnation_limit": 3,
+    "feedback_head_lines": 20,
+    "feedback_tail_lines": 40,
+    "auto_actions": ["read_file", "read_file_range", "grep_workspace", "list_dir", "run_shell_ro"],
+    "confirm_actions": ["write_file", "patch_file", "delete_file", "delete_path", "move_file"],
+    "action_aliases": {
+      "shell": "run_shell_ro"
+    }
   },
   "tools": {
-    "exec_enabled": false,
-    "exec_whitelist": ["echo", "dir", "type", "python --version", "git status"],
-    "exec_require_confirm": true
+    "exec_enabled": true,
+    "exec_require_confirm": true,
+    "max_read_bytes": 262144,
+    "max_list_entries": 200,
+    "max_patch_bytes": 262144,
+    "max_range_lines": 400,
+    "max_grep_results": 50,
+    "max_grep_file_bytes": 1048576,
+    "max_capture_bytes": 524288,
+    "grep_ignore_dirs": [".git", "__pycache__", ".venv", "node_modules"],
+    "move_illegal_chars": "#<>\"|?*",
+    "manual_exec_prefixes": ["echo", "dir", "type", "python --version", "git status", "git log", "git diff", "del", "erase", "ren", "rename", "copy", "move"],
+    "destructive_commands": ["del", "erase", "rd", "rmdir", "rm", "mv", "move", "ren", "rename", "copy", "xcopy", "robocopy", "mkdir", "md", "format"],
+    "readonly_shell_prefixes": ["dir", "ls", "type", "cat", "echo", "findstr", "find", "pwd", "where", "head", "tail", "wc", "grep", "git status", "git log", "git diff", "git show", "git rev-parse", "python -m unittest"],
+    "project_prefixes": ["python verify.py"],
+    "readonly_blocked_flags": ["-o", "-delete", "-fls", "-ok", "-okdir"],
+    "readonly_blocked_prefixes": ["-exec", "--output", "-fprint", "-fprintf"],
+    "git_blocked_options": ["-c", "-C", "--git-dir", "--work-tree", "--exec-path", "--namespace", "--no-index", "--output"],
+    "git_blocked_prefixes": ["-c", "-C", "--git-dir=", "--work-tree=", "--exec-path="]
+  },
+  "batch": {
+    "default_max_tokens": 512,
+    "max_tokens_limit": 8192,
+    "temperature": 0.2
   },
   "translate": {
     "source_suffixes": [".txt", ".md", ".srt"],
@@ -33,10 +89,53 @@
     "min_output_tokens": 512,
     "output_ratio": 2.5,
     "prompt_safety_tokens": 64,
-    "monitor_lines": 5
+    "monitor_lines": 5,
+    "temperature": 0.2,
+    "max_split_depth": 3,
+    "default_preset": "subtitle",
+    "environment": "production",
+    "presets": {
+      "subtitle": {
+        "task_template": "translate",
+        "profile": "2",
+        "context_window": 12,
+        "context_summary_chars": 200,
+        "chunk_chars": 800,
+        "window_size": 1,
+        "max_window_chars": 250
+      },
+      "prose": {
+        "task_template": "translate",
+        "profile": "2",
+        "context_window": 10,
+        "context_summary_chars": 200,
+        "chunk_chars": 800,
+        "window_size": 1,
+        "max_window_chars": 250
+      },
+      "asmr": {
+        "task_template": "translate_asmr",
+        "profile": "2",
+        "context_window": 12,
+        "context_summary_chars": 200,
+        "chunk_chars": 800,
+        "window_size": 6,
+        "max_window_chars": 250
+      },
+      "general": {
+        "task_template": "translate",
+        "profile": "1",
+        "context_window": 5,
+        "context_summary_chars": 200,
+        "chunk_chars": 1500,
+        "window_size": 1,
+        "max_window_chars": 250
+      }
+    }
   },
   "ui": {
     "color": "auto",
+    "spinner_interval_ms": 300,
     "theme": {
       "prompt": "cyan",
       "success": "green",

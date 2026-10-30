@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -14,10 +15,9 @@ from typing import Callable
 from .client import LlamaClient
 from .config import AppConfig, ModelSpec, ProfileSpec
 from .errors import EngineError
-from .metrics import chat_max_tokens, context_budget
+from .context import ContextBudget, Session
 from .progress import Spinner
 from .render import StreamRenderer
-from .session import Session
 from .ui import Palette
 
 
@@ -32,6 +32,16 @@ class TurnResult:
     interrupted: bool = False
     reasoning_chars: int = 0
     dropped_turns: int = 0
+
+
+class _DiscardStream:
+    """Agent 闭环不把原始 JSON 写屏；仍需一个可写流让 StreamRenderer 正常工作。"""
+
+    def write(self, text: str) -> int:
+        return len(text)
+
+    def flush(self) -> None:
+        return None
 
 
 class ChatRunner:
@@ -61,29 +71,69 @@ class ChatRunner:
         text: str,
         *,
         on_dropped: Callable[[int], None] | None = None,
+        display: bool = True,
+        stream: object | None = None,
     ) -> TurnResult:
         if self.client is None:
-            raise EngineError("服务端未就绪：先运行 vanitas serve <id>")
-        budget = context_budget(
-            self.profile.ctx,
-            self.config.settings.repl.max_context_tokens,
-            self.config.settings.repl.context_reserve_tokens,
-        )
+            raise EngineError("服务端没有运行：先运行 vanitas serve <id>")
         user_message = self.session.build_user_message(
-            text, self.prompt_dir, self.model.alias
+            text,
+            self.prompt_dir,
+            self.model.alias,
         )
         self.session.add_user(user_message)
-        dropped = self.session.trim(budget)
+        return self._run_turn(
+            on_dropped=on_dropped,
+            display=display,
+            stream=stream,
+        )
+
+    def run_followup(
+        self,
+        feedback: str,
+        *,
+        on_dropped: Callable[[int], None] | None = None,
+        display: bool = True,
+        stream: object | None = None,
+    ) -> TurnResult:
+        """把系统反馈直接作为 user 消息追加，不重复套任务模板。"""
+        if self.client is None:
+            raise EngineError("服务端没有运行：先运行 vanitas serve <id>")
+        self.session.add_user(feedback)
+        return self._run_turn(
+            on_dropped=on_dropped,
+            display=display,
+            stream=stream,
+        )
+
+    def _run_turn(
+        self,
+        *,
+        on_dropped: Callable[[int], None] | None,
+        display: bool,
+        stream: object | None = None,
+    ) -> TurnResult:
+        if self.client is None:
+            raise EngineError("服务端没有运行：先运行 vanitas serve <id>")
+        budget = ContextBudget.from_config(self.config, self.profile)
+        collapsed = budget.collapse(self.session)
+        if collapsed:
+            print(
+                self.palette.meta(
+                    f"· 已折叠 {collapsed} 条历史工具观测"
+                ),
+                file=sys.stderr,
+            )
+        dropped = budget.trim(self.session)
         if dropped and on_dropped is not None:
             on_dropped(dropped)
 
-        max_tokens = chat_max_tokens(
-            self.profile.ctx,
-            self.session.message_tokens(),
-            self.config.settings.repl.context_reserve_tokens,
-            self.config.settings.repl.min_output_tokens,
+        max_tokens = budget.max_output(self.session)
+        renderer = StreamRenderer(
+            stream=None
+            if display
+            else (stream if stream is not None else _DiscardStream())
         )
-        renderer = StreamRenderer()
         usage: dict | None = None
         done: dict | None = None
         reasoning_chars = 0
@@ -156,13 +206,19 @@ class ChatRunner:
 
     def _stream_events(self, messages: list[dict], max_tokens: int):
         """首字前显示覆盖式进度，首字到达立刻擦除，避免等待行与 stdout 混屏。"""
-        spin = Spinner("正在生成", self.palette)
+        spin = Spinner(
+            "正在生成",
+            self.palette,
+            interval_ms=self.config.settings.ui.spinner_interval_ms,
+        )
         spin.__enter__()
         first = True
         generator = None
         try:
             generator = self.client.stream_chat(
-                messages, max_tokens=max_tokens, temperature=0.2
+                messages,
+                max_tokens=max_tokens,
+                temperature=self.config.settings.chat.temperature,
             )
             for event in generator:
                 if first and event["type"] == "delta":

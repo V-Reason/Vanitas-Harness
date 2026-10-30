@@ -1,8 +1,8 @@
 """提示词模板加载与变量替换。
 
-模板只认五个占位符：{input} {context} {context_history} {date} {model}。
+模板只认六个占位符：{input} {context} {context_history} {date} {model} {cwd}。
 未知占位符直接报 ConfigError——模板写错比模型答错更难排查，必须在启动前拦住。
-{date} 默认是秒级本地时间，供 chat/agent 感知当前现实时间。
+{date} 默认是秒级本地时间，{cwd} 由会话层传入，供 Agent 感知工作目录。
 """
 
 from __future__ import annotations
@@ -13,10 +13,33 @@ from pathlib import Path
 
 from .errors import ConfigError
 
-ALLOWED = ("input", "context", "context_history", "date", "model")
+ALLOWED = ("input", "context", "context_history", "date", "model", "cwd")
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 VAR_RE = re.compile(r"\{([a-z][a-z0-9_]*)\}")
 DEFAULT_SYSTEM = "system_default"
+
+# ASMR 生产/实验模板的唯一识别源：environment 名到 task_template 的映射。
+ASMR_ENVIRONMENT_TEMPLATES = {
+    "production": "translate_asmr",
+    "experimental": "translate_asmr_experimental",
+}
+ASMR_TASK_TEMPLATES = frozenset(ASMR_ENVIRONMENT_TEMPLATES.values())
+
+
+def asmr_template(environment: str) -> str:
+    """把运行环境映射为 ASMR 任务模板；非法环境给可读 ConfigError。"""
+    try:
+        return ASMR_ENVIRONMENT_TEMPLATES[environment]
+    except (KeyError, TypeError):
+        choices = "、".join(ASMR_ENVIRONMENT_TEMPLATES)
+        raise ConfigError(
+            f"未知运行环境 {environment!r}；可用：{choices}"
+        ) from None
+
+
+def is_asmr_task(name: str | None) -> bool:
+    """生产/实验 ASMR 模板都算 ASMR；其余模板（含 None）为 False。"""
+    return str(name or "") in ASMR_TASK_TEMPLATES
 
 
 def template_path(prompt_dir: Path, name: str) -> Path:
@@ -40,7 +63,7 @@ def load_template(prompt_dir: Path, name: str) -> str:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise ConfigError(f"提示词模板读取失败：{path}（{exc.strerror or exc}）") from exc
+        raise ConfigError(f"提示词模板读取失败：{path}；{exc.strerror or exc}") from exc
     if not text.strip():
         raise ConfigError(f"提示词模板为空：{path}")
 
@@ -68,6 +91,7 @@ def render(template: str, values: dict | None = None) -> str:
         "context_history": "",
         "date": now_stamp(),
         "model": "",
+        "cwd": "",
     }
     for key, value in (values or {}).items():
         if key not in merged:
@@ -77,7 +101,13 @@ def render(template: str, values: dict | None = None) -> str:
 
 
 def system_prompt(prompt_dir: Path) -> str:
-    return load_template(prompt_dir, DEFAULT_SYSTEM)
+    text = load_template(prompt_dir, DEFAULT_SYSTEM)
+    found = placeholders(text)
+    if found:
+        raise ConfigError(
+            f"系统提示 {DEFAULT_SYSTEM}.md 必须全静态，发现占位符 {sorted(found)}"
+        )
+    return text
 
 
 def task_names(prompt_dir: Path) -> list[str]:

@@ -42,7 +42,7 @@ class PaletteTests(unittest.TestCase):
         self.assertEqual(palette.warn("careful"), "⚠ careful")
         self.assertEqual(palette.spin("loading"), "⋯ loading")
         self.assertEqual(palette.meta("note"), "· note")
-        self.assertEqual(palette.hint("try /help"), "提示：try /help")
+        self.assertEqual(palette.hint("try /help"), "· try /help")
         self.assertEqual(palette.accent("plain"), "plain")
 
     def test_theme_is_used_when_enabled(self) -> None:
@@ -100,6 +100,42 @@ class PaletteTests(unittest.TestCase):
     def test_palette_with_empty_theme_falls_back(self) -> None:
         palette = ui.Palette({}, enabled=False)
         self.assertEqual(palette.ok("x"), "✓ x")
+
+    def test_semantic_paints_use_theme_colors(self) -> None:
+        palette = ui.Palette(DEFAULT_THEME, enabled=True)
+        self.assertEqual(palette.success("ok"), "\x1b[32mok\x1b[0m")
+        self.assertEqual(palette.error("bad"), "\x1b[31mbad\x1b[0m")
+        self.assertEqual(palette.warning("warn"), "\x1b[33mwarn\x1b[0m")
+        self.assertEqual(palette.muted("muted"), "\x1b[90mmuted\x1b[0m")
+        self.assertEqual(palette.info("info"), "\x1b[36minfo\x1b[0m")
+
+    def test_bold_only_adds_ansi_when_enabled(self) -> None:
+        enabled = ui.Palette(DEFAULT_THEME, enabled=True)
+        disabled = ui.Palette(DEFAULT_THEME, enabled=False)
+        self.assertEqual(enabled.bold("id"), "\x1b[1mid\x1b[0m")
+        self.assertEqual(disabled.bold("id"), "id")
+
+    def test_semantic_paints_follow_custom_theme(self) -> None:
+        theme = dict(DEFAULT_THEME)
+        theme.update({"success": "cyan", "warn": "magenta", "muted": "red"})
+        palette = ui.Palette(theme, enabled=True)
+        self.assertEqual(palette.success("a"), "\x1b[36ma\x1b[0m")
+        self.assertEqual(palette.warning("b"), "\x1b[35mb\x1b[0m")
+        self.assertEqual(palette.muted("c"), "\x1b[31mc\x1b[0m")
+
+    def test_semantic_paints_plain_when_disabled(self) -> None:
+        palette = ui.Palette(DEFAULT_THEME, enabled=False)
+        self.assertEqual(palette.success("ok"), "ok")
+        self.assertEqual(palette.error("bad"), "bad")
+        self.assertEqual(palette.warning("warn"), "warn")
+        self.assertEqual(palette.muted("muted"), "muted")
+        self.assertEqual(palette.info("info"), "info")
+
+    def test_strip_ansi_removes_palette_sequences(self) -> None:
+        palette = ui.Palette(DEFAULT_THEME, enabled=True)
+        painted = palette.bold(palette.accent("qwen7b"))
+        self.assertIn("\x1b[", painted)
+        self.assertEqual(ui.strip_ansi(painted), "qwen7b")
 
 
 if __name__ == "__main__":

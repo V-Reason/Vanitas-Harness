@@ -46,7 +46,7 @@ class GuardTests(unittest.TestCase):
 
     # 1) 正常
     def test_ok_single_file(self) -> None:
-        result = self.evaluate(4063, self.make_model("base.gguf"))
+        result = self.evaluate(4062, self.make_model("base.gguf"))
         self.assertEqual(result.code, 0)
         self.assertEqual(result.stderr, [])
         self.assertTrue(any("环境核验通过" in line for line in result.stdout))

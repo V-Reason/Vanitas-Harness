@@ -45,11 +45,11 @@ class RunStatus:
 
 
 def run_dir() -> Path:
-    return Path.home() / ".vanitas_run"
+    return Path.home() / ".vanitas" / "run"
 
 
 def log_dir() -> Path:
-    return Path.home() / ".vanitas_logs"
+    return Path.home() / ".vanitas" / "logs"
 
 
 def record_path(model_id: str) -> Path:
@@ -154,13 +154,13 @@ def build_args(
     ]
 
 
-def read_log_tail(path: str | Path, limit: int = 15) -> str:
+def read_log_tail(path: str | Path, limit: int) -> str:
     try:
         lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:
-        return f"（日志不可读：{exc.strerror or exc}）"
+        return f"日志不可读：{exc.strerror or exc}"
     tail = lines[-limit:]
-    return "\n".join(tail) if tail else "（日志为空）"
+    return "\n".join(tail) if tail else "日志为空"
 
 
 def _log_path(model: ModelSpec) -> Path:
@@ -195,7 +195,7 @@ def _spawn(
     args = build_args(model, profile, port, config.settings.host, config.base_dir)
     bin_dir = Path(config.base_dir) / "bin"
     if not bin_dir.is_dir():
-        raise LaunchError(f"运行时目录不存在：{bin_dir}（守卫应已拦截，请检查 bin\\）")
+        raise LaunchError(f"运行时目录不存在：{bin_dir}；守卫应已拦截，请检查 bin\\")
     try:
         if os.name == "nt":
             handle = log_path.open("ab")
@@ -286,30 +286,36 @@ def wait_ready(
     deadline = time.monotonic() + config.settings.launcher.health_timeout_sec
     interval = config.settings.launcher.health_poll_interval_ms / 1000.0
     started = time.monotonic()
-    with Spinner("正在加载模型", paint, enabled=None if progress else False) as spin:
+    log_tail_lines = config.settings.launcher.log_tail_lines
+    with Spinner(
+        "正在加载模型",
+        paint,
+        enabled=None if progress else False,
+        interval_ms=config.settings.ui.spinner_interval_ms,
+    ) as spin:
         while time.monotonic() < deadline:
             if not pid_running(record.pid):
-                tail = read_log_tail(record.log_path)
+                tail = read_log_tail(record.log_path, log_tail_lines)
                 clear_record(record.model_id)
                 raise LaunchError(
-                    f"llama-server（PID {record.pid}）在就绪前退出。日志尾部：\n{tail}"
+                    f"llama-server PID {record.pid} 在就绪前退出。日志尾部：\n{tail}"
                 )
-            if client.health(timeout=3.0):
+            if client.health():
                 ids = client.model_ids()
                 if record.alias not in ids:
                     raise LaunchError(
                         f"端口 {record.port} 上运行的模型标识为 {ids}，"
-                        f"与期望 {record.alias!r} 不一致（端口被别的实例占用？）"
+                        f"与期望 {record.alias!r} 不一致；端口被别的实例占用？"
                     )
                 elapsed = time.monotonic() - started
-                spin.done(f"已就绪 · {elapsed:.1f}s")
+                spin.done(f"就绪 · {elapsed:.1f}s")
                 return elapsed
             spin.update()
             time.sleep(interval)
-        tail = read_log_tail(record.log_path)
+        tail = read_log_tail(record.log_path, log_tail_lines)
         raise LaunchError(
-            f"等待 {config.settings.launcher.health_timeout_sec:.0f}s 后服务仍未就绪"
-            f"（PID {record.pid}，端口 {record.port}）。日志尾部：\n{tail}"
+            f"等待 {config.settings.launcher.health_timeout_sec:.0f}s 后服务仍未响应；"
+            f"PID {record.pid}，端口 {record.port}。日志尾部：\n{tail}"
         )
 
 
@@ -326,7 +332,7 @@ def run_foreground(
     _guard_or_raise(config, model, port, palette)
     args = build_args(model, profile, port, config.settings.host, config.base_dir)
     bin_dir = Path(config.base_dir) / "bin"
-    print(paint.meta(f"{model.display} · 档位 {profile.key}（前台）"))
+    print(paint.meta(f"{model.display} · 档位 {profile.key} · 前台"))
     if verbose:
         print(paint.meta(f"地址 {endpoint(config, port)}  参数：{' '.join(args[1:])}"))
     try:
@@ -383,6 +389,6 @@ def inspect(config: AppConfig) -> list[RunStatus]:
                 record.port,
                 template_kwargs={},
             )
-            healthy = client.health(timeout=2.0)
+            healthy = client.health()
         statuses.append(RunStatus(record=record, alive=alive, healthy=healthy))
     return statuses
