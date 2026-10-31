@@ -333,6 +333,25 @@ class PhoneticLexiconTests(unittest.TestCase):
         sources = {entry.source for entry in self.glossary.entries}
         self.assertNotIn("ホテルじゃ", sources)
 
+    def test_sfx_table_near_miss_forms_converge(self) -> None:
+        """V2 把表内词写成同形近似字；术语表按误译形态做确定性收敛。"""
+        self.assertEqual(self.glossary.apply("すりすり", "擦擦……"), "蹭蹭……")
+        self.assertEqual(
+            self.glossary.apply("すりすりすり", "擦擦……蹭擦……擦擦"),
+            "蹭蹭……蹭蹭……蹭蹭",
+        )
+        self.assertEqual(
+            self.glossary.apply("さわさわー", "纹丝窣窣——"), "窸窸窣窣——"
+        )
+        self.assertEqual(
+            self.glossary.apply("サワーサワー", "啜啦唰啦~"), "唰啦唰啦~"
+        )
+        self.assertEqual(self.glossary.apply("くにくに", "摩捏揉捏……"), "揉捏……")
+        self.assertEqual(self.glossary.apply("つりつり", "抽扯~"), "扯扯~")
+
+    def test_sfx_rows_do_not_fire_without_source_hit(self) -> None:
+        self.assertEqual(self.glossary.apply("こんにちは", "擦擦……"), "擦擦……")
+
 
 # --------------------------------------------------------------------------- #
 # 防线 4：文件名元数据先验
@@ -471,6 +490,44 @@ class SeedPipelineTests(unittest.TestCase):
         output = self.run_with("plain.srt")
         self.assertIn("赤音", output)
         self.assertNotIn("茜音", output)
+
+
+class OrganSwapPipelineTests(unittest.TestCase):
+    """端到端：finalize 的器官错位修复必须真的落到译文上。"""
+
+    SCRIPT = {
+        "お耳の中も失礼して": "你的小穴里面也要好好检查哦",
+        "お耳もおまんこも両方": "耳朵和小穴都要",
+    }
+
+    @classmethod
+    def chat(cls, prompt: str) -> str:
+        items = parse_batch(prompt)
+        return "\n".join(
+            f"[#{cue_id}] {cls.SCRIPT.get(text, text)}"
+            for cue_id, text in items
+        )
+
+    def run_with(self, source: str) -> str:
+        failures: list = []
+        return translate_srt(
+            self.chat,
+            source,
+            chunk_chars=800,
+            source="a.srt",
+            eol="\n",
+            failures=failures,
+            window_size=2,
+        )
+
+    def test_ear_cue_is_repaired(self) -> None:
+        output = self.run_with(srt("お耳の中も失礼して"))
+        self.assertIn("耳朵", output)
+        self.assertNotIn("小穴", output)
+
+    def test_both_organs_cue_is_left_alone(self) -> None:
+        output = self.run_with(srt("お耳もおまんこも両方"))
+        self.assertIn("小穴", output)
 
 
 # --------------------------------------------------------------------------- #

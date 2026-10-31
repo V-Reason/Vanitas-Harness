@@ -36,6 +36,7 @@ from .quality import (
     audit_invented_tool,
     audit_short_duplicate,
     audit_under_translation,
+    detect_organ_swap,
     detect_register,
     is_onomatopoeia_or_reduplication,
     normalize_compare,
@@ -48,7 +49,6 @@ from .translate.cleaner import (
     REPLACEMENT_CHARS_RE,
     SLASH_ALTERNATIVE_RE,
     SOURCE_HAS_BRACKETS_RE,
-    STAGING_BRACKETS_RE,
     TRADITIONAL_CHARS,
     TRADITIONAL_TO_SIMPLIFIED_MAP,
     UNTRANSLATED_KANA_RE,
@@ -148,6 +148,12 @@ CODE_SPECS: tuple[CodeSpec, ...] = (
         "译文出现道具词，当前及前后 ±3 条源文都没有道具词。",
     ),
     CodeSpec(
+        "organ_mismatch",
+        SEVERITY_REVIEW,
+        "qc.definition.organ_mismatch",
+        "源文只有耳词、没有阴道类词，译文却出现阴道类词（耳→小穴错位）。",
+    ),
+    CodeSpec(
         "address_term",
         SEVERITY_REVIEW,
         "qc.definition.address_term",
@@ -194,6 +200,12 @@ CODE_SPECS: tuple[CodeSpec, ...] = (
         SEVERITY_REVIEW,
         "qc.register.honorific",
         "亲密语域、非引语译文出现敬称「您」。",
+    ),
+    CodeSpec(
+        "pronoun_mixed",
+        SEVERITY_REVIEW,
+        "qc.register.pronoun_mixed",
+        "同一文件「您」与「你」并存且来回切换 ≥3 次（人称不统一）。",
     ),
     CodeSpec(
         "blank",
@@ -579,6 +591,12 @@ def _sources_are_near_synonyms(left: str, right: str) -> bool:
 
 
 KANA_ONLY_RE = re.compile(r"^[\u3040-\u30ff\u30fc]+$")
+# 舞台指示的 QC 口径比生产端更宽：生产只删“耳边/轻抚”白名单（免得误删
+# 「（笑）」这类语气注释），但人工复核要看到所有未授权括号，包括
+# 「（轻轻探入）」「（脚步声）」「（腰部有规律地）」。
+UNSOURCED_BRACKET_RE = re.compile(
+    r"[（(【][^）)】]{0,20}[\u4e00-\u9fff][^）)】]{0,20}[）)】]"
+)
 # quality 的拟声判定把“全假名 + 促音”一律当拟声，ストップですわ 这类
 # 带句尾助动词的短句会被误豁免；QC 只在这类句子上绕开该豁免。
 SENTENCE_MARKERS = (
@@ -817,10 +835,8 @@ def _check_legacy_per_cue(
             ),
             options,
         )
-    if (
-        not SOURCE_HAS_BRACKETS_RE.search(source_text)
-        and STAGING_BRACKETS_RE.search(translation_text)
-    ):
+    bracket = UNSOURCED_BRACKET_RE.search(translation_text)
+    if not SOURCE_HAS_BRACKETS_RE.search(source_text) and bracket:
         _add(
             result,
             _issue(
@@ -830,7 +846,7 @@ def _check_legacy_per_cue(
                 cue=cue,
                 source_text=source_text,
                 translation_text=translation_text,
-                evidence=_clip(STAGING_BRACKETS_RE.search(translation_text).group(0), 24),
+                evidence=_clip(bracket.group(0), 24),
                 suggestion="删除未授权动作括号；不要凭剧情脑补",
             ),
             options,
@@ -1136,6 +1152,39 @@ def _check_glossary_per_cue(
     )
 
 
+# 人称混用阈值：两种人称各 ≥2 条、切换 ≥3 次才报；单次场景切换不报。
+PRONOUN_MIX_MIN_EACH = 2
+PRONOUN_MIX_MIN_SWITCHES = 3
+
+
+def _check_organ(
+    result: FileQC,
+    src,
+    zh,
+    options: QCOptions,
+) -> None:
+    """耳→阴道类词的器官错位；判定规则与生产端修复共用同一 guard。"""
+    if not options.enabled("organ_mismatch"):
+        return
+    evidence = detect_organ_swap(src.text, zh.text)
+    if evidence is None:
+        return
+    _add(
+        result,
+        _issue(
+            SEVERITY_REVIEW,
+            "organ_mismatch",
+            f"器官错位：{evidence}",
+            cue=zh.index,
+            source_text=src.text,
+            translation_text=zh.text,
+            evidence=evidence,
+            suggestion="按本条原文的器官直译（耳→耳朵），不要替换成另一处器官",
+        ),
+        options,
+    )
+
+
 def _check_register(
     result: FileQC,
     pairs,
@@ -1145,25 +1194,74 @@ def _check_register(
     result.register = register
     result.pronoun["您"] = sum(zh.text.count("您") for _src, zh in pairs)
     result.pronoun["你"] = sum(zh.text.count("你") for _src, zh in pairs)
-    if register != REGISTER_INTIMATE or not options.enabled("honorific"):
+    if register == REGISTER_INTIMATE and options.enabled("honorific"):
+        for src, zh in pairs:
+            if "您" not in zh.text or _has_quote(zh.text):
+                continue
+            _add(
+                result,
+                _issue(
+                    SEVERITY_REVIEW,
+                    "honorific",
+                    "亲密/非正式语境出现敬称“您”",
+                    cue=zh.index,
+                    source_text=src.text,
+                    translation_text=zh.text,
+                    evidence=f"您×{zh.text.count('您')} register=intimate",
+                    suggestion="确认是否为正式/服务语境；亲昵耳语建议改为“你”",
+                ),
+                options,
+            )
+    _check_pronoun_mix(result, pairs, options)
+
+
+def _check_pronoun_mix(result: FileQC, pairs, options: QCOptions) -> None:
+    """同一文件 您/你 并存且来回切换时，在**首个切换 cue** 报一条 review。
+
+    阈值 2 条 / 2 条 / 切换 ≥3 次：服务→亲密的一次性场景切换（1~2 次）
+    属于合法语域转换，不算“混用”；来回翻烧饼才需要人工统一。
+    """
+    if not options.enabled("pronoun_mixed"):
+        return
+    sequence: list[tuple[str, str]] = []
+    for _src, zh in pairs:
+        if "您" in zh.text:
+            sequence.append((zh.index, "您"))
+        elif "你" in zh.text:
+            sequence.append((zh.index, "你"))
+    count_nin = sum(1 for _cue, pronoun in sequence if pronoun == "您")
+    count_you = sum(1 for _cue, pronoun in sequence if pronoun == "你")
+    if count_nin < PRONOUN_MIX_MIN_EACH or count_you < PRONOUN_MIX_MIN_EACH:
+        return
+    switches = 0
+    anchor: str | None = None
+    previous: str | None = None
+    for cue, pronoun in sequence:
+        if previous is not None and pronoun != previous:
+            switches += 1
+            if anchor is None:
+                anchor = cue
+        previous = pronoun
+    if switches < PRONOUN_MIX_MIN_SWITCHES or anchor is None:
         return
     for src, zh in pairs:
-        if "您" not in zh.text or _has_quote(zh.text):
+        if zh.index != anchor:
             continue
         _add(
             result,
             _issue(
                 SEVERITY_REVIEW,
-                "honorific",
-                "亲密/非正式语境出现敬称“您”",
-                cue=zh.index,
+                "pronoun_mixed",
+                f"人称混用：您 {count_nin} 条 / 你 {count_you} 条，来回切换 {switches} 次",
+                cue=anchor,
                 source_text=src.text,
                 translation_text=zh.text,
-                evidence=f"您×{zh.text.count('您')} register=intimate",
-                suggestion="确认是否为正式/服务语境；亲昵耳语建议改为“你”",
+                evidence=f"您×{count_nin}/你×{count_you}，切换 {switches} 次，首切第 {anchor} 条",
+                suggestion="同一文件统一用「你」；服务场景请整篇保留「您」，不要交替",
             ),
             options,
         )
+        return
 
 
 def _check_corpus_stats(
@@ -1335,6 +1433,7 @@ def check_pair(
         _check_definition(
             result, src, zh, document_text, nearby, options
         )
+        _check_organ(result, src, zh, options)
         _check_glossary_per_cue(result, src, zh, glossary, options)
 
     _check_duplicates(result, pairs, options)

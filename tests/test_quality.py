@@ -37,10 +37,12 @@ from vanitas.quality import (  # noqa: E402
     audit_translation,
     audit_under_translation,
     combine_hints,
+    detect_organ_swap,
     detect_register,
     is_onomatopoeia_or_reduplication,
     normalize_compare,
     repair_first_person_name,
+    repair_organ_swap,
     repair_quote_private,
 )
 
@@ -148,6 +150,18 @@ class RegisterTests(unittest.TestCase):
     def test_neutral_when_scores_tie(self) -> None:
         self.assertEqual(detect_register(["先輩、お客様"]), "neutral")
 
+    def test_act_words_force_intimate_without_service(self) -> None:
+        # 明确性行为词 + 无服务词 → intimate（提示词口径：一旦身体互动全篇用你）。
+        self.assertEqual(detect_register(["好き"]), "neutral")
+        self.assertEqual(detect_register(["好き", "おちんちん"]), "intimate")
+        self.assertEqual(detect_register(["こんなに勃起してる"]), "intimate")
+
+    def test_act_words_yield_to_service_register(self) -> None:
+        self.assertEqual(
+            detect_register(["いらっしゃいませ、お客様", "おちんちん"]),
+            "service",
+        )
+
     def test_high_side_wins_on_clear_margin(self) -> None:
         self.assertEqual(
             detect_register(["いらっしゃいませ", "お客様", "ご予約", "好き"]),
@@ -173,6 +187,36 @@ class PronounPolicyTests(unittest.TestCase):
     def test_intimate_auto_does_not_touch_text(self) -> None:
         profile = TranslationProfile(register="intimate", pronoun="auto")
         self.assertEqual(apply_pronoun_policy("您请坐", profile), "您请坐")
+
+
+class OrganSwapTests(unittest.TestCase):
+    def test_ear_source_with_vagina_translation_is_flagged(self) -> None:
+        evidence = detect_organ_swap("お耳の中も失礼して", "你的小穴里面也要好好检查")
+        self.assertEqual(evidence, "源=耳 译=小穴")
+        self.assertEqual(
+            repair_organ_swap("お耳の中も失礼して", "你的小穴里面也要好好检查"),
+            "你的耳朵里面也要好好检查",
+        )
+
+    def test_guard_requires_ear_and_never_vagina_in_source(self) -> None:
+        # 源文同时提到两处器官：不改写。
+        source = "お耳もおまんこも両方"
+        self.assertIsNone(detect_organ_swap(source, "耳朵和小穴都要"))
+        self.assertEqual(repair_organ_swap(source, "耳朵和小穴都要"), "耳朵和小穴都要")
+        # 源文没有耳词：不属于本规则。
+        self.assertIsNone(detect_organ_swap("っぱいどろどろのつゆ", "小穴里沾满了汁水"))
+
+    def test_clean_translation_is_untouched(self) -> None:
+        self.assertEqual(
+            repair_organ_swap("お耳の中も失礼して", "你的耳朵里面也要好好检查"),
+            "你的耳朵里面也要好好检查",
+        )
+        self.assertIsNone(detect_organ_swap("お耳の中も失礼して", "你的耳朵里面"))
+
+    def test_empty_inputs_are_noops(self) -> None:
+        self.assertIsNone(detect_organ_swap("", "小穴"))
+        self.assertIsNone(detect_organ_swap("お耳", ""))
+        self.assertEqual(repair_organ_swap("", ""), "")
 
 
 class DuplicateIndexTests(unittest.TestCase):
