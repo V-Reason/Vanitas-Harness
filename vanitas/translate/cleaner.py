@@ -70,6 +70,8 @@ TRADITIONAL_TO_SIMPLIFIED_MAP = str.maketrans(TRADITIONAL_TO_SIMPLIFIED)
 TRADITIONAL_CHARS = frozenset(TRADITIONAL_TO_SIMPLIFIED)
 
 SOURCE_HAS_BRACKETS_RE = re.compile(r"[（(【\[]")
+# 生产端只删白名单内的“耳部/亲密动作”括号，宁可漏删也不动「（笑）」这类
+# 语气注释；更宽的“任意汉字括号”只放在 QC 侧做 review（见 qc.UNSOURCED_BRACKET_RE）。
 STAGING_BRACKETS_RE = re.compile(
     r"[（(](?:在)?(?:[左右双]?耳[边後后畔旁]|轻抚|抚摸|轻吻|深吻|轻舔|亲吻|"
     r"衣物摩擦声|呼吸声)[^）)]*[）)]"

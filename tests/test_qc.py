@@ -28,7 +28,7 @@ def srt(*texts: str) -> str:
 
 class CodeCatalogTests(unittest.TestCase):
     def test_catalog_has_expected_size_and_severities(self) -> None:
-        self.assertEqual(len(qc.CODES), 24)
+        self.assertEqual(len(qc.CODES), 26)
         self.assertEqual(
             {spec.severity for spec in qc.CODES.values()},
             {qc.SEVERITY_BLOCK, qc.SEVERITY_REVIEW, qc.SEVERITY_INFO},
@@ -145,6 +145,43 @@ class DefinitionTests(unittest.TestCase):
                 any(i.code == "numeral_truncation" for i in result.issues)
             )
 
+    def test_organ_swap_ear_to_vagina(self) -> None:
+        result = qc.check_pair(
+            srt("お耳の中も失礼して"),
+            srt("（轻轻探入）你的小穴里面也要好好检查哦"),
+        )
+        issues = [i for i in result.issues if i.code == "organ_mismatch"]
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].severity, "review")
+        self.assertIn("小穴", issues[0].evidence)
+
+        for translation in ("你的耳朵里面也要好好检查哦",):
+            clean = qc.check_pair(srt("お耳の中も失礼して"), srt(translation))
+            self.assertFalse(
+                any(i.code == "organ_mismatch" for i in clean.issues)
+            )
+
+    def test_organ_swap_needs_narrow_guard(self) -> None:
+        # 源文同时提到两处器官：不改写、不报。
+        both = qc.check_pair(
+            srt("お耳もおまんこも両方"), srt("耳朵和小穴都要")
+        )
+        self.assertFalse(any(i.code == "organ_mismatch" for i in both.issues))
+        # 源文没有耳词：不属于本 code 的判定面（改用 review/人工）。
+        no_ear = qc.check_pair(
+            srt("っぱいどろどろのつゆもついちゃってます"), srt("小穴里也沾满了汁水呢")
+        )
+        self.assertFalse(any(i.code == "organ_mismatch" for i in no_ear.issues))
+
+    def test_staging_any_unsourced_bracket(self) -> None:
+        result = qc.check_pair(srt("好きだよ"), srt("（轻轻探入）喜欢你哦"))
+        staging = [i for i in result.issues if i.code == "staging"]
+        self.assertEqual(len(staging), 1)
+        self.assertIn("轻轻探入", staging[0].evidence)
+        # 源文自带括号属于有源标注，不报。
+        clean = qc.check_pair(srt("(両耳) 好きだよ"), srt("（在双耳边）喜欢你哦"))
+        self.assertFalse(any(i.code == "staging" for i in clean.issues))
+
 
 class DuplicateTests(unittest.TestCase):
     def test_duplicate_long(self) -> None:
@@ -234,6 +271,33 @@ class StatsAndRegisterTests(unittest.TestCase):
             srt("先輩、好きです"), srt("他说“您真好呢”")
         )
         self.assertFalse(any(i.code == "honorific" for i in result.issues))
+
+    def test_pronoun_mixed_anchors_on_first_switch(self) -> None:
+        result = qc.check_pair(
+            srt("こんにちは", "はい", "いいえ", "そうですね"),
+            srt("您看吧", "你看吧", "您听着", "你试试"),
+        )
+        mixed = [i for i in result.issues if i.code == "pronoun_mixed"]
+        self.assertEqual(len(mixed), 1)
+        self.assertEqual(mixed[0].severity, "review")
+        self.assertEqual(mixed[0].cue, "2")
+        self.assertIn("切换 3 次", mixed[0].evidence)
+
+    def test_pronoun_mixed_needs_both_and_switches(self) -> None:
+        # 只有「您」不报；只有一次切换（服务→亲密）也不报。
+        only_nin = qc.check_pair(
+            srt("こんにちは", "はい"), srt("您看吧", "您听着")
+        )
+        self.assertFalse(
+            any(i.code == "pronoun_mixed" for i in only_nin.issues)
+        )
+        one_switch = qc.check_pair(
+            srt("こんにちは", "はい", "いいえ"),
+            srt("您看吧", "你看吧", "你听着"),
+        )
+        self.assertFalse(
+            any(i.code == "pronoun_mixed" for i in one_switch.issues)
+        )
 
 
 class OptionsAndCorpusTests(unittest.TestCase):
