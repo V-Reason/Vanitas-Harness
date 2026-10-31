@@ -90,7 +90,8 @@ vanitas\
 | 文件 | 单一职责 | 更新时机 |
 | :--- | :--- | :--- |
 | `docs\总设计方案.md` | 架构、模块边界、配置/进程/接口契约、取舍 | 设计或契约变化时 |
-| `docs\项目现状.md` | 环境、库存、实测矩阵、已知问题、未验证边界、下一步 | 每次实测或版本发布后 |
+| `docs\项目现状.md` | 只写当前事实：契约速查、环境、库存、最新实测、已知问题、未验证边界、下一步 | 每次实测或版本发布后 |
+| `docs\变更历史.md` | 只写历史：按批次编号的旧状态、旧测量、被否决方案与取证；**不是契约** | 只追加，不删条、不改旧条结论 |
 | `docs\用户使用手册.md` | 安装、命令、REPL、翻译、批处理、排障 | 用户可见行为变化时 |
 | `docs\ClaudeCode范式笔记.md` | 交互范式来源与取舍（D1–D7） | 交互设计变化时 |
 | `AGENTS.md` | 开发纪律、红线、验证门禁、协作契约 | 规范变化时 |
@@ -122,8 +123,10 @@ Select-String -Path $src -Pattern '\[(SERVE|LAUNCH|META|HINT|ERROR|STATUS|STOP)\
 Select-String -Path *.bat -Pattern 'llama-server'                                  # 期望空
 git ls-files | Select-String -Pattern '^(bin/|models/|tests/reports/)|\.log$'      # 期望空
 # 4) 真实冒烟（至少一次）
-python -m vanitas serve qwen7b
+python -m vanitas serve qwen_coder                              # 4060
 python tests\multi_model_benchmark.py --port 4060 --suite agent --runs 1
+python -m vanitas serve hymt --profile 2                        # 4062，翻译冒烟
+python -m vanitas translate "tests\fixtures\sample_asmr.srt" --preset asmr --out-dir "%TEMP%\smoke"
 python -m vanitas stop
 ```
 未跑真机时必须注明「未实际验证」，不得把单测通过当成端到端通过。
@@ -138,7 +141,7 @@ python -m vanitas stop
 ## 9. 当前边界
 - 默认分工由 `settings.defaults` 配置：Agent=`qwen_coder`、chat=`qwen7b`、translate=`hymt`、batch=`qwen7b`；`serve <id>` 必须显式模型。档位优先级 CLI > 环境变量 > `~/.vanitas/preferences.json` > `default_profile`；`qwen7b` 在 4063，minicpm 为 `role=light`。
 - 翻译预设：`default_preset=subtitle`；`subtitle/prose/asmr` 用 HY-MT2 profile 2（8K Q4），context 分别 12/10/12，chunk 800，ASMR `window_size=6`；`general` 保留 4K Q8 / context 5 / chunk 1500。显式 `--model`/`--profile` 优先；档位不一致时 `translate` 自动停旧启新。ASMR 可选 `lookahead_cues`（0–4，默认 0），真机 A/B 未通过，不默认开启（历史见 变更历史 §41、§51）。
-- 提示词：`system_default` 全静态；`task_chat/task_code/task_agent/task_translate_asmr` 用 XML，`task_translate`/`agent_continue` 保持紧凑纯文本；仅 6 个占位符。当前 ASMR 生产模板为 V4：**12,427 B / `A5E05880…`**，分节为 `<language_and_voice>`/`<sensory_immersion>`/`<asmr_domain_lexicon>`/`<asr_repair_protocol>`/`<sfx_and_staging_rules>`/`<counting_and_io_guardrails>`/`<contrastive_examples>`/`<io_contract>`；V4 精简掉的条款与覆盖损失见 变更历史 §52，斜杠/假名仍有 `validate_cue_translation` 与 `salvage_slash_translation` 兜底。`task_agent` 的批量是逐项执行而非事务，`patch_file` 只要求唯一片段，不提供 `_reason`。
+- 提示词：`system_default` 全静态；`task_chat/task_code/task_agent/task_translate_asmr` 用 XML，`task_translate`/`agent_continue` 保持紧凑纯文本；仅 6 个占位符。当前 ASMR 生产模板为 **V5：13,108 B / `74324996…`**，分节为 `<language_and_voice>`/`<sensory_immersion>`/`<asmr_domain_lexicon>`/`<asr_repair_protocol>`/`<sfx_and_staging_rules>`/`<counting_and_io_guardrails>`/`<contrastive_examples>`/`<io_contract>`；V5 针对四类根因（示例专名渗漏、表外拟声音译、拟声同质化、无源加戏）改文案，实测与残留见 变更历史 §54，V4 的覆盖损失见 §52；`[#序号]` IO、报数、主客方向、拟声禁假名、占位符与 8 条红黑对照全部保留，斜杠/假名仍有 `validate_cue_translation` 与 `salvage_slash_translation` 兜底。`task_agent` 的批量是逐项执行而非事务，`patch_file` 只要求唯一片段，不提供 `_reason`。
 - 翻译上下文：`TranslationEngine._history` 是文档级状态，CLI 在每个输入文件前 `reset_history()`，多文件不得继承上一文件的标题、摘要或人名。ASMR 合流构建文档级 `DynamicEntityEngine`：只以敬称名、`という名`/`役` 明确姓名和共同前缀汉字姓名为种子；裸片假名/拟声词/普通名词不建实体，停用表拦截 `トラック`/`セックス`/`バイバイ`/`コショコショ` 等。`capture_translations` 只保存洁净示例，`_extract_locked_name` 只锁高置信裸名，`enforce_locks` 只清未翻译日文专名并用单遍正则交替 + 哨兵遮蔽防止「梅地先生先生」级联。
 - 窗口协议：`sanitize_translation_output` 只清围栏/外层引号/重复句号/开头标点，不再删 `[#N]`；编号由 cue 边界清理。`validate_cue_translation` 拒绝空行、假名、`SEXPAR`/`Track`、中日文斜杠与乱码替换符，批次失败整窗回退，单句失败按「原因回灌重译一次 → 填回候选 → 无候选才留原文」三级兜底。`align_window_response` 判三态，`identify_suspicious_cues` 逐 cue 定位（正文残留 `[#N]`、空译、超短、跨窗复制、同窗同译成对），只重译损坏项；结构灾难或损坏项 ≥ 半数才整窗熔断，禁止对 1..M 残缺前缀做位置猜测（历史见 变更历史 §45）。
 - T1 确定性守卫：`ASMR_T1_CODES` 闭集 5 个——`short_duplicate`/`address_term`/`invented_tool`/`invented_name`/`under_translation`，只在 `asmr_guard=True` 时参与，只报 issue，由 `audit_retry()` 每 cue 最多一次定点重译；CLI 在 `prompts.is_asmr_task()` 时自动启用，没有 `--no-t1`。预算 `T1Budget.for_corpus=max(5, round(cues×1%))`、`begin_file.per_file=max(2, ceil(file_cues×1%))`；事件 `t1_events.jsonl`/`t1_budget.json` 与 `translation_meta.json` 写到 `~/.vanitas/translate/<stamp>/`。`invented_name` 只登记提示词示例专名，`under_translation` 只判「源文 ≥10 字、译文 ≤2 字」，刻意不做比例判定（历史见 变更历史 §42、§53）。
