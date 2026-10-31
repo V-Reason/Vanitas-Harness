@@ -90,11 +90,13 @@
     "output_ratio": 2.5,
     "prompt_safety_tokens": 64,
     "monitor_lines": 5,
-    "temperature": 0.2,
+    "temperature": 0.15,
+    "top_p": 0.85,
     "max_split_depth": 3,
     "default_preset": "subtitle",
     "environment": "production",
     "strip_trailing_periods": true,
+    "enable_server_stop_tokens": true,
     "presets": {
       "subtitle": {
         "task_template": "translate",

@@ -138,33 +138,43 @@ class ScriptedChat:
 
 
 class DetectorTests(unittest.TestCase):
-    """早停判据必须只拦“确定救不回来”的形态。"""
+    """早停判据必须只拦“确定救不回来”的形态；越界编号是软停机。"""
 
     def test_normal_text_never_aborts(self) -> None:
-        detector = StreamingAbortDetector(6)
+        detector = StreamingAbortDetector(7)
         self.assertTrue(detector.feed("[#1] 今天天气真好\n"))
         self.assertFalse(detector.aborted)
 
-    def test_out_of_range_tag_aborts(self) -> None:
-        detector = StreamingAbortDetector(6)
+    def test_second_window_first_line_does_not_abort(self) -> None:
+        # 第 2 窗编号是 [#7]…[#12]，下一个期望编号是 13：合法首行不得触发。
+        detector = StreamingAbortDetector(13)
+        for chunk in ("[#7] 一\n", "[#8] 二\n", "[#12] 六\n"):
+            self.assertTrue(detector.feed(chunk), chunk)
+        self.assertFalse(detector.aborted)
+        self.assertFalse(detector.soft_stop)
+
+    def test_out_of_range_tag_soft_stops(self) -> None:
+        detector = StreamingAbortDetector(7)
         self.assertTrue(detector.feed("[#1] 一\n[#2] 二\n"))
         self.assertFalse(detector.feed("[#7] 七"))
-        self.assertTrue(detector.aborted)
-        self.assertIn("[#7]", detector.abort_reason)
+        self.assertTrue(detector.soft_stop)
+        self.assertFalse(detector.aborted)
+        self.assertEqual(detector.buffer[detector.soft_offset :], "[#7] 七")
 
     def test_blank_line_flood_aborts(self) -> None:
-        detector = StreamingAbortDetector(6)
+        detector = StreamingAbortDetector(7)
         self.assertFalse(detector.feed("译文\n\n\n\n下一行"))
         self.assertIn("空行", detector.abort_reason)
+        self.assertFalse(detector.soft_stop)
 
     def test_phrase_deadlock_aborts(self) -> None:
-        detector = StreamingAbortDetector(6)
+        detector = StreamingAbortDetector(7)
         unit = "あ" * 12
         self.assertFalse(detector.feed(unit * 3))
         self.assertIn("死锁", detector.abort_reason)
 
     def test_char_limit_aborts(self) -> None:
-        detector = StreamingAbortDetector(6, max_chars=100)
+        detector = StreamingAbortDetector(7, max_chars=100)
         self.assertFalse(detector.feed("あ" * 200))
         self.assertIn("字符数", detector.abort_reason)
 
@@ -185,6 +195,15 @@ class StreamingEngineTests(unittest.TestCase):
         self.assertEqual(len(stats), 1)
         self.assertEqual(stats[0].tokens, 7)
         self.assertEqual(stats[0].tps_source, "server.timings")
+
+    def test_soft_stop_keeps_valid_prefix(self) -> None:
+        # 模型多吐了一句越界编号：保留前面合法译文，不抛异常、不整窗作废。
+        client = StreamingClient([["[#1] 一", "\n[#2] 二", "\n[#3] 三"]])
+        engine = self.engine(client)
+        result = engine("[#1] あ\n[#2] い")
+        self.assertEqual(result, "[#1] 一\n[#2] 二")
+        self.assertNotIn("[#3]", result)
+        self.assertEqual(client.closed, 1)
 
     def test_abort_closes_stream_and_raises(self) -> None:
         client = StreamingClient([["[#1] 好", "\n\n\n\n"]])

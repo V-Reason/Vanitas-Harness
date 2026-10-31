@@ -48,6 +48,10 @@ WINDOW_ID_ANY_RE = re.compile(
     re.MULTILINE,
 )
 
+# 只取编号数值（不关心括号/列表符形态）。早停与 stop tokens 必须用
+# "窗口内最大编号 + 1"，不能用编号个数——合流窗口的编号是文档级连续序号。
+WINDOW_ID_NUMBER_RE = re.compile(r"#\s*(\d{1,4})")
+
 FENCE_RE = re.compile(r"^```[^\n]*\n(.*?)\n```$", re.DOTALL)
 QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’", "「": "」", "『": "』"}
 QUOTE_CHARS = frozenset(QUOTE_PAIRS) | frozenset(QUOTE_PAIRS.values())
@@ -75,6 +79,18 @@ SOURCE_HAS_BRACKETS_RE = re.compile(r"[（(【\[]")
 STAGING_BRACKETS_RE = re.compile(
     r"[（(](?:在)?(?:[左右双]?耳[边後后畔旁]|轻抚|抚摸|轻吻|深吻|轻舔|亲吻|"
     r"衣物摩擦声|呼吸声)[^）)]*[）)]"
+)
+# 同一份白名单的对外命名：QC 侧要判断“这个括号是不是生产端已认可的动作”，
+# 只允许从这里引用，禁止再抄一份正则。
+SAFE_STAGING_BRACKETS_RE = STAGING_BRACKETS_RE
+# 语气/情绪标注（笑、叹气、低语……）不是舞台动作，生产端刻意保留它们；
+# QC 对这类括号只统计（info），不按“无源舞台指示”报 review。
+TONE_ANNOTATION_BRACKETS_RE = re.compile(
+    r"[（(【]\s*(?:轻笑|笑声|偷笑|憋笑|苦笑|微笑|笑|"
+    r"叹气|叹息|轻叹|深呼吸|喘气|喘息|呼吸|"
+    r"小声|轻声|低语|耳语|呢喃|沉默|停顿|哽咽|哭腔|"
+    r"鼻息|气声|轻哼|哼|无奈|害羞|惊讶|安心)"
+    r"[^）)】]*[）)】]"
 )
 REPEATED_PUNCT_RE = re.compile(r"([…—~～♡❤♪])。")
 LEADING_INVALID_PUNCT_RE = re.compile(r"^[，、；：。！？!?\s]+")

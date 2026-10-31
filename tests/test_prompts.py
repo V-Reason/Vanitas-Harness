@@ -53,10 +53,10 @@ class PromptTests(unittest.TestCase):
         # 字节锁：模板一改就红，迫使改的人同时更新本断言与 docs/项目现状.md 的
         # 契约速查表（那里的指纹由 tests/test_docs_contract.py 再对一次）。
         # 当前版本与 A/B 记录见 docs/变更历史.md §54。
-        self.assertEqual(len(production), 13108)
+        self.assertEqual(len(production), 14363)
         self.assertEqual(
             hashlib.sha256(production).hexdigest().upper(),
-            "74324996DA7786F6A2BC4E1FDA6C5972E0E3AAC2B2BDB0C1A7887F5AFB268F0A",
+            "3A0F466E77976F5908FE1D15E8529EBB18B43C0C5534767E7E5E0917BBE7AFE1",
         )
         self.assertEqual(len(experimental), 5399)
         self.assertEqual(
@@ -145,7 +145,7 @@ class PromptTests(unittest.TestCase):
         # **现在真正生效**的条款，而不是旧版文案。
         # 已随重写消失、且**没有替代条款**的三条（审计记录，不静默删除）：
         #   1) 「默认使用简体中文 / 避免繁体」——V4 未再约束书写系统；
-        #   2) 「专名全篇复用」——只剩「茜音必须译为茜音」这类单名约束；
+        #   2) 「专名全篇复用」——V6 已连示例人名一起移除，改为抽象防脑补规则；
         #   3) 「任何位置不得出现 [#N]」——并入 io 分节的「译文正文内绝对严禁残留」。
         # 前两条若仍要保证，应加回提示词或由确定性后处理兜底（未实现，
         # 覆盖损失清单见 docs/变更历史.md §52）。
@@ -156,7 +156,7 @@ class PromptTests(unittest.TestCase):
             "全篇 100% 严禁出现“您”",
             "肉棒",                       # 器官归属常识
             "〜んですね",                 # 语法锚定：向对方求证而非自述
-            "茜音",                       # 汉字专名优先
+            "未提供本作人物表",             # V6：抽象防脑补人名
             "正文严禁合并，只译该编号内容",       # 跨行不预支（原「不借用相邻行内容」）
             "严禁无中生有增添原文没有的动作",      # 原「不要把泛指动作具体化」的替代
             "严禁音译为多字怪名",                 # 原「不音译成无意义的人名」的替代
@@ -164,6 +164,7 @@ class PromptTests(unittest.TestCase):
             self.assertIn(phrase, text)
         # 提示词保持通用：不写死单部音频才出现的规则/专名。
         self.assertNotIn("禁止您", text)
+        self.assertNotIn("茜音", text)
         self.assertNotIn("美咲日和", text)
         self.assertNotIn("箱川诺亚", text)
 
@@ -179,7 +180,7 @@ class PromptTests(unittest.TestCase):
             "扑倒",
             "使坏",
             "接续词",            # V4 措辞：接续助词 → 接续词
-            "原文没有提示",       # V4 措辞：原文没有任何括号 → 原文没有提示
+            "原文没有任何括号时",  # V6 措辞：收紧动作括号
         ):
             # 「不预支」已并入「正文严禁合并，只译该编号内容」，不再单独出现。
 
@@ -196,7 +197,7 @@ class PromptTests(unittest.TestCase):
         for phrase in (
             "お客様から私たちに触れることは禁止",
             "是客人碰我们",              # V4 措辞（原「是客人→我们」）
-            "私のことは雫でいいって",
+            "私のことは（名字）でいいって",
             "转述第三人称",              # V4 措辞（原「引用他人」）
         ):
             self.assertIn(phrase, text)

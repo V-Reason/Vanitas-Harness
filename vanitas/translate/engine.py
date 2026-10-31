@@ -7,13 +7,14 @@
 
 from __future__ import annotations
 
+import inspect
 import time
 from collections import deque
 from pathlib import Path
 from typing import Callable
 
 from .. import prompts
-from .cleaner import WINDOW_ID_ANY_RE, _clip, sanitize_translation_output
+from .cleaner import WINDOW_ID_NUMBER_RE, _clip, sanitize_translation_output
 from ..client import LlamaClient
 from ..config import AppConfig, ModelSpec
 from ..cue_boundary import JoinRule, load_joins
@@ -42,7 +43,7 @@ from ..metrics import (
     estimate_tokens,
     translation_budget,
 )
-from ..quality import Glossary
+from ..quality import ContextRule, Glossary, load_context_rules
 from .types import NameTranslation, TranslationOptions
 
 
@@ -59,25 +60,67 @@ def extract_content(result: dict) -> str:
     return content
 
 
-def _expected_cue_count(text: str) -> int:
-    """从待译文本推断本窗预期编号数；无编号（散文/单句）按 1 处理。"""
-    return max(1, len(WINDOW_ID_ANY_RE.findall(text)))
+def next_window_id(text: str) -> int | None:
+    """从带协议编号的输入推断“下一条”编号；无编号返回 ``None``。
+
+    必须用窗口内**最大编号 + 1**，不能用编号个数：合流窗口的编号是文档级
+    连续序号（第二窗从 7 开始），按个数会算出 7 并掐断合法首行。
+    """
+    numbers = [
+        int(match.group(1))
+        for match in WINDOW_ID_NUMBER_RE.finditer(str(text or ""))
+    ]
+    if not numbers:
+        return None
+    return max(numbers) + 1
+
+
+# 连续空行是任何窗口协议下都不可能合法的形态，作为基础截断符始终挂载。
+BASE_STOP_TOKENS = ("\n\n\n\n",)
+
+
+def window_stop_tokens(text: str) -> list[str]:
+    """构造服务端物理截断符；越界编号按“最大编号 + 1”动态生成。
+
+    覆盖模型常见的协议变形（缺左括号、全角括号）；由推理端在 C++ 层停机，
+    客户端就不会收到越界标签，也就不需要靠异常熔断整窗。
+    """
+    next_id = next_window_id(text)
+    if next_id is None:
+        return list(BASE_STOP_TOKENS)
+    return [
+        f"[#{next_id}]",
+        f"#{next_id}]",
+        f"【#{next_id}】",
+        *BASE_STOP_TOKENS,
+    ]
 
 
 class StreamingAbortDetector:
     """针对微批次输出流实施物理早停，提前掐断连接释放 GPU。
 
-    只拦“确定不可能变成好译文”的形态：越界编号、连续空行、短语死锁、
-    字符数失控。所有判据都基于已收到的前缀，不预测未来，也不看语义——
-    宁可漏停，不可误停（误停会白白多一次回退请求）。
+    两条路径必须分开：
+    - **硬熔断**（空行洪水/短语死锁/字符失控）：已产出的前缀确定不可用，
+      抛 ``OutputTruncated``，由调用方整窗回退；
+    - **软停机**（模型吐出“下一句”编号）：前缀本身可能已经完全正确，只把
+      越界标记之后的尾巴截掉。服务端 stop 正常时这一步不会触发。
+
+    所有判据都基于已收到的前缀，不预测未来，也不看语义——宁可漏停，
+    不可误停（误停会白白多一次回退请求）。
     """
 
-    def __init__(self, expected_cue_count: int, max_chars: int = 4000) -> None:
-        self.expected_cue_count = max(1, int(expected_cue_count))
+    def __init__(
+        self, expected_next_id: int | None, max_chars: int = 4000
+    ) -> None:
+        self.expected_next_id = (
+            int(expected_next_id) if expected_next_id is not None else None
+        )
         self.max_chars = max(100, int(max_chars))
         self.buffer = ""
         self.aborted = False
         self.abort_reason = ""
+        self.soft_stop = False
+        self.soft_offset = 0
 
     def feed(self, delta: str) -> bool:
         """处理新 token 片段；返回 True 表示继续，False 表示应立刻断开。"""
@@ -85,9 +128,13 @@ class StreamingAbortDetector:
         if len(self.buffer) > self.max_chars:
             return self._abort(f"输出字符数超出上限 {self.max_chars}")
 
-        limit_tag = f"[#{self.expected_cue_count + 1}]"
-        if limit_tag in self.buffer:
-            return self._abort(f"检测到编号越界标签 {limit_tag}")
+        if self.expected_next_id is not None:
+            limit_tag = f"[#{self.expected_next_id}]"
+            position = self.buffer.find(limit_tag)
+            if position >= 0:
+                self.soft_stop = True
+                self.soft_offset = position
+                return False
 
         if "\n\n\n\n" in self.buffer or "\r\n\r\n\r\n\r\n" in self.buffer:
             return self._abort("检测到异常空行连续溢出")
@@ -131,6 +178,9 @@ class TranslationEngine:
         self._entity_engine: DynamicEntityEngine | None = None
         self._lookahead = ""
         self._on_stat = on_stat
+        # 客户端方法是否接受某个关键字（如 stop）的探测缓存：鸭子类型替身
+        # 只实现 chat()，不能因为多传一个 stop 就把整条管线打穿。
+        self._kwargs_support: dict[tuple[str, str], bool] = {}
         # P3 复审模板按需加载：默认关闭复审时不读文件，也不影响既有配置目录
         # （只带生产模板的隔离目录仍能正常跑翻译）。
         self._critique_template: str | None = None
@@ -140,6 +190,12 @@ class TranslationEngine:
             self._glossary = Glossary.load(
                 prompt_dir.parent / "glossary" / "asmr.tsv"
             )
+        # 上下文替换规则与模板目录同级；None 表示本配置目录没有规则表，
+        # 由管线回落到仓库自带的默认表（自定义 --config-dir 仍能跑）。
+        self._context_rules: tuple[ContextRule, ...] | None = None
+        rules_path = prompt_dir.parent / "glossary" / "rules.tsv"
+        if rules_path.exists():
+            self._context_rules = load_context_rules(rules_path)
         # 合并表与术语表同级：仅 ASMR 任务且表存在时启用，缺失时保持旧行为。
         self._join_rules: tuple[JoinRule, ...] = ()
         if prompts.is_asmr_task(task_template):
@@ -151,6 +207,11 @@ class TranslationEngine:
     def glossary(self) -> Glossary:
         """只读术语表；translate_srt 通过它做 cue 级确定性后处理。"""
         return self._glossary
+
+    @property
+    def context_rules(self) -> tuple[ContextRule, ...] | None:
+        """只读上下文规则；None 表示配置目录没有 rules.tsv，由管线用默认表。"""
+        return self._context_rules
 
     @property
     def task_template(self) -> str:
@@ -411,6 +472,12 @@ class TranslationEngine:
             raise TranslateError(str(exc)) from exc
 
         started = time.perf_counter()
+        stop_tokens = (
+            window_stop_tokens(text)
+            if options.enable_server_stop_tokens
+            else None
+        )
+        top_p = options.top_p
         stream_chat = getattr(self._client, "stream_chat", None)
         if callable(stream_chat):
             (
@@ -420,7 +487,9 @@ class TranslationEngine:
                 tokens,
                 tps,
                 tps_source,
-            ) = self._generate_stream(messages, budget, text)
+            ) = self._generate_stream(
+                messages, budget, text, stop_tokens, top_p
+            )
         else:
             # 鸭子类型的测试替身只有 chat()；保留阻塞路径，生产客户端恒走流式。
             (
@@ -430,7 +499,9 @@ class TranslationEngine:
                 tokens,
                 tps,
                 tps_source,
-            ) = self._generate_blocking(messages, budget, text, started)
+            ) = self._generate_blocking(
+                messages, budget, text, started, stop_tokens, top_p
+            )
 
         if finish_reason == "length":
             if depth >= options.max_split_depth or len(text) <= 1:
@@ -459,18 +530,62 @@ class TranslationEngine:
             )
         return translated
 
+    def _supports_keyword(self, method_name: str, keyword: str) -> bool:
+        """客户端方法是否显式接受关键字（或有 ``**kwargs``）；按方法缓存。"""
+        cache_key = (method_name, keyword)
+        cached = self._kwargs_support.get(cache_key)
+        if cached is not None:
+            return cached
+        method = getattr(self._client, method_name, None)
+        supported = False
+        if callable(method):
+            try:
+                parameters = inspect.signature(method).parameters
+            except (TypeError, ValueError):
+                parameters = {}
+            supported = keyword in parameters or any(
+                item.kind is inspect.Parameter.VAR_KEYWORD
+                for item in parameters.values()
+            )
+        self._kwargs_support[cache_key] = supported
+        return supported
+
+    def _stop_kwargs(
+        self, method_name: str, stop: list[str] | None
+    ) -> dict[str, list[str]]:
+        """只在客户端真的支持时才带 stop，避免打穿鸭子类型替身。"""
+        if not stop or not self._supports_keyword(method_name, "stop"):
+            return {}
+        return {"stop": list(stop)}
+
+    def _top_p_kwargs(
+        self, method_name: str, top_p: float | None
+    ) -> dict[str, float]:
+        """只在客户端支持且 top_p<1.0 时透传；1.0 表示不干预。"""
+        if (
+            top_p is None
+            or top_p >= 1.0
+            or not self._supports_keyword(method_name, "top_p")
+        ):
+            return {}
+        return {"top_p": float(top_p)}
+
     def _generate_blocking(
         self,
         messages: list[dict],
         budget,
         text: str,
         started: float,
+        stop: list[str] | None = None,
+        top_p: float | None = None,
     ) -> tuple[str, str, float, int, float, str]:
         """阻塞路径：兼容只有 ``chat()`` 的鸭子类型客户端。"""
         result = self._client.chat(
             messages,
             max_tokens=budget.max_tokens,
             temperature=self._options.temperature,
+            **self._stop_kwargs("chat", stop),
+            **self._top_p_kwargs("chat", top_p),
         )
         elapsed_s = time.perf_counter() - started
         choices = result.get("choices") or []
@@ -502,24 +617,30 @@ class TranslationEngine:
         messages: list[dict],
         budget,
         text: str,
+        stop: list[str] | None = None,
+        top_p: float | None = None,
     ) -> tuple[str, str, float, int, float, str]:
         """流式路径：边收边判，命中畸形立即掐断 Socket 释放 GPU。
 
         ``stream.close()`` 会把 ``GeneratorExit`` 抛回 ``chat_stream`` 的
         ``finally``，由底层 ``response.close()`` 真正断开 HTTP 连接；这是
-        早停能省下算力的唯一原因，不能只 break 循环。
+        早停能省下算力的唯一原因，不能只 break 循环。越界编号是软停机：
+        截掉越界标记之后的尾巴，保留前面已经合法的译文。
         """
         detector = StreamingAbortDetector(
-            _expected_cue_count(text),
+            next_window_id(text),
             max_chars=max(4000, len(text) * 3),
         )
         started = time.perf_counter()
         parts: list[str] = []
         done_event: dict | None = None
+        soft_stopped = False
         stream = self._client.stream_chat(
             messages,
             max_tokens=budget.max_tokens,
             temperature=self._options.temperature,
+            **self._stop_kwargs("stream_chat", stop),
+            **self._top_p_kwargs("stream_chat", top_p),
         )
         try:
             for event in stream:
@@ -530,6 +651,9 @@ class TranslationEngine:
                         continue
                     parts.append(chunk)
                     if not detector.feed(chunk):
+                        if detector.soft_stop:
+                            soft_stopped = True
+                            break
                         raise OutputTruncated(
                             f"流式早停：{detector.abort_reason}"
                         )
@@ -541,10 +665,15 @@ class TranslationEngine:
                 closer()
         elapsed_s = time.perf_counter() - started
         raw = "".join(parts)
+        if soft_stopped:
+            raw = detector.buffer[: detector.soft_offset]
         if not raw.strip():
             raise EngineError("模型返回空内容")
         done = done_event or {}
-        finish_reason = str(done.get("finish_reason") or "")
+        if soft_stopped:
+            finish_reason = "stop"
+        else:
+            finish_reason = str(done.get("finish_reason") or "")
         tokens = int(done.get("tokens") or 0) or estimate_tokens(raw)
         tps = float(done.get("tps") or 0.0)
         tps_source = str(done.get("tps_source") or "estimate")
@@ -567,6 +696,8 @@ def make_engine_chat(
     max_split_depth: int,
     on_stat: Callable[[SegmentStat], None] | None = None,
     task_template: str = "translate",
+    enable_server_stop_tokens: bool = True,
+    top_p: float = 0.85,
 ) -> Callable[[str], str]:
     """兼容入口：返回可调用的单段翻译函数。"""
     options = TranslationOptions(
@@ -578,6 +709,8 @@ def make_engine_chat(
         prompt_safety_tokens=prompt_safety_tokens,
         temperature=temperature,
         max_split_depth=max_split_depth,
+        enable_server_stop_tokens=enable_server_stop_tokens,
+        top_p=top_p,
     )
     return TranslationEngine(
         client,
@@ -613,4 +746,6 @@ def build_chat_for(
         temperature=settings.temperature,
         max_split_depth=settings.max_split_depth,
         on_stat=on_stat,
+        enable_server_stop_tokens=settings.enable_server_stop_tokens,
+        top_p=settings.top_p,
     )

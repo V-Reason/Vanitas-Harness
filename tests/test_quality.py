@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 from vanitas.errors import TranslateError  # noqa: E402
 from vanitas.quality import (  # noqa: E402
     ASMR_T1_CODES,
-    PROMPT_EXAMPLE_NAMES,
+    load_context_rules,
     strip_example_names,
     AuditIssue,
     DuplicateIndex,
@@ -932,16 +932,18 @@ class T1InventedNameTests(unittest.TestCase):
         )
         self.assertEqual(strip_example_names("", "コーリ"), "")
 
-    def test_prompt_example_names_stay_in_sync_with_template(self) -> None:
-        # 提示词换示例专名时，PROMPT_EXAMPLE_NAMES 必须同步，否则审计形同虚设。
+    def test_prompt_v6_has_no_example_names(self) -> None:
+        # V6 不再提供示例人物名；rules.tsv 的 leak_guard 保留为安全网。
         template = (
             ROOT / "config" / "prompts" / "task_translate_asmr.md"
         ).read_text(encoding="utf-8")
-        for zh_name, kana in PROMPT_EXAMPLE_NAMES:
-            with self.subTest(name=zh_name):
-                self.assertIn(zh_name, template)
-                self.assertIn(kana, template)
-                self.assertIn(f"「{zh_name}（{kana}）」", template)
+        rules = load_context_rules(ROOT / "config" / "glossary" / "rules.tsv")
+        leaks = [rule for rule in rules if rule.rule_type == "leak_guard"]
+        self.assertTrue(leaks, "rules.tsv 缺少 leak_guard 行")
+        for name in ("茜音", "あかね", "日和", "ひより", "雫"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, template)
+        self.assertIn("未提供本作人物表", template)
 
 
 class T1UnderTranslationTests(unittest.TestCase):

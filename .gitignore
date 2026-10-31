@@ -11,3 +11,6 @@ __pycache__/
 
 # 临时日志
 *.log
+
+# 旧提示词本地快照（不属发布物）
+/config/prompts/archive/

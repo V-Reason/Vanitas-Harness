@@ -49,6 +49,7 @@ from .translate.cleaner import (
     REPLACEMENT_CHARS_RE,
     SLASH_ALTERNATIVE_RE,
     SOURCE_HAS_BRACKETS_RE,
+    TONE_ANNOTATION_BRACKETS_RE,
     TRADITIONAL_CHARS,
     TRADITIONAL_TO_SIMPLIFIED_MAP,
     UNTRANSLATED_KANA_RE,
@@ -835,22 +836,48 @@ def _check_legacy_per_cue(
             ),
             options,
         )
-    bracket = UNSOURCED_BRACKET_RE.search(translation_text)
-    if not SOURCE_HAS_BRACKETS_RE.search(source_text) and bracket:
-        _add(
-            result,
-            _issue(
-                SEVERITY_REVIEW,
-                "staging",
-                "原文无括号，译文新增动作舞台指示",
-                cue=cue,
-                source_text=source_text,
-                translation_text=translation_text,
-                evidence=_clip(bracket.group(0), 24),
-                suggestion="删除未授权动作括号；不要凭剧情脑补",
+    brackets = list(UNSOURCED_BRACKET_RE.finditer(translation_text))
+    if not SOURCE_HAS_BRACKETS_RE.search(source_text) and brackets:
+        # 同一 cue 可能既有语气标注又有动作括号：只要存在一条未认可的，
+        # 就按动作括号报 review，不能被前面的「（笑）」稀释掉。
+        offending = next(
+            (
+                match
+                for match in brackets
+                if not TONE_ANNOTATION_BRACKETS_RE.match(match.group(0))
             ),
-            options,
+            None,
         )
+        if offending is None:
+            _add(
+                result,
+                _issue(
+                    SEVERITY_INFO,
+                    "staging",
+                    "译文保留情绪/语音标注（已认可）",
+                    cue=cue,
+                    source_text=source_text,
+                    translation_text=translation_text,
+                    evidence=_clip(brackets[0].group(0), 24),
+                    suggestion="无需处理；这不是无源舞台动作",
+                ),
+                options,
+            )
+        else:
+            _add(
+                result,
+                _issue(
+                    SEVERITY_REVIEW,
+                    "staging",
+                    "原文无括号，译文新增动作舞台指示",
+                    cue=cue,
+                    source_text=source_text,
+                    translation_text=translation_text,
+                    evidence=_clip(offending.group(0), 24),
+                    suggestion="删除未授权动作括号；不要凭剧情脑补",
+                ),
+                options,
+            )
 
     source_norm = _normalize(source_text)
     translation_norm = _normalize(translation_text, translate=True)

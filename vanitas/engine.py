@@ -203,8 +203,17 @@ class EngineClient:
         temperature: float,
         response_format: dict | None = None,
         timeout: float | None = None,
+        stop: list[str] | None = None,
+        top_p: float | None = None,
     ) -> dict:
-        payload = self._build_payload(messages, max_tokens, temperature, response_format)
+        payload = self._build_payload(
+            messages,
+            max_tokens,
+            temperature,
+            response_format,
+            stop=stop,
+            top_p=top_p,
+        )
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             self._url("/v1/chat/completions"),
@@ -240,13 +249,17 @@ class EngineClient:
         temperature: float,
         timeout: float | None = None,
         on_progress: Callable[[dict], None] | None = None,
+        stop: list[str] | None = None,
+        top_p: float | None = None,
     ) -> Iterator[dict]:
         """产出 delta/reasoning/usage/done 事件；首字前失败可重试，首字后失败直接报错。
 
         `on_progress` 以约 200ms 节流回报即时估算速率；token 数在服务端
         返回 usage/timings 前只能用字符数估算，事件里会显式标注。
         """
-        payload = self._build_payload(messages, max_tokens, temperature, None)
+        payload = self._build_payload(
+            messages, max_tokens, temperature, None, stop=stop, top_p=top_p
+        )
         payload["stream"] = True
         payload["stream_options"] = {"include_usage": True}
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -297,6 +310,9 @@ class EngineClient:
         max_tokens: int,
         temperature: float,
         response_format: dict | None,
+        *,
+        stop: list[str] | None = None,
+        top_p: float | None = None,
     ) -> dict:
         payload: dict = {
             "messages": messages,
@@ -305,6 +321,12 @@ class EngineClient:
         }
         if response_format is not None:
             payload["response_format"] = response_format
+        if top_p is not None and top_p < 1.0:
+            # 1.0 表示不干预，不写进请求体，保持旧请求形态。
+            payload["top_p"] = float(top_p)
+        if stop:
+            # llama-server 的 OpenAI 兼容端点接受 stop；空列表不写，保持旧请求体。
+            payload["stop"] = list(stop)
         if self._template_kwargs:
             payload["chat_template_kwargs"] = self._template_kwargs
         # llama-server 的 OpenAI 兼容端点接受 repeat_penalty；1.0 表示不干预。

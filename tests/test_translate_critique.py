@@ -1,13 +1,15 @@
-"""P3 两阶段定向反思：分流精度、预算熔断、隔离与负优化拦截。
+"""P3 复审：存档模块的单元契约 + 生产管线“已退役”的回归护栏。
 
-全部用例都走真实 ``translate_srt`` 或真实 ``execute_critique_repair``，
-只用脚本化 chat 替身控制模型输出，不 mock 被测逻辑。
+单元用例直接驱动 ``execute_critique_repair``；管线用例只断言“传预算也不再
+发复审请求、事件恒为空、译文与不传预算逐字一致”。
 """
 
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from vanitas import prompts  # noqa: E402
+from vanitas.config import TranslateSettings  # noqa: E402
 from vanitas.errors import EngineError, OutputTruncated  # noqa: E402
 from vanitas.translate import (  # noqa: E402
     CritiqueBudget,
@@ -24,6 +27,7 @@ from vanitas.translate import (  # noqa: E402
     execute_critique_repair,
     parse_critique_response,
     parse_srt,
+    translate_file,
     translate_srt,
     triage_cue_risk,
 )
@@ -218,8 +222,14 @@ class CritiqueBudgetTests(unittest.TestCase):
         self.assertEqual(budget.per_file, 4)
 
 
-class CritiquePipelineTests(unittest.TestCase):
-    """端到端：只在命中的 cue 上多一次请求，其余与 P2 完全一致。"""
+class CritiqueRetiredTests(unittest.TestCase):
+    """生产管线已退役复审：参数兼容，但不再产生任何模型请求或事件。"""
+
+    SETTINGS = TranslateSettings(
+        source_suffixes=(".srt",),
+        chunk_chars=800,
+        output_suffix=".zh",
+    )
 
     def run_window(
         self,
@@ -229,20 +239,25 @@ class CritiquePipelineTests(unittest.TestCase):
         budget: CritiqueBudget | None = None,
         file_cues: int | None = None,
         window_size: int = 6,
+        captured: list | None = None,
     ):
         failures: list = []
-        output = translate_srt(
-            chat,
-            srt_text(texts or SOURCES),
-            chunk_chars=800,
-            source="critique.srt",
-            eol="\n",
-            failures=failures,
-            window_size=window_size,
-            max_window_chars=2000,
-            critique_budget=budget,
-            file_cues=file_cues,
-        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            output = translate_srt(
+                chat,
+                srt_text(texts or SOURCES),
+                chunk_chars=800,
+                source="critique.srt",
+                eol="\n",
+                failures=failures,
+                window_size=window_size,
+                max_window_chars=2000,
+                critique_budget=budget,
+                file_cues=file_cues,
+            )
+        if captured is not None:
+            captured.extend(caught)
         return output, failures
 
     def batch(self) -> str:
@@ -251,142 +266,55 @@ class CritiquePipelineTests(unittest.TestCase):
             for index, text in enumerate(DRAFTS, start=1)
         )
 
-    def test_single_risky_cue_triggers_exactly_one_critique(self) -> None:
+    def test_budget_no_longer_triggers_critique(self) -> None:
         chat = CritiqueChat([self.batch()], ["客人不能触碰我们"])
         budget = CritiqueBudget(max_total=10, per_file=5)
-        output, failures = self.run_window(chat, budget=budget)
-
-        self.assertEqual(failures, [])
-        self.assertEqual(len(chat.calls), 1)
-        self.assertEqual(len(chat.critique_calls), 1)
-        self.assertEqual([e.outcome for e in budget.file_events], ["repaired"])
-        texts = [block.text for block, _ in parse_srt(output, "\n")]
-        self.assertEqual(texts[1], "客人不能触碰我们")
-        self.assertEqual(
-            [texts[index] for index in (0, 2, 3, 4, 5)],
-            [DRAFTS[index] for index in (0, 2, 3, 4, 5)],
+        caught: list = []
+        output, failures = self.run_window(
+            chat, budget=budget, captured=caught
         )
 
-    def test_default_is_off(self) -> None:
-        chat = CritiqueChat([self.batch()])
-        output, _failures = self.run_window(chat, budget=None)
+        self.assertEqual(failures, [])
         self.assertEqual(chat.critique_calls, [])
-        texts = [block.text for block, _ in parse_srt(output, "\n")]
-        self.assertEqual(texts, DRAFTS)
-
-    def test_critique_repair_applies_entity_locks(self) -> None:
-        """P5-F2：复审候选也必须过 enforce_locks，不能把已锁定译名改回日文名。"""
-        sources = [
-            "梅地様、こんにちは",
-            "今日はいい天気ですね",
-            "本を読みます",
-            "窓を閉めてください",
-            "私のこと、覚えていませんか",
-            "コーヒーを入れます",
-        ]
-        drafts = [
-            "梅地先生，你好",
-            "今天天气真好",
-            "来看看书吧",
-            "请把窗户关上",
-            "你还记得我吗",
-            "泡一杯咖啡",
-        ]
-
-        def batch(start: int, stop: int) -> str:
-            return "\n".join(
-                f"[#{index}] {drafts[index - 1]}"
-                for index in range(start, stop + 1)
-            )
-
-        chat = CritiqueChat(
-            [batch(1, 3), batch(4, 6)],
-            ["梅地様，你不记得我了吗"],
+        self.assertEqual(budget.file_events, [])
+        self.assertTrue(
+            any("P3 复审" in str(item.message) for item in caught),
+            [str(item.message) for item in caught],
         )
+        texts = [block.text for block, _ in parse_srt(output, "\n")]
+        self.assertEqual(texts[1], DRAFTS[1])
+
+    def test_output_matches_run_without_budget(self) -> None:
+        plain_chat = CritiqueChat([self.batch()])
+        plain, _ = self.run_window(plain_chat, budget=None)
+        risky_chat = CritiqueChat([self.batch()])
         budget = CritiqueBudget(max_total=10, per_file=5)
-        output, failures = self.run_window(
-            chat, texts=sources, budget=budget, window_size=3
-        )
+        with_budget, _ = self.run_window(risky_chat, budget=budget)
+        self.assertEqual(plain, with_budget)
+        self.assertEqual(plain_chat.calls, risky_chat.calls)
 
-        self.assertEqual(failures, [])
-        self.assertEqual(len(chat.critique_calls), 1)
-        texts = [block.text for block, _ in parse_srt(output, "\n")]
-        self.assertEqual(texts[4], "梅地先生，你不记得我了吗")
-        self.assertNotIn("梅地様", output)
-
-    def test_budget_blocks_extra_critiques_in_one_window(self) -> None:
-        risky = [
-            "今日はいい天気ですね",
-            "お客様から私たちに触れることは禁止となっております",
-            "私のこと、覚えていませんか",
-            "まだ覚えていませんか",
-            "明日はもっと頑張るから",
-            "本を読みます",
-        ]
-        drafts = [
-            "今天天气真好",
-            "我们可以触碰客人",
-            "你还记得我吗",
-            "你还记得吗",
-            "明天我会更努力。",
-            "看看书",
-        ]
-        chat = CritiqueChat(
-            ["\n".join(f"[#{i}] {t}" for i, t in enumerate(drafts, 1)),
-             "你不记得我了吗"],
-            ["客人不能触碰我们", "你不记得我了吗"],
-        )
-        budget = CritiqueBudget(max_total=2)
-        output, failures = self.run_window(
-            chat, texts=risky, budget=budget, file_cues=20
-        )
-
-        self.assertEqual(failures, [])
-        self.assertEqual(len(chat.critique_calls), 2)
-        outcomes = [event.outcome for event in budget.file_events]
-        self.assertEqual(outcomes.count("repaired"), 2)
-        self.assertEqual(outcomes.count("budget"), 2)
-        self.assertEqual(budget.total, 2)
-        blocks = parse_srt(output, "\n")
-        self.assertEqual(len(blocks), len(risky))
-
-    def test_keep_and_negative_optimization_keep_draft(self) -> None:
-        for reply in ("【保持】", "こんにちは", "先生/女士"):
-            chat = CritiqueChat([self.batch()], [reply])
-            budget = CritiqueBudget(max_total=10, per_file=5)
-            output, failures = self.run_window(chat, budget=budget)
-
-            self.assertEqual(failures, [], reply)
-            texts = [block.text for block, _ in parse_srt(output, "\n")]
-            self.assertEqual(texts, DRAFTS, reply)
-            outcomes = [event.outcome for event in budget.file_events]
-            self.assertEqual(outcomes, ["kept"] if reply == "【保持】" else ["rejected"], reply)
-
-    def test_critique_error_degrades_without_failure(self) -> None:
-        chat = CritiqueChat([self.batch()], fail_critique=True)
-        budget = CritiqueBudget(max_total=10, per_file=5)
-        output, failures = self.run_window(chat, budget=budget)
-
-        self.assertEqual(failures, [])
-        self.assertEqual([e.outcome for e in budget.file_events], ["error"])
-        texts = [block.text for block, _ in parse_srt(output, "\n")]
-        self.assertEqual(texts, DRAFTS)
-
-    def test_history_is_isolated_from_critique(self) -> None:
+    def test_budget_events_stay_empty(self) -> None:
         chat = CritiqueChat([self.batch()], ["客人不能触碰我们"])
-        budget = CritiqueBudget(max_total=10, per_file=5)
+        budget = CritiqueBudget(max_total=2, per_file=2)
         self.run_window(chat, budget=budget)
+        self.assertEqual(budget.total, 0)
+        self.assertEqual(budget.file_events, [])
 
-        snapshot = chat.history_snapshot()
-        self.assertEqual(len(snapshot), len(SOURCES))
-        self.assertFalse(
-            [source for source, _ in snapshot if "【初译草稿】" in source]
+    def test_chat_without_critique_channel_is_fine(self) -> None:
+        def chat(prompt: str) -> str:
+            return self.batch()
+
+        output, failures = self.run_window(
+            chat, budget=CritiqueBudget(max_total=10, per_file=5)
         )
+        self.assertEqual(failures, [])
+        self.assertEqual(len(parse_srt(output, "\n")), len(SOURCES))
 
     def test_structure_and_timeline_are_preserved(self) -> None:
         chat = CritiqueChat([self.batch()], ["客人不能触碰我们"])
-        budget = CritiqueBudget(max_total=10, per_file=5)
-        output, _failures = self.run_window(chat, budget=budget)
+        output, _failures = self.run_window(
+            chat, budget=CritiqueBudget(max_total=10, per_file=5)
+        )
 
         blocks = parse_srt(output, "\n")
         source = parse_srt(srt_text(SOURCES), "\n")
@@ -399,6 +327,40 @@ class CritiquePipelineTests(unittest.TestCase):
             [block.timing for block, _ in source],
         )
         self.assertNotIn("[#", output)
+
+    def test_single_cue_path_also_skips_critique(self) -> None:
+        chat = CritiqueChat([DRAFTS[0]])
+        output, failures = self.run_window(
+            chat,
+            texts=SOURCES[:1],
+            budget=CritiqueBudget(max_total=10, per_file=5),
+            window_size=1,
+        )
+        self.assertEqual(failures, [])
+        self.assertEqual(chat.critique_calls, [])
+        self.assertEqual(
+            [block.text for block, _ in parse_srt(output, "\n")], [DRAFTS[0]]
+        )
+
+    def test_translate_file_reports_empty_critique_events(self) -> None:
+        budget = CritiqueBudget(max_total=10, per_file=5)
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "retired.srt"
+            source.write_text(srt_text(SOURCES), encoding="utf-8")
+            chat = CritiqueChat([self.batch()])
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                outcome = translate_file(
+                    chat,
+                    source,
+                    self.SETTINGS,
+                    window_size=6,
+                    max_window_chars=2000,
+                    critique_budget=budget,
+                )
+        self.assertEqual(outcome.critique_events, ())
+        self.assertEqual(budget.file_events, [])
+        self.assertEqual(chat.critique_calls, [])
 
 
 class ExecuteCritiqueRepairTests(unittest.TestCase):

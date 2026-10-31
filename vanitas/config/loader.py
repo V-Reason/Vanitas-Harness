@@ -880,9 +880,17 @@ def _load_settings(document: dict) -> Settings:
         translate,
         "temperature",
         "settings.translate",
-        0.2,
+        0.15,
         minimum=0.0,
         maximum=2.0,
+    )
+    translate_top_p = _as_optional_number(
+        translate,
+        "top_p",
+        "settings.translate",
+        0.85,
+        minimum=0.0,
+        maximum=1.0,
     )
     max_split_depth = _as_optional_int(
         translate,
@@ -977,12 +985,22 @@ def _load_settings(document: dict) -> Settings:
         prompt_safety_tokens=prompt_safety,
         monitor_lines=monitor_lines,
         temperature=translate_temperature,
+        top_p=translate_top_p,
         max_split_depth=max_split_depth,
         default_preset=default_preset,
         environment=environment,
         strip_trailing_periods=(
             _as_bool(translate, "strip_trailing_periods", "settings.translate")
             if "strip_trailing_periods" in translate
+            else True
+        ),
+        enable_server_stop_tokens=(
+            _as_bool(
+                translate,
+                "enable_server_stop_tokens",
+                "settings.translate",
+            )
+            if "enable_server_stop_tokens" in translate
             else True
         ),
         presets=presets,

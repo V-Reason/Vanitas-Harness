@@ -19,11 +19,111 @@
 from __future__ import annotations
 
 import re
+import warnings
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from functools import lru_cache
 from pathlib import Path
 
 from .errors import TranslateError
+
+# --------------------------------------------------------------------------- #
+# 数据驱动上下文替换规则
+# --------------------------------------------------------------------------- #
+
+# 规则表随仓库分发；调用方显式传 rules 时不读盘，缺文件时退化为空表。
+DEFAULT_RULES_PATH = (
+    Path(__file__).resolve().parents[1] / "config" / "glossary" / "rules.tsv"
+)
+RULE_COLUMNS = 4
+RULE_TYPES = frozenset(
+    {
+        "organ_guard",
+        "context_sub",
+        "leak_guard",
+        "wasei_clean",
+        "sfx_repair",
+        "anatomy_guard",
+    }
+)
+
+
+@dataclass(frozen=True)
+class ContextRule:
+    """一行上下文替换规则：源文触发正则、译文错误形态正则与收敛目标。
+
+    ``rule_type`` 决定触发极性（见 ``apply_context_rules``），模式本身全部
+    来自配置文件——代码不认识任何具体器官词、专名或固定台词。
+    """
+
+    rule_type: str
+    source_re: re.Pattern[str]
+    bad_re: re.Pattern[str]
+    replacement: str
+
+
+def _compile_rule(
+    path: Path, line_no: int, rule_type: str, source: str, bad: str, repl: str
+) -> ContextRule:
+    try:
+        source_re = re.compile(source)
+        bad_re = re.compile(bad)
+    except re.error as exc:
+        raise TranslateError(f"{path}:{line_no}: 规则正则非法：{exc}") from exc
+    return ContextRule(rule_type, source_re, bad_re, repl)
+
+
+def load_context_rules(path: Path) -> tuple[ContextRule, ...]:
+    """读取 4 列规则表；缺文件返回空表，坏行带 ``文件:行号`` 抛错。
+
+    失败关闭是刻意的：一条写坏的正则如果被静默跳过，对应的确定性守卫就
+    整体失效，而译文仍然"看起来正常"，比直接报错更难发现。
+    """
+    path = Path(path)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ()
+    except OSError as exc:
+        raise TranslateError(
+            f"{path}: 读取上下文规则表失败：{exc.strerror or exc}"
+        ) from exc
+
+    rules: list[ContextRule] = []
+    for line_no, line in enumerate(raw.splitlines(), start=1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        parts = [part.strip() for part in line.split("\t")]
+        if len(parts) != RULE_COLUMNS:
+            raise TranslateError(
+                f"{path}:{line_no}: 规则表必须为 4 列 "
+                "rule_type<TAB>source_pattern<TAB>bad_pattern<TAB>replacement"
+            )
+        rule_type, source, bad, repl = parts
+        if rule_type not in RULE_TYPES:
+            raise TranslateError(
+                f"{path}:{line_no}: 未知规则类型 {rule_type!r}；"
+                f"允许：{'、'.join(sorted(RULE_TYPES))}"
+            )
+        if not source or not bad or not repl:
+            raise TranslateError(f"{path}:{line_no}: 规则列不得为空")
+        rules.append(_compile_rule(path, line_no, rule_type, source, bad, repl))
+    return tuple(rules)
+
+
+@lru_cache(maxsize=1)
+def default_context_rules() -> tuple[ContextRule, ...]:
+    """仓库自带规则表；缺失只告警一次并返回空表，坏表照常抛错。"""
+    if not DEFAULT_RULES_PATH.is_file():
+        warnings.warn(
+            f"上下文规则表缺失：{DEFAULT_RULES_PATH}；"
+            "器官/人称/示例专名收敛将不生效",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return ()
+    return load_context_rules(DEFAULT_RULES_PATH)
 
 # --------------------------------------------------------------------------- #
 # 术语表
@@ -230,42 +330,52 @@ def apply_pronoun_policy(text: str, profile: TranslationProfile) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# 器官错位（耳 → 阴道类词）
+# 器官错位（源文只有耳部词 → 译文却出现下体词）
 # --------------------------------------------------------------------------- #
 
-# 模型把“耳朵里面”写成“小穴里面”是固定翻车形态（全出现在耳部场景的 R18
-# 作品）。判定与改写共用同一个 guard：**本条**源文出现耳词、且完全没有
-# 阴道类词；同时提到两处器官的 cue 一律不动，避免改写合法译法。
-ORGAN_EAR_SOURCE_TERMS = ("お耳", "耳かき", "耳掻き", "耳の中", "耳")
-ORGAN_VAGINA_SOURCE_TERMS = ("おまんこ", "まんこ", "膣", "小穴")
-ORGAN_VAGINA_ZH_TERMS = ("小穴", "阴道", "私处", "花穴", "秘处", "蜜壶", "蜜穴")
-ORGAN_EAR_ZH = "耳朵"
+# 规则与词表全部在 config/glossary/rules.tsv；这里只保留展示用标签。
+# 新增第二类器官守卫时，须把标签改成通用形态（当前只登记了耳部守卫）。
+ORGAN_GUARD_EVIDENCE = "源=耳"
 
 
-def detect_organ_swap(source: str, translation: str) -> str | None:
-    """源文只有耳、译文却出现阴道类词时返回证据串，否则 ``None``。"""
+def _rules_of_type(
+    rule_type: str, rules: Sequence[ContextRule] | None
+) -> tuple[ContextRule, ...]:
+    chosen = default_context_rules() if rules is None else tuple(rules)
+    return tuple(rule for rule in chosen if rule.rule_type == rule_type)
+
+
+def detect_organ_swap(
+    source: str,
+    translation: str,
+    rules: Sequence[ContextRule] | None = None,
+) -> str | None:
+    """源文命中器官守卫、译文却出现该守卫的坏词时返回证据串。"""
     text = str(translation or "")
     src = str(source or "")
     if not text or not src:
         return None
-    if not any(term in src for term in ORGAN_EAR_SOURCE_TERMS):
-        return None
-    if any(term in src for term in ORGAN_VAGINA_SOURCE_TERMS):
-        return None
-    used = [term for term in ORGAN_VAGINA_ZH_TERMS if term in text]
-    if not used:
-        return None
-    return f"源=耳 译={used[0]}"
+    for rule in _rules_of_type("organ_guard", rules):
+        if not rule.source_re.search(src):
+            continue
+        match = rule.bad_re.search(text)
+        if match is None:
+            continue
+        return f"{ORGAN_GUARD_EVIDENCE} 译={match.group(0)}"
+    return None
 
 
-def repair_organ_swap(source: str, translation: str) -> str:
-    """把“耳 → 阴道词”的错位译词收敛成“耳朵”；guard 不成立时原样返回。"""
-    if detect_organ_swap(source, translation) is None:
+def repair_organ_swap(
+    source: str,
+    translation: str,
+    rules: Sequence[ContextRule] | None = None,
+) -> str:
+    """把器官守卫命中的坏词收敛成规则目标；守卫不成立时原样返回。"""
+    if detect_organ_swap(source, translation, rules) is None:
         return translation
-    result = str(translation)
-    for term in ORGAN_VAGINA_ZH_TERMS:
-        result = result.replace(term, ORGAN_EAR_ZH)
-    return result
+    return apply_context_rules(
+        source, translation, rules, rule_types=("organ_guard",)
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -742,25 +852,12 @@ def audit_invented_tool(
     ]
 
 
-# 提示词用「茜音（あかね）」「日和（ひより）」举例说明“汉字人名必须保留汉字”。
-# 模型会把这些示例当成“本作已知人名”，在原文根本没有名字的拟声/语气位上补出来。
-# 只在“本条 + 全篇源文都没有该写法”时才报：换一份真有茜音的作品不会误伤。
-# tests/test_quality.py 有耦合测试钉死“提示词里的示例专名必须登记在这里”。
-PROMPT_EXAMPLE_NAMES: tuple[tuple[str, str], ...] = (
-    ("茜音", "あかね"),
-    ("日和", "ひより"),
-)
+# 提示词示例专名会渗漏到译文：模型把示例当成“本作已知人名”，在原文根本
+# 没有名字的拟声/语气位上补出来。规则（含一切错误写法）登记在
+# config/glossary/rules.tsv 的 leak_guard 行；代码只负责“全篇都没有才降级”。
 
-# 同一示例名在译文里出现过的错误汉字写法。模型不一定写提示词给的正字“茜音”，
-# 也可能写“赤音/阿卡涅”；名字本身没有对错，但“源文没有名字却补了名字”这件事
-# 与写法无关，必须一并认。
-PROMPT_EXAMPLE_NAME_SPELLINGS: dict[str, tuple[str, ...]] = {
-    "茜音": ("茜音", "赤音", "阿卡涅"),
-    "日和": ("日和",),
-}
-
-# 片假名折叠成平假名：源文里的 アカネ / ヒヨリ 与提示词示例的 あかね / ひより
-# 是同一个人名，直接比对会漏配。
+# 片假名折叠成平假名：源文里的片假名写法与规则表登记的平假名写法是同一个
+# 人名，直接比对会漏配。
 _KATAKANA_TO_HIRAGANA = {
     code: code - 0x60 for code in range(0x30A1, 0x30F7)
 }
@@ -770,83 +867,230 @@ def _fold_kana(text: str) -> str:
     return str(text).translate(_KATAKANA_TO_HIRAGANA)
 
 
-def _example_name_is_absent(haystack: str, zh_name: str, kana: str) -> bool:
-    """整篇源文（已折平假名）里是否确实没有这个示例专名的任何写法。"""
-    spellings = PROMPT_EXAMPLE_NAME_SPELLINGS.get(zh_name, (zh_name,))
-    if any(item in haystack for item in spellings):
-        return False
-    return _fold_kana(kana) not in haystack
-
-
 # 只剩标点/符号（没有汉字、假名、字母、数字）时视为“占位”，可以整条降级成省略号。
 _PUNCT_ONLY_RE = re.compile(r"^[^\u4e00-\u9fff\u3040-\u30ffA-Za-z0-9]*$")
 
 
-def strip_example_names(
-    translation: str, source: str, document_text: str = ""
+def apply_context_rules(
+    source: str,
+    translation: str,
+    rules: Sequence[ContextRule] | None = None,
+    *,
+    document_text: str = "",
+    rule_types: Collection[str] | None = None,
 ) -> str:
-    """把“整条只有一个提示词示例专名”的译文确定性降级成省略号。
+    """按规则类型执行确定性上下文修正；纯函数、0 Token。
 
-    为什么需要这一步：模型在 `コーリ` 这类拟声位上会固执地补人名，重译请求
-    也可能改不掉（候选被拒后原译保留）。但既然整篇源文根本没有这个名字，
-    这个字就**只可能来自提示词示例**，删掉它是确定性的，不需要再问模型。
-
-    只在“删完只剩标点”时生效——那正是拟声/气息位被填空的形态
-    （“茜音……”、“赤音……赤音……赤音……”）。名字嵌在正常句子里的
-    （“说不出来呢，日和的两次连续……”）原样返回，交给 `audit_invented_name`
-    做一次定点重译，避免把句子删残。
+    触发极性：
+    - ``organ_guard`` / ``context_sub`` / ``wasei_clean`` / ``sfx_repair`` /
+      ``anatomy_guard``：源文命中 ``source_re`` 才替换；
+    - ``leak_guard``：源文与全篇**都没有**该写法时才处理，且只有“删完只剩
+      标点”才整条降级为 ``replacement``——名字嵌在正常句子里的原样返回，
+      交给 ``audit_invented_name`` 做一次定点重译，避免把句子删残。
     """
-    text = str(translation or "")
-    if not text or not str(source or "").strip():
+    if not translation:
         return translation
-    haystack = _fold_kana(f"{source}\n{document_text}")
-    removed = False
-    result = text
-    for zh_name, kana in PROMPT_EXAMPLE_NAMES:
-        if not _example_name_is_absent(haystack, zh_name, kana):
+    chosen = default_context_rules() if rules is None else tuple(rules)
+    if not chosen:
+        return translation
+    src = str(source or "")
+    text = str(translation)
+    leak_text = text
+    leak_replacement = ""
+    leak_removed = False
+    for rule in chosen:
+        if rule_types is not None and rule.rule_type not in rule_types:
             continue
-        for item in PROMPT_EXAMPLE_NAME_SPELLINGS.get(zh_name, (zh_name,)):
-            if item in result:
-                result = result.replace(item, "")
-                removed = True
-    if not removed:
+        if rule.rule_type == "leak_guard":
+            if not src.strip():
+                continue
+            haystack = _fold_kana(f"{src}\n{document_text}")
+            if rule.source_re.search(haystack):
+                continue
+            if rule.bad_re.search(leak_text):
+                leak_text = rule.bad_re.sub("", leak_text)
+                leak_removed = True
+                leak_replacement = rule.replacement
+            continue
+        if not src:
+            continue
+        if rule.source_re.search(src):
+            text = rule.bad_re.sub(rule.replacement, text)
+    if leak_removed and _PUNCT_ONLY_RE.match(leak_text):
+        return leak_replacement
+    return text
+
+
+def strip_example_names(
+    translation: str,
+    source: str,
+    document_text: str = "",
+    rules: Sequence[ContextRule] | None = None,
+) -> str:
+    """把“整条只剩提示词示例专名”的译文确定性降级成省略号。
+
+    模型会把提示词示例当成“本作已知人名”，在拟声/气息位补出来；既然整篇
+    源文根本没有这个名字，删掉它是确定性的，不需要再问模型。只在“删完只剩
+    标点”时生效——那正是拟声位被填空的形态。名字嵌在正常句子里的原样返回，
+    交给 ``audit_invented_name`` 做一次定点重译，避免把句子删残。
+    """
+    if not translation or not str(source or "").strip():
         return translation
-    if _PUNCT_ONLY_RE.match(result):
-        return "……"
-    return translation
+    return apply_context_rules(
+        source,
+        translation,
+        rules,
+        document_text=document_text,
+        rule_types=("leak_guard",),
+    )
 
 
 def audit_invented_name(
-    source: str, translation: str, cue: int | str, document_text: str = ""
+    source: str,
+    translation: str,
+    cue: int | str,
+    document_text: str = "",
+    rules: Sequence[ContextRule] | None = None,
 ) -> list[AuditIssue]:
     """译文出现提示词示例专名、而整篇源文没有该名字的任何写法时报告。
 
     ``document_text`` 是同一文件全部原始源文的拼接（不含译文）。空串时退化为
     只查本条源文，单句路径没有文档表时仍能拦住最明显的渗漏。比对前先把片假名
-    折成平假名，アカネ/あかね、ヒヨリ/ひより 视为同一写法。
+    折成平假名，同一人名的两种写法视为一致。
     """
     if not str(source).strip() or not str(translation).strip():
         return []
     haystack = _fold_kana(f"{source}\n{document_text}")
-    for zh_name, kana in PROMPT_EXAMPLE_NAMES:
-        spellings = PROMPT_EXAMPLE_NAME_SPELLINGS.get(zh_name, (zh_name,))
-        used = next((item for item in spellings if item in translation), "")
-        if not used:
+    for rule in _rules_of_type("leak_guard", rules):
+        if rule.source_re.search(haystack):
             continue
-        if not _example_name_is_absent(haystack, zh_name, kana):
+        match = rule.bad_re.search(str(translation))
+        if match is None:
             continue
+        used = match.group(0)
         return [
             AuditIssue(
                 code="invented_name",
                 cue=cue,
                 message=f"译文出现源文没有的提示词示例专名“{used}”",
                 hint=(
-                    f"原文没有出现任何人物名（{zh_name}/{kana} 都没有）；"
+                    "原文没有出现任何人物名；"
                     "拟声、语气、指示位都不要填人名，只按本条原文重译"
                 ),
             )
         ]
     return []
+
+
+def enforce_gender_anatomy_invariant(
+    source: str,
+    translation: str,
+    rules: Sequence[ContextRule] | None = None,
+) -> str:
+    """女声对男听众音频的生理互斥断路器；判定词表全部在规则表。
+
+    只在源文没有任何女性器官词、译文却出现女性器官词时生效；源文有该词
+    时原样返回，避免改写合法的女性视角内容。具体替换档位（肉棒/前端/这里）
+    由 ``anatomy_guard`` 数据行决定，代码不感知领域词。
+    """
+    if not str(source or "").strip():
+        return translation
+    return apply_context_rules(
+        source, translation, rules, rule_types=("anatomy_guard",)
+    )
+
+
+def _clean_after_removal(text: str) -> str:
+    """删除专名/道具词后的标点与空白收敛；只做确定性清理。"""
+    cleaned = re.sub(r"[，、；：]{2,}", "，", text)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned.strip(" ，、；：")
+
+
+def _strip_leaked_names(
+    translation: str,
+    source: str,
+    document_text: str = "",
+    rules: Sequence[ContextRule] | None = None,
+) -> str:
+    """强制删除“源文与全篇都没有”的 ``leak_guard`` 专名（含句中形态）。
+
+    与 ``strip_example_names`` 的分工：后者只在“整条只剩专名”时降级，避免
+    删残正常句子；本函数是 T1 重译被拒后的最后兜底，允许删句中专名，并在
+    删除后收敛标点；结果为空/纯标点时退化为省略号。
+    """
+    text = str(translation or "")
+    if not text or not str(source or "").strip():
+        return text
+    haystack = _fold_kana(f"{source}\n{document_text}")
+    result = text
+    for rule in _rules_of_type("leak_guard", rules):
+        if rule.source_re.search(haystack):
+            continue
+        result = rule.bad_re.sub("", result)
+    result = _clean_after_removal(result)
+    if not result or _PUNCT_ONLY_RE.match(result):
+        return "……"
+    return result
+
+
+def salvage_t1_rejection(
+    current_text: str,
+    source_text: str,
+    t1_codes: set[str] | frozenset[str],
+    document_text: str = "",
+    rules: Sequence[ContextRule] | None = None,
+) -> str:
+    """T1 重译失败/被拒后的确定性兜底；绝不让坏译原样落盘。
+
+    只处理三类可确定性消解的 T1 code：示例专名渗漏、臆造道具、短句复制。
+    称谓与漏译不在此处强行改写（语义风险高，保留原重译路径）。返回值保证
+    非空：清理后为空或纯标点时统一退化为省略号。
+    """
+    text = str(current_text or "")
+    if not text:
+        return "……"
+    changed = False
+    if "invented_name" in t1_codes:
+        stripped = strip_example_names(
+            text, source_text, document_text, rules
+        )
+        if stripped != text:
+            text = stripped
+            changed = True
+        forced = _strip_leaked_names(
+            text, source_text, document_text, rules
+        )
+        if forced != text:
+            text = forced
+            changed = True
+    if "invented_tool" in t1_codes:
+        for term in TOOL_TRANSLATION_TERMS:
+            pattern = rf"{re.escape(term)}(?=(?:老师|小姐|先生|酱))"
+            replaced = re.sub(pattern, "", text)
+            if replaced != text:
+                text = replaced
+                changed = True
+            replaced = text.replace(term, "它")
+            if replaced != text:
+                text = replaced
+                changed = True
+        text = _clean_after_removal(text)
+        if not text or _PUNCT_ONLY_RE.match(text) or text == "它":
+            text = "……"
+            changed = True
+    if (
+        "short_duplicate" in t1_codes
+        and not changed
+        and len(normalize_compare(text)) > 8
+        and len(normalize_compare(source_text)) <= 6
+    ):
+        text = "……"
+        changed = True
+    text = text.strip()
+    if not text or _PUNCT_ONLY_RE.match(text):
+        return "……"
+    return text
 
 
 # 漏译阈值：源文归一化 ≥10 字却只译出 ≤2 字——几乎整句丢失。
@@ -893,12 +1137,6 @@ QUOTE_PRIVATE_THIRD_RE = re.compile(r"叫她|叫他|称她|称他")
 FIRST_PERSON_SOURCE_RE = re.compile(r"私|僕|俺|わたし|あたし|自分")
 FIRST_PERSON_CUE_RE = re.compile(r"名前|呼ぶ|呼んで|あげて")
 FIRST_PERSON_TRANSLATION_RE = re.compile(r"我的名字|让我|叫我|用我")
-FIRST_PERSON_NAME_SOURCE = "下の名前で呼んであげて"
-FIRST_PERSON_NAME_REPLACEMENTS = (
-    ("我的名字", "她的名字"),
-    ("让我", "让她"),
-    ("叫我", "叫她"),
-)
 TAG_QUESTION_SOURCE_RE = re.compile(
     r"ね|でしょ|でしょう|だろう|確認|だろ|じゃん|っけ|っしょ"
 )
@@ -1045,21 +1283,22 @@ def audit_first_person(
     ]
 
 
-def repair_first_person_name(source: str, text: str) -> str:
-    """固定源短语下的第一人称收敛：把“我的名字/让我/叫我”改成第三人称。
+def repair_first_person_name(
+    source: str,
+    text: str,
+    rules: Sequence[ContextRule] | None = None,
+) -> str:
+    """源文命中 ``context_sub`` 时收敛第一人称归属；不命中时原样返回。
 
-    只用于源文明确要求“用下名呼称”（``下の名前で呼んであげて``）且源文
-    没有第一人称的场景。模型会在这里固执地输出“请用我的名字好好叫我哦”，
-    重译提示不跟；确定性替换比继续加 hint 更可靠。不命中固定源短语时原样
-    返回，避免误改普通自我介绍。
+    触发短语与替换对全部在 ``config/glossary/rules.tsv``；“源文已出现第一
+    人称就不改”的守卫也写在规则的 ``source_pattern`` 负向前瞻里。这样固定
+    源句不再出现在代码中，换语料只改数据，不需要改 Python。
     """
-    if not text or FIRST_PERSON_NAME_SOURCE not in source:
+    if not text:
         return text
-    if FIRST_PERSON_SOURCE_RE.search(source):
-        return text
-    for old, new in FIRST_PERSON_NAME_REPLACEMENTS:
-        text = text.replace(old, new)
-    return text
+    return apply_context_rules(
+        source, text, rules, rule_types=("context_sub",)
+    )
 
 
 def audit_tag_question(

@@ -37,9 +37,11 @@ from .cleaner import (
     QUOTE_CHARS,
     QUOTE_PAIRS,
     REPEATED_PUNCT_RE,
+    SAFE_STAGING_BRACKETS_RE,
     SLASH_ALTERNATIVE_RE,
     SOURCE_HAS_BRACKETS_RE,
     STAGING_BRACKETS_RE,
+    TONE_ANNOTATION_BRACKETS_RE,
     TRADITIONAL_CHARS,
     TRADITIONAL_TO_SIMPLIFIED,
     TRADITIONAL_TO_SIMPLIFIED_MAP,
@@ -66,8 +68,11 @@ from .engine import (
     build_chat_for,
     extract_content,
     make_engine_chat,
+    next_window_id,
+    window_stop_tokens,
 )
 from .entity import (
+    CORE_STOPWORDS,
     ENTITY_CONTEXT_CHARS,
     ENTITY_EXAMPLE_CHARS,
     ENTITY_HONORIFIC_SUFFIXES,
@@ -86,6 +91,7 @@ from .entity import (
     KATAKANA_TERM_RE,
     NAME_BOUNDARY,
     NAME_CHAR_CLASS,
+    STOPWORDS_PATH,
     DynamicEntityEngine,
     _base_of_variant,
     _common_prefix,
@@ -94,6 +100,7 @@ from .entity import (
     _is_name_variant,
     _kana_key,
     _seed_related,
+    load_entity_stopwords,
 )
 from .format import (
     BLOCK_SEP,
@@ -150,6 +157,7 @@ from .pipeline import (
     PARTIAL_SUFFIX,
     SINGLE_RETRY_HINT,
     T1_NEARBY_RADIUS,
+    SrtTranslationSession,
     _translate_chunks,
     _translate_single_cue,
     partial_snapshot_path,
@@ -206,7 +214,9 @@ __all__ = [
     "ARTIFACT_LATIN_RE", "BLANK_LINE_RUN_RE", "FENCE_RE", "LATIN_ALLOW",
     "LATIN_TOKEN_RE", "LEADING_INVALID_PUNCT_RE", "QUOTE_CHARS", "QUOTE_PAIRS",
     "REPEATED_PUNCT_RE", "SLASH_ALTERNATIVE_RE", "SOURCE_HAS_BRACKETS_RE",
-    "STAGING_BRACKETS_RE", "TRADITIONAL_CHARS", "TRADITIONAL_TO_SIMPLIFIED",
+    "STAGING_BRACKETS_RE", "SAFE_STAGING_BRACKETS_RE",
+    "TONE_ANNOTATION_BRACKETS_RE", "TRADITIONAL_CHARS",
+    "TRADITIONAL_TO_SIMPLIFIED",
     "TRADITIONAL_TO_SIMPLIFIED_MAP", "UNTRANSLATED_KANA_RE", "_clip",
     "_collapse_blank_lines", "_has_dialogue_quotes", "normalize_punctuation",
     "postprocess_cue_text", "repair_slash_alternatives",
@@ -230,7 +240,8 @@ __all__ = [
     "KATAKANA_NICKNAME_RE", "KATAKANA_TERM_RE", "NAME_BOUNDARY",
     "NAME_CHAR_CLASS", "DynamicEntityEngine", "_base_of_variant",
     "_common_prefix", "_edit_distance", "_explicit_alias", "_is_name_variant",
-    "_kana_key", "_seed_related",
+    "_kana_key", "_seed_related", "CORE_STOPWORDS", "STOPWORDS_PATH",
+    "load_entity_stopwords",
     # io
     "FILENAME_CODE_HYPHEN", "FILENAME_CODE_ID", "FILENAME_CODE_NUMERIC",
     "FILENAME_CODE_VERSION", "FILENAME_EXPLANATION", "FILENAME_INVALID_CHARS",
@@ -247,9 +258,11 @@ __all__ = [
     "extract_metadata_entity_seeds",
     # engine
     "StreamingAbortDetector", "TranslationEngine", "build_chat_for",
-    "extract_content", "make_engine_chat",
+    "extract_content", "make_engine_chat", "next_window_id",
+    "window_stop_tokens",
     # pipeline
     "PARTIAL_SUFFIX", "SINGLE_RETRY_HINT", "T1_NEARBY_RADIUS",
-    "_translate_chunks", "_translate_single_cue", "partial_snapshot_path",
-    "translate_file", "translate_prose", "translate_srt",
+    "SrtTranslationSession", "_translate_chunks", "_translate_single_cue",
+    "partial_snapshot_path", "translate_file", "translate_prose",
+    "translate_srt",
 ]

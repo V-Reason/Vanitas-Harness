@@ -1,0 +1,44 @@
+# 上下文替换规则表：rule_type<TAB>source_pattern<TAB>bad_pattern<TAB>replacement
+# 三列语义由 quality.apply_context_rules 实现，本表只提供数据：
+# - organ_guard：源文命中（且源文没有任何下体词）→ 把译文里的下体词收敛为「耳朵」
+# - context_sub：源文命中（且源文没有第一人称）→ 归属/人称收敛
+# - leak_guard ：源文与全篇都没有该专名 → 整条只剩专名的译文降级为「……」
+# - wasei_clean：和制汉字/日语词形强制本地化（源模式通常为 .*）
+# - sfx_repair ：源文命中某拟声 → 纠正译文里被写坏的拟声
+# - anatomy_guard：源文无女性器官词时，把译文女性器官词收敛为中性/男性器官词
+# 录入纪律：
+# 1. 守卫条件（"没有下体词/没有第一人称"）用负向前瞻写进 source_pattern，代码不感知领域词；
+# 2. leak_guard 的 source_pattern 必须包含提示词示例的一切写法（含 ASR 同音错字），
+#    否则"源文真的写成错字"会被误判成渗漏；
+# 3. leak_guard 匹配前会先把源文与全篇折成平假名，故只需登记平假名写法；
+# 4. replacement 不得是 bad_pattern 的子串，否则会级联替换。
+organ_guard	^(?![\s\S]*(?:おまんこ|まんこ|膣|小穴))[\s\S]*(?:お耳|耳かき|耳掻き|耳の中|耳)	小穴|阴道|私处|花穴|秘处|蜜壶|蜜穴	耳朵
+context_sub	^(?![\s\S]*(?:私|僕|俺|わたし|あたし|自分))[\s\S]*下の名前で呼んであげて	我的名字	她的名字
+context_sub	^(?![\s\S]*(?:私|僕|俺|わたし|あたし|自分))[\s\S]*下の名前で呼んであげて	让我	让她
+context_sub	^(?![\s\S]*(?:私|僕|俺|わたし|あたし|自分))[\s\S]*下の名前で呼んであげて	叫我	叫她
+leak_guard	あかね|茜音|赤音|阿卡涅	茜音|赤音|阿卡涅	……
+leak_guard	ひより|日和	日和	……
+wasei_clean	.*	部活	社团活动
+wasei_clean	.*	生徒会	学生会
+wasei_clean	.*	一応	姑且
+wasei_clean	.*	一人二役	一人分饰两角
+wasei_clean	.*	乳首	乳头
+wasei_clean	.*	耳垢	耳屎
+wasei_clean	.*	隣	隔壁
+wasei_clean	.*	性液	爱液
+wasei_clean	.*	恋人妄想	恋人幻想
+wasei_clean	.*	先辈	前辈
+sfx_repair	すりすり	蠢蹭	蹭蹭
+sfx_repair	すり	蠢蹭	蹭蹭
+sfx_repair	つりつり|つりーく	撒扯	扯扯
+sfx_repair	チク|チック	西科|斯……	刺刺
+sfx_repair	ぬちゅぬちゅ	凝……凝……地	咕啾咕啾地
+sfx_repair	こしょこしょ|こしゃこしゃ|こしょ|こしゃ	刮刮	沙沙
+sfx_repair	こっしょ	刮刮	轻挠
+sfx_repair	ガラガラ	刮刮	哗啦
+sfx_repair	つーり|ずーり	啜咝|咔啦	蹭蹭
+sfx_repair	やば	危啦	糟了
+sfx_repair	ベチぃ	危啦	啪
+anatomy_guard	^(?![\s\S]*(?:おまんこ|まんこ|マンコ|膣|クリ|クリトリス|陰核|ワレメ|割れ目|蜜壺|アソコ))[\s\S]*(?:ちん|肉棒|先端)[\s\S]*	小穴|阴道|私处|花穴|蜜穴|蜜壶	肉棒
+anatomy_guard	^(?![\s\S]*(?:おまんこ|まんこ|マンコ|膣|クリ|クリトリス|陰核|ワレメ|割れ目|蜜壺|アソコ))[\s\S]*つゆ[\s\S]*	小穴|阴道|私处|花穴|蜜穴|蜜壶	前端
+anatomy_guard	^(?![\s\S]*(?:おまんこ|まんこ|マンコ|膣|クリ|クリトリス|陰核|ワレメ|割れ目|蜜壺|アソコ))[\s\S]*	小穴|阴道|私处|花穴|蜜穴|蜜壶	这里

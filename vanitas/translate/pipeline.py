@@ -10,8 +10,9 @@ from __future__ import annotations
 import os
 import re
 import warnings
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Callable, Collection
+from typing import Callable
 
 from .. import prompts
 from .cleaner import (
@@ -22,23 +23,25 @@ from .cleaner import (
     validate_cue_translation,
 )
 from ..cue_boundary import JoinRule, transfer_texts
-from .critique import execute_critique_repair, triage_cue_risk
 from .entity import DynamicEntityEngine
 from ..errors import EngineError, TranslateError
 from .format import chunk_text, parse_srt, rebuild_srt, split_prose
 from .io import _read_text, extract_metadata_entity_seeds, output_path
 from ..quality import (
     ASMR_T1_CODES,
+    ContextRule,
     DuplicateIndex,
     TranslationProfile,
+    apply_context_rules,
     apply_pronoun_policy,
     audit_translation,
     combine_hints,
+    default_context_rules,
     detect_register,
+    enforce_gender_anatomy_invariant,
     normalize_compare,
-    repair_first_person_name,
-    repair_organ_swap,
     repair_quote_private,
+    salvage_t1_rejection,
     strip_example_names,
 )
 from .types import (
@@ -258,204 +261,306 @@ def _fill_failed_cue(subtitle: Subtitle, candidate: str) -> None:
         subtitle.text = candidate
 
 
-def translate_srt(
-    chat: Callable[[str], str],
-    text: str,
-    *,
-    chunk_chars: int,
-    source: str,
-    eol: str,
-    failures: list[TranslationFailure],
-    on_segment: Callable[[int, int], None] | None = None,
-    window_size: int = 1,
-    max_window_chars: int = 250,
-    join_rules: tuple[JoinRule, ...] = (),
-    lookahead_cues: int = 0,
-    asmr_guard: bool = False,
-    t1_budget: T1Budget | None = None,
-    file_cues: int | None = None,
-    critique_budget: CritiqueBudget | None = None,
-    checkpoint_path: Path | None = None,
-    resume: bool = False,
-    strip_trailing_periods: bool = True,
-) -> str:
-    """翻译 SRT；ASMR 守卫开启时必须传入调用方共享的 ``t1_budget``。
+class SrtTranslationSession:
+    """单文件 SRT 翻译会话：把原先嵌套在 ``translate_srt`` 里的闭包收拢成方法。
 
-    ``critique_budget`` 为空表示**不做 P3 复审**（默认）；显式传入
-    ``CritiqueBudget`` 才会对高危 cue 追加一次隔离复审请求。
-    ``checkpoint_path`` 非空时按窗口增量写 ``.part.srt``；``resume`` 为真
-    且快照与源的时间轴逐条对齐时，已完成 cue 直接回填、不再请求模型。
-    ``strip_trailing_periods`` 控制短句末尾孤立句号的剥离（见
-    ``cleaner.normalize_punctuation``），由 ``settings.translate`` 透传。
+    状态全部是实例属性，每个 Stage 只依赖 ``self``：可以直接构造会话并单独
+    调用预处理、单句/窗口推进、局部回退等方法，不需要完整的 ``translate_srt``
+    作用域。``execute()`` 是单次生命周期，会原地改写 ``Subtitle`` 正文。
     """
-    if asmr_guard and t1_budget is None:
-        # ASMR 预算必须由调用方跨文件共享，禁止按文件静默新建。
-        raise TranslateError(
-            "ASMR 守卫需要调用方显式传入共享 T1Budget；"
-            "不要按文件静默新建预算"
-        )
-    if critique_budget is not None and window_size <= 1:
-        # P3 复审只在合流窗口里挂载；单句路径没有窗口可复用，静默忽略会让
-        # 调用方误以为开了复审。显式告警，不改变译文。
-        warnings.warn(
-            "P3 复审只对 window_size>1 的合流路径生效；"
-            f"当前 window_size={window_size}，critique_budget 被忽略",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-    blocks = parse_srt(text, eol)
-    valid_items = [
-        (index, block)
-        for index, (block, _separator) in enumerate(blocks)
-        if block.index and block.text.strip()
-    ]
-    total = len(valid_items)
-    translatable: list[tuple[int, Subtitle]] = []
-    filtered = 0
-    for item in valid_items:
-        subtitle = item[1]
-        if ASR_HALLUCINATION_PATTERNS.search(subtitle.text):
-            subtitle.text = ""
-            filtered += 1
-        else:
-            translatable.append(item)
-    # 文档级快照前先做跨 cue 断词右吸附：只改正文，不改 cue 数/序号/时间轴。
-    if join_rules and translatable:
-        texts = [subtitle.text for _index, subtitle in translatable]
-        timings = [subtitle.timing for _index, subtitle in translatable]
-        texts, _ = transfer_texts(texts, timings, join_rules)
-        for (_index, subtitle), joined in zip(translatable, texts):
-            subtitle.text = joined
-    source_snapshot = [subtitle.text for _index, subtitle in translatable]
-    done = 0
 
-    # 快照已排除 ASR 幻觉；这里仍过滤一次，防止调用方直接复用快照时漏清洗。
-    register = detect_register(
-        [
-            text
-            for text in source_snapshot
-            if not ASR_HALLUCINATION_PATTERNS.search(text)
+    def __init__(
+        self,
+        chat: Callable[[str], str],
+        text: str,
+        *,
+        chunk_chars: int,
+        source: str,
+        eol: str,
+        failures: list[TranslationFailure],
+        on_segment: Callable[[int, int], None] | None = None,
+        window_size: int = 1,
+        max_window_chars: int = 250,
+        join_rules: tuple[JoinRule, ...] = (),
+        lookahead_cues: int = 0,
+        asmr_guard: bool = False,
+        t1_budget: T1Budget | None = None,
+        file_cues: int | None = None,
+        critique_budget: CritiqueBudget | None = None,
+        checkpoint_path: Path | None = None,
+        resume: bool = False,
+        strip_trailing_periods: bool = True,
+        context_rules: Sequence[ContextRule] | None = None,
+    ) -> None:
+        self.chat = chat
+        self.text = text
+        self.chunk_chars = chunk_chars
+        self.source = source
+        self.eol = eol
+        self.failures = failures
+        self.on_segment = on_segment
+        self.window_size = window_size
+        self.max_window_chars = max_window_chars
+        self.join_rules = join_rules
+        self.lookahead_cues = lookahead_cues
+        self.asmr_guard = asmr_guard
+        self.t1_budget = t1_budget if t1_budget is not None else T1Budget()
+        self.file_cues = file_cues
+        self.critique_budget = critique_budget
+        self.checkpoint_path = checkpoint_path
+        self.resume = resume
+        self.strip_trailing_periods = strip_trailing_periods
+        self._injected_rules = context_rules
+
+        self.blocks: list[tuple[Subtitle, str]] = []
+        self.valid_items: list[tuple[int, Subtitle]] = []
+        self.translatable: list[tuple[int, Subtitle]] = []
+        self.source_snapshot: list[str] = []
+        self.total = 0
+        self.filtered = 0
+        self.done = 0
+        self.profile = TranslationProfile(register="neutral", pronoun="auto")
+        self.index = DuplicateIndex()
+        self.short_index: DuplicateIndex | None = None
+        self.asmr_enabled = False
+        self.glossary = None
+        self.rules: tuple[ContextRule, ...] = ()
+        self.document_text = ""
+        self.all_cues: list[tuple[int, str]] = []
+        self.cue_positions: dict[int, int] = {}
+        self.completed_indexes: set[str] = set()
+        self.resumed_pairs: list[tuple[str, str]] = []
+        self.entity_engine: DynamicEntityEngine | None = None
+        self.t1_budget_warned = False
+        self._snapshot_cb = None
+        self._reset_cb = None
+        self._restore_cb = None
+
+    # ------------------------------------------------------------------ #
+    # 生命周期
+    # ------------------------------------------------------------------ #
+
+    def execute(self) -> str:
+        """跑完整生命周期；单句路径与合流窗口路径二选一。"""
+        self._preprocess()
+        self._resume_from_checkpoint()
+        if self.window_size <= 1:
+            return self._run_single()
+        return self._run_windows()
+
+    def _preprocess(self) -> None:
+        """解析 SRT、清洗 ASR 幻觉、断词吸附，并建立文档级索引与语域。"""
+        self.blocks = parse_srt(self.text, self.eol)
+        self.valid_items = [
+            (index, block)
+            for index, (block, _separator) in enumerate(self.blocks)
+            if block.index and block.text.strip()
         ]
-    )
-    profile = TranslationProfile(
-        register=register,
-        pronoun="你" if register == "intimate" else "auto",
-    )
-    index = DuplicateIndex()
-    # T1 只对 ASMR 模板启用：生产/实验模板都算 ASMR；没有
-    # task_template 属性的 duck-typed chat 不启用。
-    t1_budget = t1_budget if t1_budget is not None else T1Budget()
-    if asmr_guard:
-        t1_budget.begin_file(source, file_cues)
-    else:
-        t1_budget.begin_file(source)
-    # P3 复审默认关闭：只有调用方显式传入 CritiqueBudget 才建预算、才发复审请求。
-    if critique_budget is not None:
-        critique_budget.begin_file(source, file_cues)
-    engine_template = getattr(chat, "task_template", None)
-    asmr_enabled = bool(asmr_guard) and prompts.is_asmr_task(engine_template)
-    short_index = (
-        DuplicateIndex(min_chars=8, translation_ratio=0.85)
-        if asmr_enabled
-        else None
-    )
-    glossary = getattr(chat, "glossary", None)
-    snapshot_history = getattr(chat, "history_snapshot", None)
-    reset_history = getattr(chat, "reset_history", None)
-    restore_history = getattr(chat, "restore_history", None)
+        self.total = len(self.valid_items)
+        translatable: list[tuple[int, Subtitle]] = []
+        for item in self.valid_items:
+            subtitle = item[1]
+            if ASR_HALLUCINATION_PATTERNS.search(subtitle.text):
+                subtitle.text = ""
+                self.filtered += 1
+            else:
+                translatable.append(item)
+        self.translatable = translatable
+        # 文档级快照前先做跨 cue 断词右吸附：只改正文，不改 cue 数/序号/时间轴。
+        if self.join_rules and translatable:
+            texts = [subtitle.text for _index, subtitle in translatable]
+            timings = [subtitle.timing for _index, subtitle in translatable]
+            texts, _ = transfer_texts(texts, timings, self.join_rules)
+            for (_index, subtitle), joined in zip(translatable, texts):
+                subtitle.text = joined
+        self.source_snapshot = [
+            subtitle.text for _index, subtitle in translatable
+        ]
+        # 快照已排除 ASR 幻觉；这里仍过滤一次，防止调用方直接复用快照时漏清洗。
+        register = detect_register(
+            [
+                text
+                for text in self.source_snapshot
+                if not ASR_HALLUCINATION_PATTERNS.search(text)
+            ]
+        )
+        self.profile = TranslationProfile(
+            register=register,
+            pronoun="你" if register == "intimate" else "auto",
+        )
+        self.index = DuplicateIndex()
+        # T1 只对 ASMR 模板启用：生产/实验模板都算 ASMR；没有
+        # task_template 属性的 duck-typed chat 不启用。
+        if self.asmr_guard:
+            self.t1_budget.begin_file(self.source, self.file_cues)
+        else:
+            self.t1_budget.begin_file(self.source)
+        engine_template = getattr(self.chat, "task_template", None)
+        self.asmr_enabled = bool(self.asmr_guard) and prompts.is_asmr_task(
+            engine_template
+        )
+        self.short_index = (
+            DuplicateIndex(min_chars=8, translation_ratio=0.85)
+            if self.asmr_enabled
+            else None
+        )
+        self.glossary = getattr(self.chat, "glossary", None)
+        rules = self._injected_rules
+        if rules is None:
+            rules = getattr(self.chat, "context_rules", None)
+        if rules is None:
+            # 自定义 --config-dir 没有 rules.tsv 时回落仓库默认表：器官/人称
+            # 收敛是安全网，不能因为配置目录精简就静默消失。
+            rules = default_context_rules()
+        self.rules = tuple(rules)
+        self._snapshot_cb = getattr(self.chat, "history_snapshot", None)
+        self._reset_cb = getattr(self.chat, "reset_history", None)
+        self._restore_cb = getattr(self.chat, "restore_history", None)
+        # invented_tool 的 ±3 cue 视野：按文档原始 cue 顺序建表（ASR 幻觉置空
+        # 的 cue 仍占位，避免把距离算近）。nearby 不含当前 cue，当前源文由
+        # audit_invented_tool 自己查。必须在续传回填之前建表：回填会把已完成
+        # cue 的 subtitle.text 换成中文，之后建表会让 nearby_sources 混入译文。
+        self.all_cues = [
+            (self._cue_of(subtitle), subtitle.text)
+            for _i, subtitle in self.valid_items
+        ]
+        self.cue_positions = {
+            cue: position
+            for position, (cue, _text) in enumerate(self.all_cues)
+        }
+        # 整篇源文拼一份给审计用：invented_name 要判断“这个专名整篇到底有没有
+        # 出现过”，只查当前 cue 会把“别的 cue 确实提到过人名”误判成漏译。
+        self.document_text = "\n".join(text for _cue, text in self.all_cues)
 
-    def finalize(
+    def _resume_from_checkpoint(self) -> None:
+        """把快照里已完成的 cue 回填进 blocks/索引/历史，后续只跑剩余项。"""
+        completed: dict[str, str] = {}
+        if self.resume and self.checkpoint_path is not None:
+            completed = _load_partial(self.checkpoint_path, self.translatable)
+        for _block_index, subtitle in self.translatable:
+            done_text = completed.get(subtitle.index)
+            if done_text is None:
+                continue
+            source_text = subtitle.text
+            subtitle.text = done_text
+            self.completed_indexes.add(subtitle.index)
+            self.resumed_pairs.append((source_text, done_text))
+            cue = self._cue_of(subtitle)
+            self.index.add(cue, source_text, done_text)
+            if self.short_index is not None:
+                self.short_index.add(cue, source_text, done_text)
+        if self.resumed_pairs:
+            # 回填顺序必须与文档顺序一致，否则历史“最近 N 条”的语义会错位。
+            self._restore_history(tuple(self.resumed_pairs))
+            self.done = len(self.resumed_pairs)
+
+    # ------------------------------------------------------------------ #
+    # 基础设施
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _cue_of(subtitle: Subtitle) -> int:
+        return int(subtitle.index) if subtitle.index.isdigit() else 0
+
+    def _history_now(self) -> tuple[tuple[str, str], ...]:
+        if callable(self._snapshot_cb):
+            return self._snapshot_cb()
+        return ()
+
+    def _restore_history(
+        self, snapshot: tuple[tuple[str, str], ...]
+    ) -> None:
+        if callable(self._restore_cb):
+            self._restore_cb(snapshot)
+        elif callable(self._reset_cb):
+            self._reset_cb()
+
+    def _reset_history(self) -> None:
+        if callable(self._reset_cb):
+            self._reset_cb()
+
+    def _set_entity(self, engine: DynamicEntityEngine | None) -> None:
+        setter = getattr(self.chat, "set_entity_engine", None)
+        if callable(setter):
+            setter(engine)
+
+    def _set_lookahead(self, text: str) -> None:
+        setter = getattr(self.chat, "set_lookahead", None)
+        if callable(setter):
+            setter(text)
+
+    def _clear_lookahead(self) -> None:
+        clearer = getattr(self.chat, "clear_lookahead", None)
+        if callable(clearer):
+            clearer()
+
+    def _report_progress(self) -> None:
+        if self.on_segment is not None:
+            self.on_segment(self.done, self.total)
+
+    # ------------------------------------------------------------------ #
+    # cue 级后处理与审计
+    # ------------------------------------------------------------------ #
+
+    def _finalize_cue(
+        self,
         zh_text: str,
         source_text: str,
         entity: DynamicEntityEngine | None = None,
     ) -> str:
-        """统一的 cue 级后处理顺序：清洗 → 示例专名 → 锁定名 → 术语 → 人称 → 器官 → 窄修复。"""
+        """统一的 cue 级后处理：清洗 → 示例专名 → 锁定名 → 术语 → 人称 → 规则。"""
         text_out = postprocess_cue_text(
-            zh_text, source_text, strip_trailing_period=strip_trailing_periods
+            zh_text,
+            source_text,
+            strip_trailing_period=self.strip_trailing_periods,
         )
-        if asmr_enabled:
+        if self.asmr_enabled:
             # 整条只有“提示词示例专名”时降级成省略号（拟声位被填人名的形态）；
             # 必须早于审计：这一步是确定性的，不该再花一次重译去问模型。
-            text_out = strip_example_names(text_out, source_text, document_text)
+            text_out = strip_example_names(
+                text_out, source_text, self.document_text, self.rules
+            )
         if entity is not None:
             text_out = entity.enforce_locks(text_out)
-        if glossary is not None:
-            text_out = glossary.apply(source_text, text_out)
-        text_out = apply_pronoun_policy(text_out, profile)
-        # 只在“源文有耳词且没有阴道词”时生效：模型会把 お耳の中 写成“小穴里”，
-        # 这是灌不进去的领域习惯，用确定性改写兜底，不再花一次重译。
-        text_out = repair_organ_swap(source_text, text_out)
-        # 仅“下の名前で呼んであげて”场景：模型固执输出“我的名字/让我/叫我”，
-        # 在 validate 前做确定性第三人称收敛；其余源文原样返回。
-        text_out = repair_first_person_name(source_text, text_out)
+        if self.glossary is not None:
+            text_out = self.glossary.apply(source_text, text_out)
+        text_out = apply_pronoun_policy(text_out, self.profile)
+        # 器官错位、人称归属、和制词与坏拟声全部由 rules.tsv 驱动；后两项只对
+        # ASMR 生效，避免改变 subtitle/prose/general 的既有产物。
+        rule_types = ["organ_guard", "context_sub"]
+        if self.asmr_enabled:
+            rule_types += ["wasei_clean", "sfx_repair"]
+        text_out = apply_context_rules(
+            source_text,
+            text_out,
+            self.rules,
+            rule_types=tuple(rule_types),
+        )
+        if self.asmr_enabled:
+            # 放在 organ_guard 之后：源文有耳词时先收敛成“耳朵”，
+            # 不能再被生理互斥误改成“这里/肉棒”。
+            text_out = enforce_gender_anatomy_invariant(
+                source_text, text_out, self.rules
+            )
         # 仅“私のことは…って”引用场景：叠词口误“叫我叫”收敛成“叫我”，
         # 放在人称收敛之后，避免前一步替换出的文本被再次改写。
         return repair_quote_private(source_text, text_out)
 
-    def cue_of(subtitle: Subtitle) -> int:
-        return int(subtitle.index) if subtitle.index.isdigit() else 0
-
-    def history_now() -> tuple[tuple[str, str], ...]:
-        if callable(snapshot_history):
-            return snapshot_history()
-        return ()
-
-    def restore(snapshot: tuple[tuple[str, str], ...]) -> None:
-        if callable(restore_history):
-            restore_history(snapshot)
-        elif callable(reset_history):
-            reset_history()
-
-    # invented_tool 的 ±3 cue 视野：按文档原始 cue 顺序建表（ASR 幻觉置空
-    # 的 cue 仍占位，避免把距离算近）。nearby 不含当前 cue，当前源文由
-    # audit_invented_tool 自己查。
-    # 必须在续传回填之前建表：回填会把已完成 cue 的 subtitle.text 换成中文，
-    # 之后建表会让 nearby_sources 混入译文，日文道具词匹配不到 → 误报。
-    all_cues = [(cue_of(subtitle), subtitle.text) for _i, subtitle in valid_items]
-    cue_positions = {
-        cue: position for position, (cue, _text) in enumerate(all_cues)
-    }
-    # 整篇源文拼一份给审计用：invented_name 要判断“这个专名整篇到底有没有出现过”，
-    # 只查当前 cue 会把“别的 cue 确实提到过人名”误判成漏译/渗漏。
-    document_text = "\n".join(text for _cue, text in all_cues)
-
-    # 断点续传：先把快照里已完成的 cue 回填进 blocks/索引/历史，后续只跑剩余项。
-    # 回填顺序必须与文档顺序一致，否则 _history 的“最近 N 条”语义会错位。
-    completed: dict[str, str] = {}
-    if resume and checkpoint_path is not None:
-        completed = _load_partial(checkpoint_path, translatable)
-    completed_indexes: set[str] = set()
-    resumed_pairs: list[tuple[str, str]] = []
-    for _block_index, subtitle in translatable:
-        done_text = completed.get(subtitle.index)
-        if done_text is None:
-            continue
-        source_text = subtitle.text
-        subtitle.text = done_text
-        completed_indexes.add(subtitle.index)
-        resumed_pairs.append((source_text, done_text))
-        cue = cue_of(subtitle)
-        index.add(cue, source_text, done_text)
-        if short_index is not None:
-            short_index.add(cue, source_text, done_text)
-    if resumed_pairs:
-        restore(tuple(resumed_pairs))
-        done = len(resumed_pairs)
-
-    def nearby_sources_for(cue: int) -> tuple[str, ...]:
-        position = cue_positions.get(cue)
+    def _nearby_sources_for(self, cue: int) -> tuple[str, ...]:
+        position = self.cue_positions.get(cue)
         if position is None:
             return ()
         start = max(0, position - T1_NEARBY_RADIUS)
-        end = min(len(all_cues), position + T1_NEARBY_RADIUS + 1)
-        window = all_cues[start:end]
+        end = min(len(self.all_cues), position + T1_NEARBY_RADIUS + 1)
+        window = self.all_cues[start:end]
         return tuple(
             text
             for offset, (_cue, text) in enumerate(window, start=start)
             if offset != position
         )
 
-    def audit(
+    def _audit(
+        self,
         source_text: str,
         translation: str,
         cue: int,
@@ -466,16 +571,17 @@ def translate_srt(
             source_text,
             translation,
             cue,
-            index=index,
-            profile=profile,
-            short_index=short_index,
+            index=self.index,
+            profile=self.profile,
+            short_index=self.short_index,
             window_index=window_index,
             nearby_sources=nearby_sources,
-            asmr_guard=asmr_enabled,
-            document_text=document_text,
+            asmr_guard=self.asmr_enabled,
+            document_text=self.document_text,
         )
 
-    def candidate_ok(
+    def _candidate_ok(
+        self,
         source_text: str,
         original: str,
         candidate: str,
@@ -511,7 +617,7 @@ def translate_srt(
                 return False
         codes = {
             issue.code
-            for issue in audit(
+            for issue in self._audit(
                 source_text, candidate, cue, nearby_sources, window_index
             )
         }
@@ -521,79 +627,79 @@ def translate_srt(
             return False
         return True
 
-    def retry_for_audit(
+    def _retry_for_audit(
+        self,
         subtitle: Subtitle,
         source_text: str,
         hint: str,
         base: tuple[tuple[str, str], ...],
     ) -> str | None:
         """审计命中的一次定点重译；异常只保留原译，不写 failure。"""
-        if callable(reset_history):
-            reset_history()
+        self._reset_history()
         try:
             return _translate_single_cue(
-                chat,
+                self.chat,
                 subtitle,
-                source=source,
-                failures=failures,
+                source=self.source,
+                failures=self.failures,
                 correction=hint,
                 record_failure=False,
             )
         except (EngineError, TranslateError):
             return None
         finally:
-            restore(base)
+            self._restore_history(base)
 
-    t1_budget_warned = False
-
-    def warn_t1(
-        cue: int, trigger_codes: set[str], reason: str
+    def _warn_t1(
+        self, cue: int, trigger_codes: set[str], reason: str
     ) -> None:
         """T1 重译失败/候选被拒时写 RuntimeWarning，不写 failure。"""
-        if not asmr_enabled:
+        if not self.asmr_enabled:
             return
         t1_codes = trigger_codes & ASMR_T1_CODES
         if not t1_codes:
             return
         names = "/".join(sorted(t1_codes))
         warnings.warn(
-            f"ASMR 守卫 {names} 在 cue {cue} 命中后{reason}，保留原译",
+            f"ASMR 守卫 {names} 在 cue {cue} 命中后{reason}，"
+            "保留重译前文本（可确定性消解的坏词已降级）",
             RuntimeWarning,
-            stacklevel=4,
+            stacklevel=3,
         )
 
-    def limit_t1_issues(cue: int, issues: list) -> list:
+    def _limit_t1_issues(self, cue: int, issues: list) -> list:
         """候选级 T1 预算耗尽后只保留非 T1 问题，避免继续产生调用。"""
-        nonlocal t1_budget_warned
-        if not asmr_enabled:
+        if not self.asmr_enabled:
             return issues
         t1_codes = {
             issue.code for issue in issues if issue.code in ASMR_T1_CODES
         }
         if not t1_codes:
             return issues
-        if t1_budget.can_retry():
+        if self.t1_budget.can_retry():
             return issues
         scope = (
             "per_file"
-            if t1_budget.file_total >= t1_budget.per_file
+            if self.t1_budget.file_total >= self.t1_budget.per_file
             else "total"
         )
-        t1_budget.record_event(cue, t1_codes, "budget", scope)
-        if not t1_budget_warned:
+        self.t1_budget.record_event(cue, t1_codes, "budget", scope)
+        if not self.t1_budget_warned:
             warnings.warn(
                 "ASMR 守卫达到候选级预算"
-                f"（整包 {t1_budget.max_total} / 单文件 {t1_budget.per_file}）"
+                f"（整包 {self.t1_budget.max_total}"
+                f" / 单文件 {self.t1_budget.per_file}）"
                 f"，cue {cue} 起后续命中保留原译",
                 RuntimeWarning,
-                stacklevel=4,
+                stacklevel=3,
             )
-            t1_budget_warned = True
+            self.t1_budget_warned = True
         return [
             issue for issue in issues if issue.code not in ASMR_T1_CODES
         ]
 
-    def audit_retry(
+    def _audit_retry(
+        self,
         subtitle: Subtitle,
         source_text: str,
         current_text: str,
@@ -603,33 +709,45 @@ def translate_srt(
         window_index: DuplicateIndex | None = None,
     ) -> str:
         """命中审计时做且仅做一次定点重译；失败/拒绝保留原译并告警。"""
-        nearby = nearby_sources_for(cue)
-        issues = audit(
+        nearby = self._nearby_sources_for(cue)
+        issues = self._audit(
             source_text, current_text, cue, nearby, window_index
         )
         if not issues:
             return current_text
-        issues = limit_t1_issues(cue, issues)
+        raw_issues = issues
+        issues = self._limit_t1_issues(cue, issues)
         if not issues:
+            # 预算耗尽时不再重译，但已知的 T1 坏词仍要确定性消解，
+            # 不能因为“没预算”把已识别的坏译原样落盘。
+            budget_codes = {
+                issue.code for issue in raw_issues
+            } & ASMR_T1_CODES
+            if self.asmr_enabled and budget_codes:
+                return self._salvage(
+                    current_text, source_text, budget_codes
+                )
             return current_text
         trigger_codes = {issue.code for issue in issues}
         t1_codes = (
-            trigger_codes & ASMR_T1_CODES if asmr_enabled else set()
+            trigger_codes & ASMR_T1_CODES if self.asmr_enabled else set()
         )
         if t1_codes:
-            t1_budget.record_attempt()
-        retry = retry_for_audit(
+            self.t1_budget.record_attempt()
+        retry = self._retry_for_audit(
             subtitle, source_text, combine_hints(issues), base
         )
         if retry is None:
             if t1_codes:
-                t1_budget.record_event(
+                self.t1_budget.record_event(
                     cue, t1_codes, "error", "retry_failed"
                 )
-            warn_t1(cue, trigger_codes, "重译失败")
+            self._warn_t1(cue, trigger_codes, "重译失败")
+            if t1_codes:
+                return self._salvage(current_text, source_text, t1_codes)
             return current_text
-        candidate = finalize(retry, source_text, entity)
-        if candidate_ok(
+        candidate = self._finalize_cue(retry, source_text, entity)
+        if self._candidate_ok(
             source_text,
             current_text,
             candidate,
@@ -639,51 +757,79 @@ def translate_srt(
             window_index,
         ):
             if t1_codes:
-                t1_budget.record_event(
+                self.t1_budget.record_event(
                     cue, t1_codes, "accepted", "retranslated"
                 )
             return candidate
         if t1_codes:
-            t1_budget.record_event(
+            self.t1_budget.record_event(
                 cue, t1_codes, "rejected", "candidate_rejected"
             )
-        warn_t1(cue, trigger_codes, "候选未通过")
+        self._warn_t1(cue, trigger_codes, "候选未通过")
+        if t1_codes:
+            return self._salvage(current_text, source_text, t1_codes)
         return current_text
 
-    def add_indexes(cue: int, source_text: str, translation: str) -> None:
-        """只登记最终接受的译文；short_index 仅 ASMR 门控开启时存在。"""
-        index.add(cue, source_text, translation)
-        if short_index is not None:
-            short_index.add(cue, source_text, translation)
+    def _salvage(
+        self, current_text: str, source_text: str, t1_codes: set[str]
+    ) -> str:
+        """T1 重译失败/被拒后的确定性兜底；失败则退化为省略号。"""
+        text = salvage_t1_rejection(
+            current_text,
+            source_text,
+            t1_codes,
+            self.document_text,
+            self.rules,
+        )
+        return text if validate_cue_translation(text) is None else "……"
 
-    if window_size <= 1:
-        clear_entity = getattr(chat, "set_entity_engine", None)
-        if callable(clear_entity):
-            clear_entity(None)
-        for _block_index, subtitle in valid_items:
-            if subtitle.index in completed_indexes:
+    def _add_indexes(
+        self, cue: int, source_text: str, translation: str
+    ) -> None:
+        """只登记最终接受的译文；short_index 仅 ASMR 门控开启时存在。"""
+        self.index.add(cue, source_text, translation)
+        if self.short_index is not None:
+            self.short_index.add(cue, source_text, translation)
+
+    def _fill_failure(self, subtitle: Subtitle, reason: str) -> None:
+        self.failures.append(
+            TranslationFailure(
+                source=self.source,
+                segment=f"line {subtitle.index}",
+                reason=reason,
+            )
+        )
+
+    # ------------------------------------------------------------------ #
+    # 单句路径
+    # ------------------------------------------------------------------ #
+
+    def _run_single(self) -> str:
+        """window_size<=1：逐 cue 串行翻译，失败按三级兜底。"""
+        self._set_entity(None)
+        for _block_index, subtitle in self.valid_items:
+            if subtitle.index in self.completed_indexes:
                 # 断点续传：已完成的 cue 不重复请求，进度计数在回填时已加过。
                 continue
             if not subtitle.text.strip():
-                # ASR 幻觉已置空：不调用模型，但仍计入已完成段，保持进度与 segments 一致
-                done += 1
-                if on_segment is not None:
-                    on_segment(done, total)
+                # ASR 幻觉已置空：不调用模型，但仍计入进度，保持 done==total。
+                self.done += 1
+                self._report_progress()
                 continue
             source_text = subtitle.text
-            cue = cue_of(subtitle)
-            base = history_now()
+            cue = self._cue_of(subtitle)
+            base = self._history_now()
             accepted_text = ""
             result = _translate_chunks(
-                chat,
+                self.chat,
                 source_text,
-                chunk_chars=chunk_chars,
-                source=source,
+                chunk_chars=self.chunk_chars,
+                source=self.source,
                 label=f"line {subtitle.index}",
-                failures=failures,
+                failures=self.failures,
             )
             if result is not None:
-                result = finalize(result, source_text)
+                result = self._finalize_cue(result, source_text)
                 reason = validate_cue_translation(result)
                 if reason:
                     salvaged = salvage_slash_translation(result)
@@ -691,81 +837,141 @@ def translate_srt(
                         result = salvaged
                         reason = None
                 if reason:
-                    # 把**本次**的具体失败原因临时回灌，隔离重译一次；前提是调用方
-                    # 不把这次提示写进历史（reset + 末尾 restore）。
-                    if callable(reset_history):
-                        reset_history()
+                    # 把**本次**的具体失败原因临时回灌，隔离重译一次；前提是
+                    # 调用方不把这次提示写进历史（reset + 末尾 restore）。
+                    self._reset_history()
                     retry = _translate_single_cue(
-                        chat,
+                        self.chat,
                         subtitle,
-                        source=source,
-                        failures=failures,
+                        source=self.source,
+                        failures=self.failures,
                         correction=_reason_retry_hint(reason),
                         record_failure=False,
                     )
                     if retry is not None:
-                        retry = finalize(retry, source_text)
+                        retry = self._finalize_cue(retry, source_text)
                         if validate_cue_translation(retry) is None:
                             result = retry
                             reason = None
                 if reason:
-                    # 重译仍不合格：填回这次尝试的文本（非空、非日文原文），并记失败。
+                    # 重译仍不合格：填回候选（非空、非日文原文），并记失败。
                     _fill_failed_cue(subtitle, result)
-                    failures.append(
-                        TranslationFailure(
-                            source=source,
-                            segment=f"line {subtitle.index}",
-                            reason=reason,
-                        )
-                    )
+                    self._fill_failure(subtitle, reason)
                 else:
-                    result = audit_retry(
+                    result = self._audit_retry(
                         subtitle, source_text, result, cue, None, base
                     )
                     subtitle.text = result
                     accepted_text = result
-                    add_indexes(cue, source_text, result)
-            # 失败段保持非空（填候选）或原文（无候选），并把失败的调用从上下文里剔除。
+                    self._add_indexes(cue, source_text, result)
+            # 失败段保持非空（填候选）或原文（无候选），并把失败的调用从上下文剔除。
             if accepted_text:
-                restore(base + ((source_text, accepted_text),))
-                completed_indexes.add(subtitle.index)
+                self._restore_history(
+                    base + ((source_text, accepted_text),)
+                )
+                self.completed_indexes.add(subtitle.index)
             else:
-                restore(base)
-            if checkpoint_path is not None:
-                _write_partial(checkpoint_path, blocks, eol, completed_indexes)
-            done += 1
-            if on_segment is not None:
-                on_segment(done, total)
-        return rebuild_srt(blocks, eol)
+                self._restore_history(base)
+            if self.checkpoint_path is not None:
+                _write_partial(
+                    self.checkpoint_path,
+                    self.blocks,
+                    self.eol,
+                    self.completed_indexes,
+                )
+            self.done += 1
+            self._report_progress()
+        return rebuild_srt(self.blocks, self.eol)
 
-    # 实体索引必须从**源文**建：续传时 completed 的 subtitle.text 已被换成译文，
-    # 用 subtitle.text 会把中文当成日语种子。source_snapshot 保留原始日文。
-    entity_engine = DynamicEntityEngine(list(source_snapshot))
-    # 文件名元数据先验：``(茜音編).wav`` 这类作品名里的主角名比 ASR 的汉字写法
-    # 可靠；ASR 把「茜音」听成「赤音」时，只有先验能把它纠回来。
-    prior_seeds = extract_metadata_entity_seeds(Path(source))
-    if prior_seeds:
-        entity_engine.seed_prior_entities(prior_seeds)
-    if resumed_pairs:
-        # 让续传后的专名锁定与前文示例接上前半段，避免恢复后译名漂移。
-        entity_engine.capture_translations(
-            [pair[0] for pair in resumed_pairs],
-            [pair[1] for pair in resumed_pairs],
+    # ------------------------------------------------------------------ #
+    # 合流窗口路径
+    # ------------------------------------------------------------------ #
+
+    def _build_entity_engine(self) -> None:
+        """实体索引必须从**源文**建：续传后 subtitle.text 已是译文。"""
+        self.entity_engine = DynamicEntityEngine(
+            list(self.source_snapshot)
         )
-    setter = getattr(chat, "set_entity_engine", None)
-    if callable(setter):
-        setter(entity_engine)
+        # 文件名元数据先验：作品名里的主角名比 ASR 的汉字写法可靠。
+        prior_seeds = extract_metadata_entity_seeds(Path(self.source))
+        if prior_seeds:
+            self.entity_engine.seed_prior_entities(prior_seeds)
+        if self.resumed_pairs:
+            # 让续传后的专名锁定接上前半段，避免恢复后译名漂移。
+            self.entity_engine.capture_translations(
+                [pair[0] for pair in self.resumed_pairs],
+                [pair[1] for pair in self.resumed_pairs],
+            )
+        self._set_entity(self.entity_engine)
 
-    def partial_window_staging(
+    def _build_windows(self) -> list[list[tuple[int, Subtitle]]]:
+        """按 window_size 与 max_window_chars 切窗，跳过已完成/已清洗项。"""
+        windows: list[list[tuple[int, Subtitle]]] = []
+        current: list[tuple[int, Subtitle]] = []
+        current_chars = 0
+        for item in self.translatable:
+            if item[1].index in self.completed_indexes:
+                continue
+            text_len = len(item[1].text)
+            if current and (
+                len(current) >= self.window_size
+                or current_chars + text_len > self.max_window_chars
+            ):
+                windows.append(current)
+                current = []
+                current_chars = 0
+            current.append(item)
+            current_chars += text_len
+            if len(current) >= self.window_size:
+                windows.append(current)
+                current = []
+                current_chars = 0
+        if current:
+            windows.append(current)
+        return windows
+
+    def _window_lookaheads(
+        self, windows: list[list[tuple[int, Subtitle]]]
+    ) -> list[str]:
+        """后文参考只取紧邻的下一窗原文，按 cue 截断到 120 字。
+
+        后文参考只用于理解，不进入 input_batch、不写历史、不参与写回；
+        超长单条至少保留一条。
+        """
+        if self.lookahead_cues <= 0:
+            return [""] * len(windows)
+        flat = [item for window in windows for item in window]
+        lookaheads: list[str] = []
+        cursor = 0
+        for window in windows:
+            cursor += len(window)
+            parts: list[str] = []
+            used = 0
+            for item in flat[cursor : cursor + self.lookahead_cues]:
+                # 后文参考不带 [#N]：带编号会诱导模型把参考项当输入翻译，
+                # 导致编号多翻/乱序并整窗回退；这里只给裸原文。
+                line = f"- {item[1].text}"
+                if parts and used + len(line) > 120:
+                    break
+                parts.append(line)
+                used += len(line)
+            lookahead = "\n".join(parts)
+            if len(lookahead) > 120:
+                lookahead = lookahead[:120].rstrip() + "…"
+            lookaheads.append(lookahead)
+        return lookaheads
+
+    def _partial_window_staging(
+        self,
         window: list[tuple[int, Subtitle]],
         alignment: WindowAlignment,
         base: tuple[tuple[str, str], ...],
     ) -> list[str] | None:
         """局部回退：只对损坏 cue 发单编号请求；任一修不回来就整窗熔断。
 
-        返回按 ``window`` 原始顺序排好的译文；返回 None 表示调用方必须走整窗
-        逐句回退。损坏项来自三处：编号缺失、语义可疑（泄漏/空译/漏译/跨窗
-        复制/同窗成对重复）、以及 ``finalize`` 后仍过不了写回硬校验。
+        返回按 ``window`` 原始顺序排好的译文；返回 None 表示调用方必须走
+        整窗逐句回退。损坏项来自三处：编号缺失、语义可疑（泄漏/空译/漏译/
+        跨窗复制/同窗成对重复）、以及后处理仍过不了写回硬校验。
         """
         aligned = alignment.aligned
         corrupted = set(alignment.missing_ids)
@@ -775,8 +981,10 @@ def translate_srt(
             raw = aligned.get(subtitle.index)
             if raw is None:
                 continue
-            text = finalize(
-                strip_window_id_prefix(raw), subtitle.text, entity_engine
+            text = self._finalize_cue(
+                strip_window_id_prefix(raw),
+                subtitle.text,
+                self.entity_engine,
             )
             if validate_cue_translation(text) is not None:
                 corrupted.add(subtitle.index)
@@ -790,333 +998,294 @@ def translate_srt(
             # 硬校验）。此时保留任何“看起来干净”的批次译文都会放过脏文本，
             # 因此整窗回退；只有损坏项在少数时，其余条目才值得采信。
             return None
-
         # 只补损坏项：先丢掉整窗调用留下的滑动上下文痕迹，再逐条隔离重译，
         # 避免上一句单编号译文被当成“前文”影响下一句，也避免整窗记录被放大。
-        restore(base)
+        self._restore_history(base)
         for _block_index, subtitle in window:
             if subtitle.index not in corrupted:
                 continue
-            if callable(reset_history):
-                reset_history()
+            self._reset_history()
             recovered = _translate_single_cue(
-                chat,
+                self.chat,
                 subtitle,
-                source=source,
-                failures=failures,
+                source=self.source,
+                failures=self.failures,
                 record_failure=False,
             )
             if recovered is None:
                 return None
-            text = finalize(recovered, subtitle.text, entity_engine)
+            text = self._finalize_cue(
+                recovered, subtitle.text, self.entity_engine
+            )
             if validate_cue_translation(text) is not None:
-                # 单句补救也做一次斜杠兜底；仍不合格就整窗熔断，绝不留半窗脏文本。
+                # 单句补救也做一次斜杠兜底；仍不合格就整窗熔断。
                 salvaged = salvage_slash_translation(text)
                 if validate_cue_translation(salvaged) is not None:
                     return None
                 text = salvaged
             served[subtitle.index] = text
-        restore(base)
+        self._restore_history(base)
         if any(
             subtitle.index not in served for _b, subtitle in window
         ):
             return None
         return [served[subtitle.index] for _b, subtitle in window]
 
-    def apply_critique(
+    def _process_window(
+        self,
         window: list[tuple[int, Subtitle]],
-        staging: list[str],
-        base: tuple[tuple[str, str], ...],
-    ) -> None:
-        """P3：对命中的高危 cue 各做一次隔离复审，原地改写 ``staging``。
-
-        复审发生在 ``audit_retry`` 之前：先修语义（主客/否定/归属），再由
-        确定性守卫做最后验收，避免复审润色时又踩术语表或自造道具。
-        """
-        if critique_budget is None:
-            return
-        context = tuple(base[-2:])
-        for position, (_block_index, subtitle) in enumerate(window):
-            source_text = subtitle.text
-            cue = window_cues[position]
-            nearby = nearby_sources_for(cue)
-            risk_codes = triage_cue_risk(
-                source_text,
-                staging[position],
-                nearby_sources=nearby,
-                duplicate_index=index,
+        lookahead: str,
+        base_history: tuple[tuple[str, str], ...],
+    ) -> list[str]:
+        """翻译单个合流窗口；返回本窗已完成的 SRT 序号列表。"""
+        expected_ids = [item[1].index for item in window]
+        window_sources = [item[1].text for item in window]
+        window_cues = [self._cue_of(item[1]) for item in window]
+        fallback = len(set(expected_ids)) != len(expected_ids)
+        accepted: list[tuple[str, str]] = []
+        window_completed: list[str] = []
+        if not fallback:
+            batch_prompt = "\n".join(
+                f"[#{item[1].index}] {item[1].text}" for item in window
             )
-            if not risk_codes:
-                continue
-
-            def accept(
-                candidate_source: str,
-                original: str,
-                candidate: str,
-                trigger: Collection[str],
-            ) -> bool:
-                return candidate_ok(
-                    candidate_source,
-                    original,
-                    candidate,
-                    cue,
-                    set(trigger),
-                    nearby,
-                )
-
-            staging[position] = execute_critique_repair(
-                chat,
-                cue=cue,
-                source=source_text,
-                draft=staging[position],
-                context=context,
-                risk_codes=risk_codes,
-                critique_budget=critique_budget,
-                # 必须绑上实体索引：否则复审候选会绕过 enforce_locks，
-                # 把已锁定的中文译名改回汉字日文名（validate 拦不住无假名专名）。
-                finalize=lambda text, src: finalize(text, src, entity_engine),
-                accept=accept,
-            )
-
-    try:
-        windows: list[list[tuple[int, Subtitle]]] = []
-        current: list[tuple[int, Subtitle]] = []
-        current_chars = 0
-        for item in translatable:
-            if item[1].index in completed_indexes:
-                # 断点续传：已完成的 cue 不再进任何窗口，避免重复请求。
-                continue
-            text_len = len(item[1].text)
-            if current and (
-                len(current) >= window_size
-                or current_chars + text_len > max_window_chars
-            ):
-                windows.append(current)
-                current = []
-                current_chars = 0
-            current.append(item)
-            current_chars += text_len
-            if len(current) >= window_size:
-                windows.append(current)
-                current = []
-                current_chars = 0
-        if current:
-            windows.append(current)
-
-        # 后文参考只取紧邻的下一窗原文，按 cue 截断到 120 字；仅用于理解，
-        # 不进入 input_batch、不写历史、不参与写回。超长单条至少保留一条。
-        window_lookaheads: list[str] = []
-        if lookahead_cues > 0:
-            flat = [item for window in windows for item in window]
-            cursor = 0
-            for window in windows:
-                cursor += len(window)
-                parts: list[str] = []
-                used = 0
-                for item in flat[cursor : cursor + lookahead_cues]:
-                    # 后文参考不带 [#N]：带编号会诱导模型把参考项当输入翻译，
-                    # 导致编号多翻/乱序并整窗回退；这里只给裸原文。
-                    line = f"- {item[1].text}"
-                    if parts and used + len(line) > 120:
-                        break
-                    parts.append(line)
-                    used += len(line)
-                lookahead = "\n".join(parts)
-                if len(lookahead) > 120:
-                    lookahead = lookahead[:120].rstrip() + "…"
-                window_lookaheads.append(lookahead)
-        else:
-            window_lookaheads = [""] * len(windows)
-
-        set_lookahead = getattr(chat, "set_lookahead", None)
-        clear_lookahead = getattr(chat, "clear_lookahead", None)
-        for window_index, window in enumerate(windows):
-            expected_ids = [item[1].index for item in window]
-            window_sources = [item[1].text for item in window]
-            window_cues = [cue_of(item[1]) for item in window]
-            base_history = history_now()
-            fallback = len(set(expected_ids)) != len(expected_ids)
-            accepted: list[tuple[str, str]] = []
-            window_completed: list[str] = []
-
-            if not fallback:
-                batch_prompt = "\n".join(
-                    f"[#{item[1].index}] {item[1].text}" for item in window
-                )
-                lookahead = window_lookaheads[window_index]
-                if lookahead and callable(set_lookahead):
-                    set_lookahead(lookahead)
+            if lookahead:
+                self._set_lookahead(lookahead)
+            try:
                 try:
-                    try:
-                        batch_output = chat(batch_prompt)
-                    finally:
-                        if callable(clear_lookahead):
-                            clear_lookahead()
-                    alignment = align_window_response(batch_output, expected_ids)
-                    staging = (
-                        None
-                        if alignment.is_catastrophic
-                        else partial_window_staging(
-                            window, alignment, base_history
-                        )
+                    batch_output = self.chat(batch_prompt)
+                finally:
+                    self._clear_lookahead()
+                alignment = align_window_response(batch_output, expected_ids)
+                staging = (
+                    None
+                    if alignment.is_catastrophic
+                    else self._partial_window_staging(
+                        window, alignment, base_history
                     )
-                    if staging is None:
-                        # 灾难性结构损坏，或损坏项单句补救失败：整窗熔断回退。
-                        fallback = True
-                    else:
-                        # P3：先做定向语义复审（默认关闭），再做确定性审计。
-                        apply_critique(window, staging, base_history)
-                        # 审计+定点重译：每个问题 cue 最多一次，且不写 failure。
-                        # 窗口内已接受项进 window_index，使同窗短重复也能在
-                        # 本窗命中；窗口最终接受后才并入全局 short_index。
-                        window_short_index = (
-                            DuplicateIndex(
-                                min_chars=8, translation_ratio=0.85
-                            )
-                            if asmr_enabled
-                            else None
-                        )
-                        for position, (_block_index, subtitle) in (
-                            enumerate(window)
-                        ):
-                            source_text = window_sources[position]
-                            cue = window_cues[position]
-                            staging[position] = audit_retry(
-                                subtitle,
-                                source_text,
-                                staging[position],
-                                cue,
-                                entity_engine,
-                                base_history,
-                                window_short_index,
-                            )
-                            if window_short_index is not None:
-                                window_short_index.add(
-                                    cue, source_text, staging[position]
-                                )
-                        entity_engine.capture_translations(
-                            window_sources, staging
-                        )
-                        # 无条件恢复批前上下文：干净窗口也要回到 batch 前语义，
-                        # 否则整窗记录会把 context_window 的 cue 语义放大。
-                        restore(
-                            base_history
-                            + tuple(zip(window_sources, staging))
-                        )
-                        for position in range(len(window)):
-                            add_indexes(
-                                window_cues[position],
-                                window_sources[position],
-                                staging[position],
-                            )
-                        for position, (_block_index, subtitle) in (
-                            enumerate(window)
-                        ):
-                            subtitle.text = staging[position]
-                        window_completed = list(expected_ids)
-                except (EngineError, TranslateError):
+                )
+                if staging is None:
+                    # 灾难性结构损坏，或损坏项单句补救失败：整窗熔断回退。
                     fallback = True
-
-            if fallback:
-                # 硬熔断：该窗口原地回退为逐句串行，绝不采用部分对齐结果
-                for position, (_block_index, subtitle) in enumerate(window):
-                    previous = ""
-                    if position > 0:
-                        previous = window[position - 1][1].text
-                    elif base_history:
-                        previous = base_history[-1][1]
-                    # 单句回退不继承上一句的滑动上下文，避免模型续写相邻行。
-                    if callable(reset_history):
-                        reset_history()
-                    result = _translate_single_cue(
-                        chat,
-                        subtitle,
-                        source=source,
-                        failures=failures,
+                else:
+                    # 审计+定点重译：每个问题 cue 最多一次，且不写 failure。
+                    # 窗口内已接受项进 window_index，使同窗短重复也能在本窗
+                    # 命中；窗口最终接受后才并入全局 short_index。
+                    window_short_index = (
+                        DuplicateIndex(
+                            min_chars=8, translation_ratio=0.85
+                        )
+                        if self.asmr_enabled
+                        else None
                     )
-                    if result is None:
-                        # 一字未出（引擎异常/疑似续写相邻行）：没有可用候选，
-                        # 只能保留原文；失败已由 _translate_single_cue 记录。
-                        continue
-                    if result is not None:
-                        result = finalize(result, subtitle.text, entity_engine)
-                        reason = validate_cue_translation(result)
-                        if reason:
-                            # 给自造词/未本地化专名一次纠偏机会；原因临时回灌。
-                            if callable(reset_history):
-                                reset_history()
-                            retry_hint = _reason_retry_hint(reason, previous)
-                            retry = _translate_single_cue(
-                                chat,
-                                subtitle,
-                                source=source,
-                                failures=failures,
-                                correction=retry_hint,
-                                record_failure=False,
+                    for position, (_block_index, subtitle) in enumerate(
+                        window
+                    ):
+                        source_text = window_sources[position]
+                        cue = window_cues[position]
+                        staging[position] = self._audit_retry(
+                            subtitle,
+                            source_text,
+                            staging[position],
+                            cue,
+                            self.entity_engine,
+                            base_history,
+                            window_short_index,
+                        )
+                        if window_short_index is not None:
+                            window_short_index.add(
+                                cue, source_text, staging[position]
                             )
-                            if retry is not None:
-                                retry = finalize(
-                                    retry, subtitle.text, entity_engine
-                                )
-                                if validate_cue_translation(retry) is None:
-                                    result = retry
-                                    reason = None
-                        if reason:
-                            salvaged = salvage_slash_translation(result)
-                            if validate_cue_translation(salvaged) is None:
-                                result = salvaged
-                                reason = None
-                        if reason:
-                            # 重译仍不合格：填回候选（非空、非日文原文），并记失败。
-                            _fill_failed_cue(subtitle, result)
-                            failures.append(
-                                TranslationFailure(
-                                    source=source,
-                                    segment=f"line {subtitle.index}",
-                                    reason=reason,
-                                )
-                            )
-                        else:
-                            # 逐句回退也要做文档级审计：批次失败不代表复制/敬称
-                            # 风险消失，命中时同样只做一次定点重译。
-                            cue = window_cues[position]
-                            source_text = window_sources[position]
-                            result = audit_retry(
-                                subtitle,
-                                source_text,
-                                result,
-                                cue,
-                                entity_engine,
-                                base_history,
-                            )
-                            entity_engine.capture_translations(
-                                [source_text], [result]
-                            )
-                            add_indexes(cue, source_text, result)
-                            subtitle.text = result
-                            accepted.append((source_text, result))
-                            window_completed.append(subtitle.index)
-                restore(base_history + tuple(accepted))
+                    self.entity_engine.capture_translations(
+                        window_sources, staging
+                    )
+                    # 无条件恢复批前上下文：干净窗口也要回到 batch 前语义，
+                    # 否则整窗记录会把 context_window 的 cue 语义放大。
+                    self._restore_history(
+                        base_history + tuple(zip(window_sources, staging))
+                    )
+                    for position in range(len(window)):
+                        self._add_indexes(
+                            window_cues[position],
+                            window_sources[position],
+                            staging[position],
+                        )
+                    for position, (_block_index, subtitle) in enumerate(
+                        window
+                    ):
+                        subtitle.text = staging[position]
+                    window_completed = list(expected_ids)
+            except (EngineError, TranslateError):
+                fallback = True
+        if fallback:
+            self._fallback_window(
+                window,
+                window_sources,
+                window_cues,
+                base_history,
+                accepted,
+                window_completed,
+            )
+            self._restore_history(base_history + tuple(accepted))
+        return window_completed
 
-            completed_indexes.update(window_completed)
-            if checkpoint_path is not None:
-                # 快照按窗口刷新：只有“整窗已收尾”才值得落盘，半窗没有恢复价值。
-                _write_partial(checkpoint_path, blocks, eol, completed_indexes)
-            done += len(window)
-            if on_segment is not None:
-                on_segment(done, total)
+    def _fallback_window(
+        self,
+        window: list[tuple[int, Subtitle]],
+        window_sources: list[str],
+        window_cues: list[int],
+        base_history: tuple[tuple[str, str], ...],
+        accepted: list[tuple[str, str]],
+        window_completed: list[str],
+    ) -> None:
+        """硬熔断：该窗口原地回退为逐句串行，绝不采用部分对齐结果。"""
+        for position, (_block_index, subtitle) in enumerate(window):
+            previous = ""
+            if position > 0:
+                previous = window[position - 1][1].text
+            elif base_history:
+                previous = base_history[-1][1]
+            # 单句回退不继承上一句的滑动上下文，避免模型续写相邻行。
+            self._reset_history()
+            result = _translate_single_cue(
+                self.chat,
+                subtitle,
+                source=self.source,
+                failures=self.failures,
+            )
+            if result is None:
+                # 一字未出（引擎异常/疑似续写相邻行）：没有可用候选，
+                # 只能保留原文；失败已由 _translate_single_cue 记录。
+                continue
+            result = self._finalize_cue(
+                result, subtitle.text, self.entity_engine
+            )
+            reason = validate_cue_translation(result)
+            if reason:
+                # 给自造词/未本地化专名一次纠偏机会；原因临时回灌。
+                self._reset_history()
+                retry_hint = _reason_retry_hint(reason, previous)
+                retry = _translate_single_cue(
+                    self.chat,
+                    subtitle,
+                    source=self.source,
+                    failures=self.failures,
+                    correction=retry_hint,
+                    record_failure=False,
+                )
+                if retry is not None:
+                    retry = self._finalize_cue(
+                        retry, subtitle.text, self.entity_engine
+                    )
+                    if validate_cue_translation(retry) is None:
+                        result = retry
+                        reason = None
+            if reason:
+                salvaged = salvage_slash_translation(result)
+                if validate_cue_translation(salvaged) is None:
+                    result = salvaged
+                    reason = None
+            if reason:
+                # 重译仍不合格：填回候选（非空、非日文原文），并记失败。
+                _fill_failed_cue(subtitle, result)
+                self._fill_failure(subtitle, reason)
+            else:
+                # 逐句回退也要做文档级审计：批次失败不代表复制/敬称风险消失。
+                cue = window_cues[position]
+                source_text = window_sources[position]
+                result = self._audit_retry(
+                    subtitle,
+                    source_text,
+                    result,
+                    cue,
+                    self.entity_engine,
+                    base_history,
+                )
+                self.entity_engine.capture_translations([source_text], [result])
+                self._add_indexes(cue, source_text, result)
+                subtitle.text = result
+                accepted.append((source_text, result))
+                window_completed.append(subtitle.index)
 
-        if filtered:
-            # 被 ASR 硬清洗的空块不发请求，但要在末尾补齐进度，保证 done==total
-            done += filtered
-            if on_segment is not None:
-                on_segment(done, total)
+    def _run_windows(self) -> str:
+        """合流窗口主循环；实体引擎在 finally 里无条件卸载。"""
+        self._build_entity_engine()
+        setter = getattr(self.chat, "set_entity_engine", None)
+        try:
+            windows = self._build_windows()
+            lookaheads = self._window_lookaheads(windows)
+            for window_index, window in enumerate(windows):
+                base_history = self._history_now()
+                completed = self._process_window(
+                    window, lookaheads[window_index], base_history
+                )
+                self.completed_indexes.update(completed)
+                if self.checkpoint_path is not None:
+                    # 快照按窗口刷新：只有“整窗已收尾”才值得落盘。
+                    _write_partial(
+                        self.checkpoint_path,
+                        self.blocks,
+                        self.eol,
+                        self.completed_indexes,
+                    )
+                self.done += len(window)
+                self._report_progress()
+            if self.filtered:
+                # 被 ASR 硬清洗的空块不发请求，但要在末尾补齐进度。
+                self.done += self.filtered
+                self._report_progress()
+            return rebuild_srt(self.blocks, self.eol)
+        finally:
+            if callable(setter):
+                setter(None)
 
-        return rebuild_srt(blocks, eol)
-    finally:
-        if callable(setter):
-            setter(None)
 
+def translate_srt(
+    chat: Callable[[str], str],
+    text: str,
+    *,
+    chunk_chars: int,
+    source: str,
+    eol: str,
+    failures: list[TranslationFailure],
+    on_segment: Callable[[int, int], None] | None = None,
+    window_size: int = 1,
+    max_window_chars: int = 250,
+    join_rules: tuple[JoinRule, ...] = (),
+    lookahead_cues: int = 0,
+    asmr_guard: bool = False,
+    t1_budget: T1Budget | None = None,
+    file_cues: int | None = None,
+    critique_budget: CritiqueBudget | None = None,
+    checkpoint_path: Path | None = None,
+    resume: bool = False,
+    strip_trailing_periods: bool = True,
+) -> str:
+    """翻译 SRT；ASMR 守卫开启时必须传入调用方共享的 ``t1_budget``。
+
+    复审已退役（``critique_budget`` 仅兼容），``resume`` 用 ``.part.srt`` 续传。
+    """
+    if asmr_guard and t1_budget is None:
+        # ASMR 预算必须由调用方跨文件共享，禁止按文件静默新建。
+        raise TranslateError(
+            "ASMR 守卫需要调用方显式传入共享 T1Budget；"
+            "不要按文件静默新建预算"
+        )
+    if critique_budget is not None:
+        # 复审链路已退役：保留参数只为不破坏外部调用方，绝不再花模型请求。
+        warnings.warn(
+            "P3 复审已退役：运行时不再调用复审模型；参数仅为兼容保留",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return SrtTranslationSession(
+        chat, text, chunk_chars=chunk_chars, source=source, eol=eol,
+        failures=failures, on_segment=on_segment, window_size=window_size,
+        max_window_chars=max_window_chars, join_rules=join_rules,
+        lookahead_cues=lookahead_cues, asmr_guard=asmr_guard,
+        t1_budget=t1_budget, file_cues=file_cues,
+        critique_budget=critique_budget, checkpoint_path=checkpoint_path,
+        resume=resume, strip_trailing_periods=strip_trailing_periods,
+    ).execute()
 
 def translate_prose(
     chat: Callable[[str], str],
@@ -1182,9 +1351,9 @@ def translate_file(
 ) -> TranslationOutcome:
     """翻译单文件；ASMR 守卫开启时必须传入跨文件共享的 ``t1_budget``。
 
-    ``critique_budget`` 为空表示不做 P3 复审；传入后由 ``translate_srt``
-    按文件调用 ``begin_file`` 重置单文件配额。``resume=True`` 时若存在与源
-    时间轴对齐的 ``<output>.part.srt``，已完成 cue 不再请求模型。
+    ``critique_budget`` 为兼容参数：P3 复审已退役，传入只会触发一次告警，
+    ``critique_events`` 恒为空。``resume=True`` 时若存在与源时间轴对齐的
+    ``<output>.part.srt``，已完成 cue 不再请求模型。
     """
     source = Path(source)
     if not source.is_file():
@@ -1302,11 +1471,8 @@ def translate_file(
         segments=segments,
         failures=failures,
         t1_events=tuple(t1_budget.file_events),
-        critique_events=(
-            tuple(critique_budget.file_events)
-            if critique_budget is not None
-            else ()
-        ),
+        # P3 复审已退役：字段保留以维持数据契约，值恒为空。
+        critique_events=(),
     )
     if failures:
         # 输出已写出（失败段已置空、不回填原文），由调用方汇总并返回非零

@@ -182,6 +182,22 @@ class DefinitionTests(unittest.TestCase):
         clean = qc.check_pair(srt("(両耳) 好きだよ"), srt("（在双耳边）喜欢你哦"))
         self.assertFalse(any(i.code == "staging" for i in clean.issues))
 
+    def test_emotion_annotation_is_info_not_review(self) -> None:
+        # 情绪/语音标注是生产端刻意保留的合法形态，只统计不阻断。
+        result = qc.check_pair(srt("好きだよ"), srt("（笑）喜欢你哦"))
+        staging = [i for i in result.issues if i.code == "staging"]
+        self.assertEqual(len(staging), 1)
+        self.assertEqual(staging[0].severity, qc.SEVERITY_INFO)
+
+    def test_action_bracket_next_to_tone_stays_review(self) -> None:
+        result = qc.check_pair(
+            srt("好きだよ"), srt("（笑）喜欢你哦（脚步声）")
+        )
+        staging = [i for i in result.issues if i.code == "staging"]
+        self.assertEqual(len(staging), 1)
+        self.assertEqual(staging[0].severity, qc.SEVERITY_REVIEW)
+        self.assertIn("脚步声", staging[0].evidence)
+
 
 class DuplicateTests(unittest.TestCase):
     def test_duplicate_long(self) -> None:

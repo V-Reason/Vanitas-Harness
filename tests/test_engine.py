@@ -126,6 +126,17 @@ class EngineTests(unittest.TestCase):
         plain = EngineClient(SETTINGS, "127.0.0.1", 4062)
         self.assertNotIn("repeat_penalty", plain._build_payload([], 16, 0.2, None))
 
+    def test_top_p_only_below_one(self) -> None:
+        client = EngineClient(SETTINGS, "127.0.0.1", 4060)
+        payload = client._build_payload([], 16, 0.2, None, top_p=0.85)
+        self.assertEqual(payload["top_p"], 0.85)
+        self.assertNotIn(
+            "top_p", client._build_payload([], 16, 0.2, None, top_p=1.0)
+        )
+        self.assertNotIn(
+            "top_p", client._build_payload([], 16, 0.2, None)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

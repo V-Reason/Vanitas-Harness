@@ -135,7 +135,7 @@ class CliSmokeTests(unittest.TestCase):
         with clean_env():
             code, out, _err = run(["--version"])
         self.assertEqual(code, 0)
-        self.assertIn("vanitas 0.4.1", out)
+        self.assertIn("vanitas 0.4.2", out)
 
     def test_models_lists_config(self) -> None:
         with clean_env():
@@ -672,13 +672,13 @@ class CliSmokeTests(unittest.TestCase):
             },
         )
         self.assertEqual(meta["task_template"], "translate_asmr")
-        self.assertEqual(meta["prompt_bytes"], 13108)
+        self.assertEqual(meta["prompt_bytes"], 14363)
         self.assertEqual(
             meta["prompt_sha256"],
-            "74324996DA7786F6A2BC4E1FDA6C5972E0E3AAC2B2BDB0C1A7887F5AFB268F0A",
+            "3A0F466E77976F5908FE1D15E8529EBB18B43C0C5534767E7E5E0917BBE7AFE1",
         )
         self.assertEqual(meta["preset"], "asmr")
-        self.assertEqual(meta["temperature"], 0.2)
+        self.assertEqual(meta["temperature"], 0.15)
         self.assertEqual(meta["model"], "hymt")
         self.assertTrue(meta["started_at"])
 

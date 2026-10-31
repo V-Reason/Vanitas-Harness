@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 import re
+import warnings
 from collections import Counter
 from collections.abc import Iterable
 from difflib import SequenceMatcher
+from pathlib import Path
 
 from .cleaner import _clip, validate_cue_translation
 
@@ -39,26 +41,53 @@ ENTITY_HONORIFIC_SUFFIXES = (
     "ちゃん", "さん", "くん", "様", "さま", "先生", "先輩", "ちん"
 )
 
-# 噪声停用表：只过滤普通词/拟声词，不是译名词表。
-ENTITY_STOPWORDS = frozenset(
+# 噪声停用表：只过滤普通词/拟声词，不是译名词表。数据在
+# config/filters/entity_stopwords.txt（一行一词，UTF-8 / LF），本模块只负责
+# 加载；缺文件时回落到下面的最小核心集，保证最基本的角色/时间词不被锁成专名。
+STOPWORDS_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "config"
+    / "filters"
+    / "entity_stopwords.txt"
+)
+CORE_STOPWORDS = frozenset(
     {
-        "赤", "客", "お客", "姉", "兄", "皆", "奥", "旦那", "彼", "彼女",
-        "子", "猫", "犬", "店員", "店長", "先生", "先輩", "友達", "家族",
-        "母", "父", "妹", "弟", "おばあ", "おじい", "大丈", "本当", "今日",
-        "明日", "昨日", "自分", "相手", "時間", "場所", "一緒", "最後",
-        "最初", "全部", "全然", "普通", "最近", "今度", "今回", "来週",
-        "先週", "今年", "去年", "毎日", "気持", "気分", "身体", "頭",
-        "チュッ", "チュッチュ", "クチュ", "ジュル", "レロ", "コト", "コツン",
-        "ドキドキ", "ゴクッ", "オイル", "ローション", "テスト", "カフェ",
-        "ホテル", "マッサージ", "ラブラブ",
-        # 本轮真实语料中暴露的普通名词/拟声词；不得因为它们重复出现就锁成专名。
-        "トラック", "セックス", "バイバイ", "バイバーイ", "キャ", "チン",
-        "コショコショ", "ピコ", "カリ", "ヌルヌル", "オノマトペ", "ループ",
-        "ダメ", "エッチ", "キッズ", "イラスト", "ジェル", "マジ", "結構",
-        "恋人", "耳掃除", "美容師", "変態", "サイト", "オススメ",
-        "アイドル", "突然", "お姉", "客", "聞", "マゾ", "アンスリウム",
+        "客", "お客", "先生", "先輩", "友達", "家族",
+        "自分", "本当", "今日", "明日", "一緒", "最後",
     }
 )
+
+
+def load_entity_stopwords(
+    path: Path | None = None,
+) -> frozenset[str]:
+    """读取停用词文件并与核心集合并；缺失只回落，不抛异常。
+
+    停用词是"宁多勿少"的过滤器：读不到时保留核心集比让引擎裸奔安全，
+    但必须告警，否则用户会以为自定义词表已经生效。
+    """
+    target = STOPWORDS_PATH if path is None else Path(path)
+    try:
+        raw = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return CORE_STOPWORDS
+    except OSError as exc:
+        warnings.warn(
+            f"读取实体停用词失败：{target}；{exc.strerror or exc}；"
+            "已回落到最小核心集",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return CORE_STOPWORDS
+    terms = {
+        line.strip()
+        for line in raw.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    return frozenset(CORE_STOPWORDS | terms)
+
+
+ENTITY_STOPWORDS = load_entity_stopwords()
 
 ENTITY_MAX_CLUSTERS = 12
 ENTITY_MAX_VARIANTS = 8

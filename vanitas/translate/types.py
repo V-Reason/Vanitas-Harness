@@ -277,3 +277,5 @@ class TranslationOptions:
     prompt_safety_tokens: int
     temperature: float
     max_split_depth: int
+    enable_server_stop_tokens: bool = True
+    top_p: float = 0.85

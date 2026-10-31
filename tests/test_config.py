@@ -158,6 +158,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.settings.translate.output_ratio, 2.5)
         self.assertEqual(config.settings.translate.prompt_safety_tokens, 64)
         self.assertEqual(config.settings.translate.monitor_lines, 5)
+        self.assertTrue(config.settings.translate.enable_server_stop_tokens)
+        self.assertEqual(config.settings.translate.top_p, 0.85)
         self.assertTrue(config.settings.tools.exec_enabled)
         self.assertTrue(config.settings.tools.exec_require_confirm)
         self.assertFalse(hasattr(config.settings.tools, "exec_whitelist"))
@@ -460,6 +462,13 @@ class ConfigTests(unittest.TestCase):
 
         self.settings["batch"]["default_max_tokens"] = 512
         self.settings["chat"]["temperature"] = 3.0
+        self.write_settings()
+        with clean_env():
+            with self.assertRaises(ConfigError):
+                self.load()
+
+    def test_translate_top_p_is_validated(self) -> None:
+        self.settings["translate"]["top_p"] = 1.5
         self.write_settings()
         with clean_env():
             with self.assertRaises(ConfigError):

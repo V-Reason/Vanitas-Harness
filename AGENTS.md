@@ -128,7 +128,7 @@ Get-ChildItem vanitas -Recurse -Filter *.py | ForEach-Object { python -m py_comp
 Get-ChildItem tests\test_*.py, scripts\*.py | ForEach-Object { python -m py_compile $_.FullName }
 # 1b) 注释门（与语法门同级）：拦取证外泄/幽灵符号/悬空 §锚/复读钉死值
 python scripts\check_comments.py
-# 2) 单测（当前 906 例）
+# 2) 单测（当前 973 例）
 python -m unittest discover -s tests
 python -m unittest tests.test_agent_parser
 python -m unittest tests.test_proactive_defense
@@ -156,7 +156,7 @@ python -m vanitas stop
 跑真机是允许的（§5.1 只禁“手写/改写字幕正文”）；未跑真机时必须注明「未实际验证」，不得把单测通过当成端到端通过。跑真机产生的输出是工具产物，不得再用编辑器修改。
 
 ## 8. Git 规范
-- `main` 始终可用；改动走短生命周期分支，完成后 `--no-ff` 合并并打 annotated tag（当前 `v0.4.1`）。
+- `main` 始终可用；改动走短生命周期分支，完成后 `--no-ff` 合并并打 annotated tag（当前 `v0.4.2`）。
 - Conventional Commits + 中文主题：`feat(cli): …`、`fix(tools): …`、`docs(status): …`、`chore!:`（破坏性）。
 - 一次提交只做一件事；删除与替代文件放同一提交，保证一次 revert 可回退。
 - 回滚优先 `git revert`；禁止改写已推送历史；无远端时也不得滥用 `reset --hard` 丢失现场。
@@ -165,17 +165,19 @@ python -m vanitas stop
 ## 9. 当前边界
 - 默认分工由 `settings.defaults` 配置：Agent=`qwen_coder`、chat=`qwen7b`、translate=`hymt`、batch=`qwen7b`；`serve <id>` 必须显式模型。档位优先级 CLI > 环境变量 > `~/.vanitas/preferences.json` > `default_profile`；`qwen7b` 在 4063，minicpm 为 `role=light`。
 - 翻译预设：`default_preset=subtitle`；`subtitle/prose/asmr` 用 HY-MT2 profile 2（8K Q4），context 分别 12/10/12，chunk 800，ASMR `window_size=6`；`general` 保留 4K Q8 / context 5 / chunk 1500。显式 `--model`/`--profile` 优先；档位不一致时 `translate` 自动停旧启新。ASMR 可选 `lookahead_cues`（0–4，默认 0），真机 A/B 未通过，不默认开启（历史见 变更历史 §41、§51）。
-- 提示词：`system_default` 全静态；`task_chat/task_code/task_agent/task_translate_asmr` 用 XML，`task_translate`/`agent_continue` 保持紧凑纯文本；仅 6 个占位符。当前 ASMR 生产模板为 **V5：13,108 B / `74324996…`**，分节为 `<language_and_voice>`/`<sensory_immersion>`/`<asmr_domain_lexicon>`/`<asr_repair_protocol>`/`<sfx_and_staging_rules>`/`<counting_and_io_guardrails>`/`<contrastive_examples>`/`<io_contract>`；V5 针对四类根因（示例专名渗漏、表外拟声音译、拟声同质化、无源加戏）改文案，实测与残留见 变更历史 §54，V4 的覆盖损失见 §52；`[#序号]` IO、报数、主客方向、拟声禁假名、占位符与 8 条红黑对照全部保留，斜杠/假名仍有 `validate_cue_translation` 与 `salvage_slash_translation` 兜底。`task_agent` 的批量是逐项执行而非事务，`patch_file` 只要求唯一片段，不提供 `_reason`。
-- 翻译上下文：`TranslationEngine._history` 是文档级状态，CLI 在每个输入文件前 `reset_history()`，多文件不得继承上一文件的标题、摘要或人名。ASMR 合流构建文档级 `DynamicEntityEngine`：只以敬称名、`という名`/`役` 明确姓名和共同前缀汉字姓名为种子；裸片假名/拟声词/普通名词不建实体，停用表拦截 `トラック`/`セックス`/`バイバイ`/`コショコショ` 等。`capture_translations` 只保存洁净示例，`_extract_locked_name` 只锁高置信裸名，`enforce_locks` 只清未翻译日文专名并用单遍正则交替 + 哨兵遮蔽防止「梅地先生先生」级联。
+- 提示词：`system_default` 全静态；`task_chat/task_code/task_agent/task_translate_asmr` 用 XML，`task_translate`/`agent_continue` 保持紧凑纯文本；仅 6 个占位符。当前 ASMR 生产模板为 **V6：14,363 B / `3A0F466E…`**，分节为 `<language_and_voice>`/`<sensory_immersion>`/`<asmr_domain_lexicon>`/`<asr_repair_protocol>`/`<sfx_and_staging_rules>`/`<counting_and_io_guardrails>`/`<contrastive_examples>`/`<io_contract>`；V6 移除全部示例人名（茜音/あかね/日和/ひより/雫），新增「もう〜ない」「〜じゃない」句法断路器、生理互斥与生活词保真、动作括号红线，并修正拟声表（`こっしょ→轻挠` 等）；V5 的四类根因与实测见 变更历史 §54，V6 的精进与残留见 §61；`[#序号]` IO、报数、主客方向、拟声禁假名、占位符与 8 条红黑对照全部保留，斜杠/假名仍有 `validate_cue_translation` 与 `salvage_slash_translation` 兜底。`task_agent` 的批量是逐项执行而非事务，`patch_file` 只要求唯一片段，不提供 `_reason`。
+- 翻译上下文：`TranslationEngine._history` 是文档级状态，CLI 在每个输入文件前 `reset_history()`，多文件不得继承上一文件的标题、摘要或人名。ASMR 合流构建文档级 `DynamicEntityEngine`：只以敬称名、`という名`/`役` 明确姓名和共同前缀汉字姓名为种子；裸片假名/拟声词/普通名词不建实体，停用表在 `config/filters/entity_stopwords.txt`（缺文件回落核心集），拦截 `トラック`/`セックス`/`バイバイ`/`コショコショ` 等。`capture_translations` 只保存洁净示例，`_extract_locked_name` 只锁高置信裸名，`enforce_locks` 只清未翻译日文专名并用单遍正则交替 + 哨兵遮蔽防止「梅地先生先生」级联。
+- 数据驱动规则：器官错位、第一人称归属、提示词示例专名渗漏、和制词、坏拟声、生理互斥六类**样本级**规则全部在 `config/glossary/rules.tsv`（`organ_guard`/`context_sub`/`leak_guard`/`wasei_clean`/`sfx_repair`/`anatomy_guard`），守卫条件用负向前瞻写进数据；`quality.apply_context_rules` 只实现通用策略，代码里不出现具体日文样本；`enforce_gender_anatomy_invariant` 是 `anatomy_guard` 的薄包装。T1 重译被拒/失败后由 `salvage_t1_rejection` 做确定性兜底（删渗漏专名、消解道具、短句复制降级），不再保留已识别的坏译。坏行/坏正则/未知类型一律带 `文件:行号` 抛 `TranslateError`。
 - 窗口协议：`sanitize_translation_output` 只清围栏/外层引号/重复句号/开头标点，不再删 `[#N]`；编号由 cue 边界清理。`validate_cue_translation` 拒绝空行、假名、`SEXPAR`/`Track`、中日文斜杠与乱码替换符，批次失败整窗回退，单句失败按「原因回灌重译一次 → 填回候选 → 无候选才留原文」三级兜底。`align_window_response` 判三态，`identify_suspicious_cues` 逐 cue 定位（正文残留 `[#N]`、空译、超短、跨窗复制、同窗同译成对），只重译损坏项；结构灾难或损坏项 ≥ 半数才整窗熔断，禁止对 1..M 残缺前缀做位置猜测（历史见 变更历史 §45）。
-- T1 确定性守卫：`ASMR_T1_CODES` 闭集 5 个——`short_duplicate`/`address_term`/`invented_tool`/`invented_name`/`under_translation`，只在 `asmr_guard=True` 时参与，只报 issue，由 `audit_retry()` 每 cue 最多一次定点重译；CLI 在 `prompts.is_asmr_task()` 时自动启用，没有 `--no-t1`。预算 `T1Budget.for_corpus=max(5, round(cues×1%))`、`begin_file.per_file=max(2, ceil(file_cues×1%))`；事件 `t1_events.jsonl`/`t1_budget.json` 与 `translation_meta.json` 写到 `~/.vanitas/translate/<stamp>/`。`invented_name` 只登记提示词示例专名，`under_translation` 只判「源文 ≥10 字、译文 ≤2 字」，刻意不做比例判定（历史见 变更历史 §42、§53）。
-- QC：`scripts\qc_srt.py` 是薄 CLI，判定在 `vanitas\qc.py`；severity 三档 `block`/`review`/`info`（5/18/3 共 26 个 code），`block` 必重跑、`review` 人工看、`info` 不进退出码。语义 review 里 `organ_mismatch`（源文只有耳词却写成小穴）与 `pronoun_mixed`（同文件 您/你 各 ≥2 条且切换 ≥3 次，锚定首个切换条）是 §57 新增；`staging` 的 QC 口径比生产端宽——生产 `cleaner` 只删「耳边/轻抚」白名单，避免误删「（笑）」。标定集与 P/R 口径见 变更历史 §57。
-- 环境与续传：`translate --env production|experimental`，默认 production；experimental 仅覆盖 ASMR，其它 preset 直接 `ConfigError`、不 fallback；T1/glossary/join_rules 两环境一致。生产路径走 `stream_chat` SSE + `StreamingAbortDetector`，窗口批次异常降级逐句；SRT 按窗口写 `<输出>.part.srt`，`--resume` 只按 `(序号, 时间轴)` 校验，源文改字但时间轴不变时会套旧译文（已知限制）。`critique_budget` 两阶段复审默认关闭，CLI 未接开关（历史见 变更历史 §46–§49）。
+- 服务端物理截断：调度层按窗口内**最大编号 + 1** 生成 `stop`（`[#N]`、`#N]`、`【#N】`、连续空行），由 llama-server 在解码层停机；`enable_server_stop_tokens`（默认 `true`）可一键回退。客户端 `StreamingAbortDetector` 同步改用“下一个期望编号”，越界编号只做**软停机**（截掉尾巴、保留已产出前缀），空行洪水/短语死锁/字符失控才抛 `OutputTruncated` 整窗回退。客户端方法不支持 `stop` 时自动跳过，兼容只有 `chat()` 的鸭子类型替身。
+- T1 确定性守卫：`ASMR_T1_CODES` 闭集 5 个——`short_duplicate`/`address_term`/`invented_tool`/`invented_name`/`under_translation`，只在 `asmr_guard=True` 时参与，只报 issue，由 `audit_retry()` 每 cue 最多一次定点重译；CLI 在 `prompts.is_asmr_task()` 时自动启用，没有 `--no-t1`。预算 `T1Budget.for_corpus=max(5, round(cues×1%))`、`begin_file.per_file=max(2, ceil(file_cues×1%))`；事件 `t1_events.jsonl`/`t1_budget.json` 与 `translation_meta.json` 写到 `~/.vanitas/translate/<stamp>/`。`invented_name` 只认 `config/glossary/rules.tsv` 的 `leak_guard` 行（提示词示例专名），`under_translation` 只判「源文 ≥10 字、译文 ≤2 字」，刻意不做比例判定（历史见 变更历史 §42、§53）。
+- QC：`scripts\qc_srt.py` 是薄 CLI，判定在 `vanitas\qc.py`；severity 三档 `block`/`review`/`info`（5/18/3 共 26 个 code），`block` 必重跑、`review` 人工看、`info` 不进退出码。语义 review 里 `organ_mismatch`（源文只有耳词却写成小穴）与 `pronoun_mixed`（同文件 您/你 各 ≥2 条且切换 ≥3 次，锚定首个切换条）是 §57 新增；`staging` 的 QC 口径：生产 `cleaner` 只删「耳边/轻抚」白名单；QC 把情绪/语音标注（笑、叹气、低语等）记 `info`，动作/音效括号仍 `review`，同一 cue 两种并存时按动作括号报。标定集与 P/R 口径见 变更历史 §57。
+- 环境与续传：`translate --env production|experimental`，默认 production；experimental 仅覆盖 ASMR，其它 preset 直接 `ConfigError`、不 fallback；T1/glossary/join_rules 两环境一致。生产路径走 `stream_chat` SSE + `StreamingAbortDetector`，窗口批次异常降级逐句；SRT 按窗口写 `<输出>.part.srt`，`--resume` 只按 `(序号, 时间轴)` 校验，源文改字但时间轴不变时会套旧译文（已知限制）。P3 复审已退役：`critique_budget` 参数仅为兼容保留，运行时不发复审请求，`critique_events` 恒为空（历史见 变更历史 §46–§49、§60）。
 - CLI 相对路径（`translate` 输入/`--out-dir`、`batch` JSONL、`--system`、`--config-dir`）统一按 `VANITAS_ORIG_CWD` 解析；`vanitas.bat` 切仓库根不影响启动目录语义。`--jobs>1` 只并行解析，请求始终串行。
 - Agent 工具：`read_file`/`read_file_range`/`grep_workspace`/`patch_file`/`write_file`/`move_file`/`delete_path`（`delete_file` 兼容）/`list_dir`/`run_shell_ro` 全部过 `_require_path` 与 `is_inside_workspace`；`patch_file` 需确认，两个只读查询自动放行。批量逐项执行，失败不回滚已成功项，不是事务。重命名/改扩展名只允许 `move_file(src,dst)`。
 - 审批与停滞：单动作与只读数组自动执行；`write_file/patch_file/delete_file/delete_path/move_file` 必须确认，含修改的数组统一清单并只弹一次 `[y/N]`；`/exec` 仍手动逐次确认。停滞熔断覆盖连续、A-B 乒乓、A-B-C 周期、6 步内同签名 ≥3 次与批次级重复/乒乓；失败签名本轮内持久保留，同参数再提交不二次确认、直接回填错误。沙盒根是原 CWD，步数由 `settings.agent.max_steps` 控制（默认 10）。路径约束是参数级防御，不是 OS 隔离。
-- 可配扩展：`settings.defaults`、`agent.max_parse_retries/stagnation_limit/feedback_head_lines/feedback_tail_lines`、`tools.max_capture_bytes`、`repl.ctx_warn_pct/ctx_danger_pct/status_bar_width`；默认值保持 2/3/20/40、512 KiB、60/80/20。`exec_whitelist` 已退役，配置出现未知字段会触发 `ConfigError`。
-- 未验证边界：并发（`-np 1`）、长上下文质量、持续压测、真实 TTY、`--foreground`、`.txt` 真机翻译、5xx 重试路径、1000+ 句 ASMR 长音频、真实删除/`max_steps` 耗尽提示均未验收；不得把单测通过写成端到端通过。完整清单见 [docs/项目现状.md](docs/项目现状.md) 的「未验证边界」。
+- 可配扩展：`settings.defaults`、`agent.max_parse_retries/stagnation_limit/feedback_head_lines/feedback_tail_lines`、`tools.max_capture_bytes`、`translate.temperature/top_p`、`repl.ctx_warn_pct/ctx_danger_pct/status_bar_width`；默认值保持 2/3/20/40、512 KiB、0.15/0.85、60/80/20。`exec_whitelist` 已退役，配置出现未知字段会触发 `ConfigError`。
+- 未验证边界：并发（`-np 1`）、长上下文质量、持续压测、真实 TTY、`--foreground`、`.txt` 真机翻译、5xx 重试路径、1000+ 句 ASMR 长音频、服务端 `stop`/`top_p` 在真机上的接受与截断时机、真实删除/`max_steps` 耗尽提示均未验收；不得把单测通过写成端到端通过。完整清单见 [docs/项目现状.md](docs/项目现状.md) 的「未验证边界」。
 
 ## 10. 接手自检
 1. 是否读透了 `docs\总设计方案.md` 与当前源码？

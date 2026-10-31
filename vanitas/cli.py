@@ -1086,6 +1086,8 @@ def _translate_chat(
         max_split_depth=settings.max_split_depth,
         on_stat=on_stat,
         task_template=task_template,
+        enable_server_stop_tokens=settings.enable_server_stop_tokens,
+        top_p=settings.top_p,
     )
     return chat, port
 

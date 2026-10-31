@@ -139,10 +139,12 @@ TRANSLATE_FIELDS = frozenset(
         "prompt_safety_tokens",
         "monitor_lines",
         "temperature",
+        "top_p",
         "max_split_depth",
         "default_preset",
         "environment",
         "strip_trailing_periods",
+        "enable_server_stop_tokens",
         "presets",
     }
 )
@@ -445,11 +447,13 @@ class TranslateSettings:
     output_ratio: float = 2.5
     prompt_safety_tokens: int = 64
     monitor_lines: int = 5
-    temperature: float = 0.2
+    temperature: float = 0.15
+    top_p: float = 0.85
     max_split_depth: int = 3
     default_preset: str = "general"
     environment: str = "production"
     strip_trailing_periods: bool = True
+    enable_server_stop_tokens: bool = True
     presets: dict = field(default_factory=dict)
 
 

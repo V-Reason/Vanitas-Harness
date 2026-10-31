@@ -22,6 +22,8 @@ class LlamaClient(EngineClient):
         temperature: float,
         timeout: float | None = None,
         on_progress: Callable[[dict], None] | None = None,
+        stop: list[str] | None = None,
+        top_p: float | None = None,
     ) -> Iterator[dict]:
         return self.chat_stream(
             messages,
@@ -29,6 +31,8 @@ class LlamaClient(EngineClient):
             temperature=temperature,
             timeout=timeout,
             on_progress=on_progress,
+            stop=stop,
+            top_p=top_p,
         )
 
     def stream_completion(

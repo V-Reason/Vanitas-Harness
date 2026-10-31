@@ -2638,7 +2638,7 @@ class QualityGuardTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertEqual(
             self.block_texts(output),
-            [self.T1_TRANSLATION, self.T1_TRANSLATION],
+            [self.T1_TRANSLATION, "……"],
         )
         self.assertTrue(
             any("候选未通过" in str(item.message) for item in caught)
@@ -2660,7 +2660,7 @@ class QualityGuardTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertEqual(
             self.block_texts(output),
-            [self.T1_TRANSLATION, self.T1_TRANSLATION],
+            [self.T1_TRANSLATION, "……"],
         )
         self.assertTrue(any("重译失败" in str(item.message) for item in caught))
 
@@ -2749,7 +2749,7 @@ class QualityGuardTests(unittest.TestCase):
         self.assertEqual(budget.total, 5)
         self.assertEqual(
             blocks[0],
-            [self.T1_TRANSLATION, "第二句", "第三句", self.T1_TRANSLATION],
+            [self.T1_TRANSLATION, "第二句", "第三句", "……"],
         )
         self.assertEqual(blocks[1], [self.T1_TRANSLATION, "第二文件"])
         self.assertEqual(
@@ -2758,7 +2758,7 @@ class QualityGuardTests(unittest.TestCase):
                 self.T1_TRANSLATION,
                 "第三文件",
                 "第三文件二",
-                self.T1_TRANSLATION,
+                "……",
             ],
         )
         self.assertTrue(all(outcome.failures == [] for outcome in outcomes))
@@ -2963,7 +2963,7 @@ class QualityGuardTests(unittest.TestCase):
         self.assertEqual(len(budget_events), 1)
         self.assertEqual(budget_events[0].detail, "total")
         self.assertEqual(budget_events[0].code, "short_duplicate")
-        self.assertEqual(self.block_texts(output)[-1], self.T1_TRANSLATION)
+        self.assertEqual(self.block_texts(output)[-1], "……")
 
     def test_short_duplicate_cross_code_candidate_rejected(self) -> None:
         # short_duplicate 重译若引入 invented_tool，candidate_ok 必须拒绝，
@@ -2983,7 +2983,7 @@ class QualityGuardTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertEqual(
             self.block_texts(output),
-            [self.T1_TRANSLATION, self.T1_TRANSLATION],
+            [self.T1_TRANSLATION, "……"],
         )
         self.assertTrue(
             any("候选未通过" in str(item.message) for item in caught)
@@ -3250,7 +3250,7 @@ class QualityGuardTests(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertEqual(self.block_texts(output), ["那我们开始吧"])
 
-    def test_invented_name_persistent_violation_keeps_original(self) -> None:
+    def test_invented_name_persistent_violation_is_salvaged(self) -> None:
         client = ScriptedTranslationClient(
             ["茜音，我们先开始吧", "茜音，我们先开始吧"]
         )
@@ -3261,7 +3261,7 @@ class QualityGuardTests(unittest.TestCase):
             )
         self.assertEqual(len(client.calls), 2)
         self.assertEqual(failures, [])
-        self.assertEqual(self.block_texts(output), ["茜音，我们先开始吧"])
+        self.assertEqual(self.block_texts(output), ["我们先开始吧"])
         self.assertTrue(
             any("候选未通过" in str(item.message) for item in caught)
         )
