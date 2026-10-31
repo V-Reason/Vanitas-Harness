@@ -64,3 +64,5 @@ vanitas.bat stop
 | 查文档为何这样设计 | [docs/变更历史.md](docs/变更历史.md) 对应 §n |
 
 配置驱动与红线：新增模型只允许在 `config/models.json` 追加条目；单实例、端口 4060–4063、退出码 `0/1/2/3/4/5`；`bin/`、`models/` 只读；禁止 `git clean -fdx`。完整约束见 [AGENTS.md](AGENTS.md) 与 [总设计方案](docs/总设计方案.md)。
+
+生产纪律：**生产运行（`translate`/`serve`/`stop`）与任何产物目录只由项目所有者手动执行**，Agent 只读验收、只改代码/测试/文档。细则见 [AGENTS.md §5.1](AGENTS.md)，历史见 [变更历史 §58](docs/变更历史.md)。
