@@ -85,6 +85,26 @@ vanitas\
 | 项目白名单 | `python verify.py` 只允许在 `settings.tools.project_prefixes` 中出现；不得回填到 `readonly_shell_prefixes` 的通用默认值 |
 | Agent FSM 契约 | `AgentLoop.run` 的钩子参数、`AgentLoop.__init__` 的关键字参数、`AgentLoop` 对外可读写属性（`_recent` / `_rounds` / `_failed_signatures` / `_stagnation_reason` / `steps` / `parse_retries` / `stagnation_hits`）为跨批次契约，改动需在新批次任务书内显式声明 |
 | 配置字段校验 | `settings.json` 出现未知字段（含 `exec_whitelist`）会触发 `ConfigError`；添加新字段必须同步更新 `vanitas/config/schema.py::*_FIELDS` 与 `vanitas/config/loader.py::_load_*` |
+| 生产运行 | `translate`/`serve`/`stop` 与任何产出（含“修正版/补丁版”目录）只能由项目所有者手动执行；Agent 只读验收，细则见 §5.1 |
+
+### 5.1 生产纪律：人跑生产，Agent 只改代码
+
+**一句话**：`translate` / `serve` / `stop` 一律不由 Agent 执行；生产语料与产出目录对 Agent 只读。
+
+**为什么**：生产是项目的验收面。如果 Agent 一边改规则一边顺手重跑、顺手改产物，“代码变好了”和“我把产物修好了”就混在一起，评测与结论不再独立，开发会退化成生产运维，这个项目也就失去意义。
+
+| 动作 | Agent | 说明 |
+| :--- | :--- | :--- |
+| 读生产产出、`~/.vanitas/translate/*`、QC 报告 | ✅ 允许 | 只读验收是本职；QC 是只读判定 |
+| `python -m vanitas translate …`（任何语料，含 `fixtures`） | ❌ 禁止 | 由所有者手动执行；Agent 只准备命令 |
+| `serve` / `stop` / 重启 `llama-server` | ❌ 禁止 | 会打断生产；档位与显存由所有者决定 |
+| 在 `<PRIVATE_CORPUS>` / `<PRIVATE_RESULTS>` / 交付目录下新建任何产出 | ❌ 禁止 | 包括“修正版/补丁版”目录；产物只能由所有者生成 |
+| 改 `config/`、`vanitas/`、`tests/`、`docs/` | ✅ 允许 | 这才是 Agent 的交付面 |
+| 跑离线单测、`bench_qc`、`check_comments` | ✅ 允许 | 不连模型、不写生产 |
+
+**需要真机验证时**：Agent 给出完整命令与预期结果，所有者执行后把输出贴回；Agent 在结论里标注「未实际验证」，不得把单测通过写成端到端通过，也不得替所有者补跑。
+
+**边界说明**：只读地跑 QC 与读日志不算“参与生产”（不改产物、不连模型）；一旦要“生成/重写/覆盖任何 SRT”，就跨线了。
 
 ## 6. 文档职责
 | 文件 | 单一职责 | 更新时机 |
@@ -106,7 +126,7 @@ Get-ChildItem vanitas -Recurse -Filter *.py | ForEach-Object { python -m py_comp
 Get-ChildItem tests\test_*.py, scripts\*.py | ForEach-Object { python -m py_compile $_.FullName }
 # 1b) 注释门（与语法门同级）：拦取证外泄/幽灵符号/悬空 §锚/复读钉死值
 python scripts\check_comments.py
-# 2) 单测（当前 905 例）
+# 2) 单测（当前 906 例）
 python -m unittest discover -s tests
 python -m unittest tests.test_agent_parser
 python -m unittest tests.test_proactive_defense
@@ -124,14 +144,14 @@ Select-String -Path $src -Pattern '\[GUARD-'                              # 期�
 Select-String -Path $src -Pattern '\[(SERVE|LAUNCH|META|HINT|ERROR|STATUS|STOP)\]'  # 期望空：旧 CLI 标签已移除
 Select-String -Path *.bat -Pattern 'llama-server'                                  # 期望空
 git ls-files | Select-String -Pattern '^(bin/|models/|tests/reports/)|\.log$'      # 期望空
-# 4) 真实冒烟（至少一次）
+# 4) 真实冒烟（由项目所有者执行；Agent 只准备命令，见 §5.1）
 python -m vanitas serve qwen_coder                              # 4060
 python tests\multi_model_benchmark.py --port 4060 --suite agent --runs 1
 python -m vanitas serve hymt --profile 2                        # 4062，翻译冒烟
 python -m vanitas translate "tests\fixtures\sample_asmr.srt" --preset asmr --out-dir "%TEMP%\smoke"
 python -m vanitas stop
 ```
-未跑真机时必须注明「未实际验证」，不得把单测通过当成端到端通过。
+第 4 步归所有者：Agent 不执行 `serve`/`stop`/`translate`，只把命令与预期结果写清。Agent 报告的结论若未经所有者回贴真机输出，一律标注「未实际验证」，不得把单测通过当成端到端通过。
 
 ## 8. Git 规范
 - `main` 始终可用；改动走短生命周期分支，完成后 `--no-ff` 合并并打 annotated tag（当前 `v0.4.1`）。
@@ -163,3 +183,4 @@ python -m vanitas stop
 5. 是否引入了不必要的抽象或依赖？
 6. 验证门禁是否全部执行并给出结果？
 7. 文档与版本号是否已同步？
+8. 本轮是否越界碰了生产（跑 `translate`/`serve`/`stop`、写产物目录）？越界即停，交接给所有者（§5.1）。

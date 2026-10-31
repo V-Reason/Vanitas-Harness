@@ -68,6 +68,21 @@ class DocsContractTests(unittest.TestCase):
         ]
         self.assertEqual(dated, [], "AGENTS 中出现了日期型批次标题")
 
+    def test_production_discipline_is_pinned(self) -> None:
+        """生产纪律必须留在 AGENTS 正文明里，且 §7 的门禁第 4 步归所有者。
+
+        这一条是纪律的机器护栏：删掉/软化 §5.1 或把真实冒烟写回“Agent 执行”
+        都会红，防止下一次“顺手重跑一遍”又被当成正常流程。
+        """
+        agents = AGENTS.read_text(encoding="utf-8")
+        self.assertIn("### 5.1 生产纪律", agents)
+        for phrase in ("`translate` / `serve` / `stop`", "由所有者手动执行", "只读验收"):
+            self.assertIn(phrase, agents)
+        self.assertIn("真实冒烟（由项目所有者执行", agents)
+        self.assertNotIn("# 4) 真实冒烟（至少一次）", agents)
+        status = STATUS.read_text(encoding="utf-8")
+        self.assertIn("生产纪律", status)
+
 
 if __name__ == "__main__":
     unittest.main()
