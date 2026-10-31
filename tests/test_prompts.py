@@ -50,8 +50,9 @@ class PromptTests(unittest.TestCase):
         experimental = (
             self.prompt_dir / "task_translate_asmr_experimental.md"
         ).read_bytes()
-        # V5（12,427 B / A5E05880 -> 13,108 B / 74324996）：只在 R1–R4 四条根因上
-        # 增删文案，八条 IO/报数/主客/拟声契约与示例专名照旧（见 docs §54）。
+        # 字节锁：模板一改就红，迫使改的人同时更新本断言与 docs/项目现状.md 的
+        # 契约速查表（那里的指纹由 tests/test_docs_contract.py 再对一次）。
+        # 当前版本与 A/B 记录见 docs/变更历史.md §54。
         self.assertEqual(len(production), 13108)
         self.assertEqual(
             hashlib.sha256(production).hexdigest().upper(),
@@ -146,7 +147,8 @@ class PromptTests(unittest.TestCase):
         #   1) 「默认使用简体中文 / 避免繁体」——V4 未再约束书写系统；
         #   2) 「专名全篇复用」——只剩「茜音必须译为茜音」这类单名约束；
         #   3) 「任何位置不得出现 [#N]」——并入 io 分节的「译文正文内绝对严禁残留」。
-        # 前两条若仍要保证，应加回提示词或由确定性后处理兜底（TODO，未实现）。
+        # 前两条若仍要保证，应加回提示词或由确定性后处理兜底（未实现，
+        # 覆盖损失清单见 docs/变更历史.md §52）。
         for phrase in (
             "<language_and_voice>",
             "彻底驱逐央视书面腔",
@@ -207,7 +209,8 @@ class PromptTests(unittest.TestCase):
         # V4 精简时删掉了「普通片假名词不是专名」「コショコショ」「斜杠并列」三条文案。
         # 行为侧仍有确定性兜底：假名/SEXPRA 由 validate_cue_translation 拦截、
         # 中日文斜杠由 salvage_slash_translation 收敛（各有单测）。
-        # 「普通片假名不是专名」这条**没有兜底**，只靠 lexicon 的逐词映射（TODO）。
+        # 「普通片假名不是专名」这条**没有兜底**，只靠 lexicon 的逐词映射
+        # （V5 已补表外拟声兜底，仍未覆盖“片假名当专名”这一类，见 §52）。
         for phrase in (
             "SEXPAR",        # 严禁音译为 SEXPAR
             "Track",         # トラック / Track → 音轨 / 曲目
