@@ -68,20 +68,25 @@ class DocsContractTests(unittest.TestCase):
         ]
         self.assertEqual(dated, [], "AGENTS 中出现了日期型批次标题")
 
-    def test_production_discipline_is_pinned(self) -> None:
-        """生产纪律必须留在 AGENTS 正文明里，且 §7 的门禁第 4 步归所有者。
+    def test_subtitle_discipline_is_pinned(self) -> None:
+        """字幕纪律必须留在 AGENTS 正文里：Agent 可跑工具，但不得代笔。
 
-        这一条是纪律的机器护栏：删掉/软化 §5.1 或把真实冒烟写回“Agent 执行”
-        都会红，防止下一次“顺手重跑一遍”又被当成正常流程。
+        这一条是纪律的机器护栏：删掉/软化 §5.1、把“可跑 translate”改回禁止、
+        或把“不得手写正文”删掉，都会红，防止下一次又用编辑器顺手改几句却
+        被当成正常流程。
         """
         agents = AGENTS.read_text(encoding="utf-8")
-        self.assertIn("### 5.1 生产纪律", agents)
-        for phrase in ("`translate` / `serve` / `stop`", "由所有者手动执行", "只读验收"):
+        self.assertIn("### 5.1 字幕正文只由工具/模型产出", agents)
+        for phrase in (
+            "不得手写或改写任何 SRT 正文",
+            "跑 `translate` / `serve` / `stop`",
+            "唯一例外",
+        ):
             self.assertIn(phrase, agents)
-        self.assertIn("真实冒烟（由项目所有者执行", agents)
-        self.assertNotIn("# 4) 真实冒烟（至少一次）", agents)
+        # 跑真机是允许的：门禁第 4 步不能把 Agent 排除在外。
+        self.assertIn("真实冒烟（至少一次；Agent 可以执行", agents)
         status = STATUS.read_text(encoding="utf-8")
-        self.assertIn("生产纪律", status)
+        self.assertIn("字幕正文纪律", status)
 
 
 if __name__ == "__main__":

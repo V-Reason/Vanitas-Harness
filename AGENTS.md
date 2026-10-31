@@ -85,26 +85,28 @@ vanitas\
 | 项目白名单 | `python verify.py` 只允许在 `settings.tools.project_prefixes` 中出现；不得回填到 `readonly_shell_prefixes` 的通用默认值 |
 | Agent FSM 契约 | `AgentLoop.run` 的钩子参数、`AgentLoop.__init__` 的关键字参数、`AgentLoop` 对外可读写属性（`_recent` / `_rounds` / `_failed_signatures` / `_stagnation_reason` / `steps` / `parse_retries` / `stagnation_hits`）为跨批次契约，改动需在新批次任务书内显式声明 |
 | 配置字段校验 | `settings.json` 出现未知字段（含 `exec_whitelist`）会触发 `ConfigError`；添加新字段必须同步更新 `vanitas/config/schema.py::*_FIELDS` 与 `vanitas/config/loader.py::_load_*` |
-| 生产运行 | `translate`/`serve`/`stop` 与任何产出（含“修正版/补丁版”目录）只能由项目所有者手动执行；Agent 只读验收，细则见 §5.1 |
+| 字幕正文 | Agent **不得手写或改写任何 SRT 正文**（源文、译文、补丁版都算）；跑 `translate`/`serve`/`stop` 与只读验收是允许的，细则见 §5.1 |
 
-### 5.1 生产纪律：人跑生产，Agent 只改代码
+### 5.1 字幕正文只由工具/模型产出，Agent 不代笔
 
-**一句话**：`translate` / `serve` / `stop` 一律不由 Agent 执行；生产语料与产出目录对 Agent 只读。
+**一句话**：可以跑 `translate` / `serve` / `stop`，也可以只读验收；但**不许手写或改写任何字幕正文**——源文、译文、“修正版/补丁版”都算。
 
-**为什么**：生产是项目的验收面。如果 Agent 一边改规则一边顺手重跑、顺手改产物，“代码变好了”和“我把产物修好了”就混在一起，评测与结论不再独立，开发会退化成生产运维，这个项目也就失去意义。
+**为什么**：这个项目的产出价值在于“提示词 + 确定性后处理 + 模型”整体能不能出可用字幕。一旦 Agent 顺手改几句、润色一遍，被评测的就不再是系统而是 Agent 的中文水平，问题被人工润色掩盖，改代码的方向也随之失去依据——开发会被带偏，甚至变得毫无意义。
 
 | 动作 | Agent | 说明 |
 | :--- | :--- | :--- |
-| 读生产产出、`~/.vanitas/translate/*`、QC 报告 | ✅ 允许 | 只读验收是本职；QC 是只读判定 |
-| `python -m vanitas translate …`（任何语料，含 `fixtures`） | ❌ 禁止 | 由所有者手动执行；Agent 只准备命令 |
-| `serve` / `stop` / 重启 `llama-server` | ❌ 禁止 | 会打断生产；档位与显存由所有者决定 |
-| 在 `<PRIVATE_CORPUS>` / `<PRIVATE_RESULTS>` / 交付目录下新建任何产出 | ❌ 禁止 | 包括“修正版/补丁版”目录；产物只能由所有者生成 |
-| 改 `config/`、`vanitas/`、`tests/`、`docs/` | ✅ 允许 | 这才是 Agent 的交付面 |
-| 跑离线单测、`bench_qc`、`check_comments` | ✅ 允许 | 不连模型、不写生产 |
+| 跑 `translate` / `serve` / `stop`（含生产语料）、切档位 | ✅ 允许 | 这是使用工具，不是替它写结果；命令与耗时如实记录 |
+| 读源文/译文/日志/`~/.vanitas/translate/*`、只读跑 QC 与标定台 | ✅ 允许 | 只读验收是本职 |
+| 手写或改写 SRT 正文：润色句子、补译、改错字、换成自己写的译法 | ❌ 禁止 | 等于把“模型的产出”换成“Agent 的产出” |
+| 生成“修正版/补丁版”译文目录 | ❌ 禁止 | 同上，整份替换更是把评测面换掉 |
+| 改 `<PRIVATE_CORPUS>` 等源语料正文 | ❌ 禁止 | 源文是输入事实，不是可编辑中间产物 |
+| 改代码 / 提示词 / 术语表 / 测试 / 文档，再跑 `translate` 看新产出 | ✅ 允许 | **唯一正确的解法**：把问题落成规则，让模型自己产出更好的结果 |
 
-**需要真机验证时**：Agent 给出完整命令与预期结果，所有者执行后把输出贴回；Agent 在结论里标注「未实际验证」，不得把单测通过写成端到端通过，也不得替所有者补跑。
+**发现译文有错时的标准动作**：定位到责任层（提示词 / 术语表 / 后处理 / 审计规则）→ 改那一层并加测试 → 重跑 `translate` 由模型产出新版本 → 只读比对。**不要打开 SRT 编辑器。**
 
-**边界说明**：只读地跑 QC 与读日志不算“参与生产”（不改产物、不连模型）；一旦要“生成/重写/覆盖任何 SRT”，就跨线了。
+**唯一例外**：用户逐条明确点名“就改这几句”时，只能改点名的那几句，并必须在回复里标注「人工改写，不计入产能」；不得借机批量润色，也不得因此生成整份补丁目录。
+
+**边界说明**：跑 `translate` 会把结果写进输出目录，这是工具的正当行为，不算“改字幕正文”；边界在于**谁写了这些字**——模型写的允许，Agent 手写的禁止。
 
 ## 6. 文档职责
 | 文件 | 单一职责 | 更新时机 |
@@ -144,14 +146,14 @@ Select-String -Path $src -Pattern '\[GUARD-'                              # 期�
 Select-String -Path $src -Pattern '\[(SERVE|LAUNCH|META|HINT|ERROR|STATUS|STOP)\]'  # 期望空：旧 CLI 标签已移除
 Select-String -Path *.bat -Pattern 'llama-server'                                  # 期望空
 git ls-files | Select-String -Pattern '^(bin/|models/|tests/reports/)|\.log$'      # 期望空
-# 4) 真实冒烟（由项目所有者执行；Agent 只准备命令，见 §5.1）
+# 4) 真实冒烟（至少一次；Agent 可以执行 translate/serve/stop）
 python -m vanitas serve qwen_coder                              # 4060
 python tests\multi_model_benchmark.py --port 4060 --suite agent --runs 1
 python -m vanitas serve hymt --profile 2                        # 4062，翻译冒烟
 python -m vanitas translate "tests\fixtures\sample_asmr.srt" --preset asmr --out-dir "%TEMP%\smoke"
 python -m vanitas stop
 ```
-第 4 步归所有者：Agent 不执行 `serve`/`stop`/`translate`，只把命令与预期结果写清。Agent 报告的结论若未经所有者回贴真机输出，一律标注「未实际验证」，不得把单测通过当成端到端通过。
+跑真机是允许的（§5.1 只禁“手写/改写字幕正文”）；未跑真机时必须注明「未实际验证」，不得把单测通过当成端到端通过。跑真机产生的输出是工具产物，不得再用编辑器修改。
 
 ## 8. Git 规范
 - `main` 始终可用；改动走短生命周期分支，完成后 `--no-ff` 合并并打 annotated tag（当前 `v0.4.1`）。
@@ -183,4 +185,4 @@ python -m vanitas stop
 5. 是否引入了不必要的抽象或依赖？
 6. 验证门禁是否全部执行并给出结果？
 7. 文档与版本号是否已同步？
-8. 本轮是否越界碰了生产（跑 `translate`/`serve`/`stop`、写产物目录）？越界即停，交接给所有者（§5.1）。
+8. 本轮是否手写或改写过任何字幕正文（润色、补译、补丁版目录）？改了就不是 Agent 的产出（§5.1）。
