@@ -170,7 +170,7 @@ class QcResidueTests(unittest.TestCase):
                     srt("こんにちは"), srt(f"{form} 你好")
                 )
                 codes = {item.code for item in result.errors}
-                self.assertIn("window_id", codes, form)
+                self.assertIn("protocol_residue", codes, form)
 
     def test_qc_accepts_clean_translation(self) -> None:
         result = self.pair(srt("こんにちは"), srt("你好"))
