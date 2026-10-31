@@ -101,10 +101,12 @@ vanitas\
 
 ## 7. 验证门禁（合并前必须全绿）
 ```powershell
-# 1) 语法（递归包含 vanitas\agent|config|context|repl|tools|translate 子包）
+# 1) 语法门（递归包含 vanitas\agent|config|context|repl|tools|translate 子包）
 Get-ChildItem vanitas -Recurse -Filter *.py | ForEach-Object { python -m py_compile $_.FullName }
 Get-ChildItem tests\test_*.py, scripts\*.py | ForEach-Object { python -m py_compile $_.FullName }
-# 2) 单测（当前 842 例）
+# 1b) 注释门（与语法门同级）：拦取证外泄/幽灵符号/悬空 §锚/复读钉死值
+python scripts\check_comments.py
+# 2) 单测（当前 855 例）
 python -m unittest discover -s tests
 python -m unittest tests.test_agent_parser
 python -m unittest tests.test_proactive_defense
