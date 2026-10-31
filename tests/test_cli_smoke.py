@@ -672,10 +672,10 @@ class CliSmokeTests(unittest.TestCase):
             },
         )
         self.assertEqual(meta["task_template"], "translate_asmr")
-        self.assertEqual(meta["prompt_bytes"], 12427)
+        self.assertEqual(meta["prompt_bytes"], 13108)
         self.assertEqual(
             meta["prompt_sha256"],
-            "A5E058802CC073E9D75BC0253CD378FD43983019D7415BCBAEFA6C5624233383",
+            "74324996DA7786F6A2BC4E1FDA6C5972E0E3AAC2B2BDB0C1A7887F5AFB268F0A",
         )
         self.assertEqual(meta["preset"], "asmr")
         self.assertEqual(meta["temperature"], 0.2)

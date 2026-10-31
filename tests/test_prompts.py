@@ -50,10 +50,12 @@ class PromptTests(unittest.TestCase):
         experimental = (
             self.prompt_dir / "task_translate_asmr_experimental.md"
         ).read_bytes()
-        self.assertEqual(len(production), 12427)
+        # V5（12,427 B / A5E05880 -> 13,108 B / 74324996）：只在 R1–R4 四条根因上
+        # 增删文案，八条 IO/报数/主客/拟声契约与示例专名照旧（见 docs §54）。
+        self.assertEqual(len(production), 13108)
         self.assertEqual(
             hashlib.sha256(production).hexdigest().upper(),
-            "A5E058802CC073E9D75BC0253CD378FD43983019D7415BCBAEFA6C5624233383",
+            "74324996DA7786F6A2BC4E1FDA6C5972E0E3AAC2B2BDB0C1A7887F5AFB268F0A",
         )
         self.assertEqual(len(experimental), 5399)
         self.assertEqual(
