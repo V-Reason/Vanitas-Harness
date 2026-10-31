@@ -71,15 +71,18 @@ class QcSrtTests(unittest.TestCase):
 
     def test_window_id_is_error(self) -> None:
         result = self.pair(srt("一"), srt("译文 [#12]"))
-        self.assertTrue(any(item.code == "window_id" for item in result.errors))
+        self.assertTrue(
+            any(item.code == "protocol_residue" for item in result.errors)
+        )
 
     def test_duplicate_translation_for_distinct_sources_is_error(self) -> None:
         result = self.pair(
             srt("今日はとても楽しかったです", "明日の予定を確認します"),
             srt("这是完全相同的一条长译文", "这是完全相同的一条长译文"),
         )
+        # severity 三档后 duplicate 属 review；断言对象从 errors 改为 issues。
         self.assertTrue(
-            any(item.code == "duplicate_translation" for item in result.errors)
+            any(item.code == "duplicate_translation" for item in result.issues)
         )
 
     def test_duplicate_onomatopoeia_is_not_error(self) -> None:
@@ -87,7 +90,10 @@ class QcSrtTests(unittest.TestCase):
             srt("カリッ カリッ カリッ", "カリ カリ カリ"),
             srt("卡利……卡利……卡利……", "卡利……卡利……卡利……"),
         )
-        self.assertFalse(any(item.code == "duplicate_translation" for item in result.errors))
+        self.assertFalse(
+            any(item.code in ("duplicate_translation", "short_duplicate")
+                for item in result.issues)
+        )
 
     def test_duplicate_kana_only_short_pair_is_not_error(self) -> None:
         # 真实取证：曲目5 里 さらさら/さわさわ/サワーサワー 一起被译成"滑溜溜的"，
@@ -97,7 +103,8 @@ class QcSrtTests(unittest.TestCase):
             srt("滑溜溜的，好滑溜溜的~", "滑溜溜的，好滑溜溜的~"),
         )
         self.assertFalse(
-            any(item.code == "duplicate_translation" for item in result.errors)
+            any(item.code in ("duplicate_translation", "short_duplicate")
+                for item in result.issues)
         )
 
     def test_duplicate_kana_pair_with_long_source_is_still_error(self) -> None:
@@ -107,7 +114,7 @@ class QcSrtTests(unittest.TestCase):
             srt("这是一条完全相同的中文长译文", "这是一条完全相同的中文长译文"),
         )
         self.assertTrue(
-            any(item.code == "duplicate_translation" for item in result.errors)
+            any(item.code == "duplicate_translation" for item in result.issues)
         )
 
     def test_duplicate_source_substring_is_not_error(self) -> None:
@@ -115,20 +122,29 @@ class QcSrtTests(unittest.TestCase):
             srt("好き好きとは言ってないけど", "好き好き"),
             srt("虽然没说喜欢喜欢啦。", "虽然没说喜欢喜欢啦。"),
         )
-        self.assertFalse(any(item.code == "duplicate_translation" for item in result.errors))
+        self.assertFalse(
+            any(item.code in ("duplicate_translation", "short_duplicate")
+                for item in result.issues)
+        )
 
     def test_duplicate_near_synonym_sources_are_not_error(self) -> None:
         result = self.pair(
             srt("挿入のイメージ", "お挿入のイメージなんだけど"),
             srt("就是插入的印象啦。", "是关于插入的印象啦。"),
         )
-        self.assertFalse(any(item.code == "duplicate_translation" for item in result.errors))
+        self.assertFalse(
+            any(item.code in ("duplicate_translation", "short_duplicate")
+                for item in result.issues)
+        )
 
         result = self.pair(
             srt("えーとか言って", "えぇーって"),
             srt("说着“呃——”之类的。", "说着“诶——”之类的。"),
         )
-        self.assertFalse(any(item.code == "duplicate_translation" for item in result.errors))
+        self.assertFalse(
+            any(item.code in ("duplicate_translation", "short_duplicate")
+                for item in result.issues)
+        )
 
     def test_latin_artifact_is_actionable(self) -> None:
         result = self.pair(srt("セックスしたい"), srt("做SEXPAR啦"))
@@ -165,11 +181,14 @@ class QcSrtTests(unittest.TestCase):
         self.assertIn("blank", self.codes(result))
 
     def test_asr_suspect_term_is_actionable(self) -> None:
-        result = self.pair(srt("弁当向かってる"), srt("便当正在过去"))
+        result = self.pair(srt("南様、こちらです"), srt("南大人，这边请"))
         self.assertIn("asr_term", self.codes(result))
+        # 弁当是正常日语词，已从数据表删除；旧启发式 100% 误报。
+        result = self.pair(srt("弁当向かってる"), srt("便当正在过去"))
+        self.assertNotIn("asr_term", self.codes(result))
 
     def test_honorific_actionable_and_polite_exempt(self) -> None:
-        result = self.pair(srt("ほら、見て…"), srt("您看吧……"))
+        result = self.pair(srt("先輩、好きです"), srt("您看吧……"))
         self.assertIn("honorific", self.codes(result))
 
         result = self.pair(srt("お騒がせしました"), srt("给您添麻烦了"))
@@ -193,9 +212,11 @@ class QcSrtTests(unittest.TestCase):
         )
         self.assertIn("honorific", self.codes(result))
 
-    def test_honorific_neutral_keeps_single_cue_heuristic(self) -> None:
+    def test_honorific_neutral_is_not_flagged(self) -> None:
+        # 原断言：neutral 单句启发式也报 honorific。
+        # 新断言：只有 intimately 且非引语才升 review；neutral 一律不报。
         result = self.pair(srt("ほら、見て…"), srt("您看吧……"))
-        self.assertIn("honorific", self.codes(result))
+        self.assertNotIn("honorific", self.codes(result))
 
     def test_strict_service_register_exit_zero(self) -> None:
         (self.dir / "a.srt").write_text(
@@ -244,7 +265,7 @@ class QcSrtTests(unittest.TestCase):
         )
 
     def test_json_summary_and_flagged_cues(self) -> None:
-        (self.dir / "a.srt").write_text(srt("ほら、見て…"), encoding="utf-8")
+        (self.dir / "a.srt").write_text(srt("先輩、好きです"), encoding="utf-8")
         (self.dir / "a.zh.srt").write_text(srt("您看吧……"), encoding="utf-8")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -272,7 +293,7 @@ class QcSrtTests(unittest.TestCase):
         )
 
     def test_strict_exit_code(self) -> None:
-        (self.dir / "a.srt").write_text(srt("ほら、見て…"), encoding="utf-8")
+        (self.dir / "a.srt").write_text(srt("先輩、好きです"), encoding="utf-8")
         (self.dir / "a.zh.srt").write_text(srt("您看吧……"), encoding="utf-8")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -302,13 +323,129 @@ class QcSrtTests(unittest.TestCase):
         self.assertEqual(code, 1)
 
     def test_report_is_compact_diff(self) -> None:
-        result = self.pair(srt("ほら、見て…"), srt("您看吧……"))
+        result = self.pair(srt("先輩、好きです"), srt("您看吧……"))
         report = qc_srt.render_report([result])
         self.assertIn("⚠ 语义疑似点", report)
         self.assertIn("- 原文", report)
         self.assertIn("+ 译文", report)
         self.assertIn("? ", report)
         self.assertNotIn("|---", report)
+
+    def test_only_switch_limits_codes(self) -> None:
+        (self.dir / "a.srt").write_text(srt("先輩、好きです"), encoding="utf-8")
+        (self.dir / "a.zh.srt").write_text(srt("您まだ"), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = qc_srt.main(
+                [
+                    "--source-dir",
+                    str(self.dir),
+                    "--zh-dir",
+                    str(self.dir),
+                    "--only",
+                    "kana",
+                    "--json",
+                ]
+            )
+        payload = json.loads(out.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            {item["code"] for item in payload["flagged_cues"]}, {"kana"}
+        )
+        self.assertEqual(payload["summary"]["by_code"], {"kana": 1})
+
+    def test_unknown_only_returns_two(self) -> None:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = qc_srt.main(
+                ["--source-dir", str(self.dir), "--only", "not_a_code"]
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("未知 code", err.getvalue())
+
+    def test_diff_reports_per_code_counts(self) -> None:
+        old_path = self.dir / "old.json"
+        (self.dir / "a.srt").write_text(srt("こんにちは"), encoding="utf-8")
+        (self.dir / "a.zh.srt").write_text(srt("你好"), encoding="utf-8")
+        first = io.StringIO()
+        with contextlib.redirect_stdout(first):
+            qc_srt.main(
+                ["--source-dir", str(self.dir), "--json"]
+            )
+        old_path.write_text(first.getvalue(), encoding="utf-8")
+
+        (self.dir / "a.srt").write_text(srt("先輩、好きです"), encoding="utf-8")
+        (self.dir / "a.zh.srt").write_text(srt("您真好呢"), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = qc_srt.main(
+                ["--source-dir", str(self.dir), "--diff", str(old_path)]
+            )
+        self.assertEqual(code, 0)
+        self.assertIn("honorific", out.getvalue())
+        self.assertIn("+1", out.getvalue())
+
+    def test_diff_missing_file_returns_two(self) -> None:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = qc_srt.main(
+                [
+                    "--source-dir",
+                    str(self.dir),
+                    "--diff",
+                    str(self.dir / "missing.json"),
+                ]
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("diff 文件", err.getvalue())
+
+    def test_json_issue_has_severity_rule_evidence(self) -> None:
+        (self.dir / "a.srt").write_text(srt("先輩、好きです"), encoding="utf-8")
+        (self.dir / "a.zh.srt").write_text(srt("您真好呢"), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            qc_srt.main(["--source-dir", str(self.dir), "--json"])
+        payload = json.loads(out.getvalue())
+        issue = payload["flagged_cues"][0]
+        self.assertIn(issue["severity"], ("block", "review"))
+        self.assertTrue(issue["rule"].startswith("qc."))
+        self.assertIn("evidence", issue)
+        self.assertIn("block", payload["summary"])
+        self.assertIn("review", payload["summary"])
+        self.assertIn("info", payload["summary"])
+        self.assertIn("by_code", payload["summary"])
+        self.assertIn("register_summary", payload["files"][0])
+        self.assertIn("pipeline_fixpoint", payload["files"][0])
+
+    def test_info_only_exit_zero_even_strict(self) -> None:
+        (self.dir / "a.srt").write_text(
+            srt("これは長い台詞です"), encoding="utf-8"
+        )
+        (self.dir / "a.zh.srt").write_text(
+            srt("这是一段很长的台词。"), encoding="utf-8"
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = qc_srt.main(
+                ["--source-dir", str(self.dir), "--strict", "--json"]
+            )
+        payload = json.loads(out.getvalue())
+        self.assertEqual(code, 0)
+        self.assertGreaterEqual(payload["summary"]["info"], 1)
+        self.assertEqual(payload["summary"]["by_code"].get("pipeline_drift"), 1)
+
+    def test_read_failure_returns_two(self) -> None:
+        (self.dir / "a.srt").write_bytes(b"\xff\xfe\x00")
+        (self.dir / "a.zh.srt").write_text(srt("你好"), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = qc_srt.main(["--source-dir", str(self.dir), "--json"])
+        self.assertEqual(code, 2)
+        # IO 失败不能被 --only 过滤掉，否则退出码会误报 0。
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = qc_srt.main(
+                ["--source-dir", str(self.dir), "--only", "kana", "--json"]
+            )
+        self.assertEqual(code, 2)
 
 
 if __name__ == "__main__":
