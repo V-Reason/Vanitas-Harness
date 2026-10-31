@@ -6,7 +6,7 @@
 三层分工：
 1. 静默 auto：繁体、行首标点等由翻译后处理覆盖，只计数不刷 warning；
 2. 结构 error：cue 数/序号/时间轴、协议编号残渣（``[#N]`` 及其单边/全角/
-   Markdown 变体）、不同原文同长译文，阻断；
+   Markdown 变体）、不同原文同长译文（两侧都是 ≤10 字全假名的拟声/单音除外），阻断；
 3. 语义 actionable：ASR 疑似错词、亲昵语境“您”、未授权动作括号、
    译文暴增、空译、假名残留、可疑拉丁词与斜杠并列，默认只提示，
    --strict 才阻断。
@@ -164,9 +164,28 @@ def _clip(text: str, limit: int = 80) -> str:
     return compact[: max(0, limit - 1)] + "…"
 
 
+KANA_ONLY_RE = re.compile(r"^[\u3040-\u30ff\u30fc]+$")
+# 全假名短句（拟声、单音、气息）在中文里往往只能落到同一句，属素材特征而不是
+# 窗口错位。S2/V1 实测 22 条 duplicate error 里有 18 条是这一类
+# （さらさら/さわさわ/サワーサワー 一起译成"滑溜溜的"），它们不产生任何可修复
+# 信号。这里只豁免“两侧都是全假名且 ≤10 字”的配对，其余阈值不动。
+KANA_ONLY_MAX_CHARS = 10
+
+
+def _both_kana_only_short(left: str, right: str) -> bool:
+    for text in (left, right):
+        if not text or len(text) > KANA_ONLY_MAX_CHARS:
+            return False
+        if not KANA_ONLY_RE.match(text):
+            return False
+    return True
+
+
 def _source_texts_are_similar(left: str, right: str) -> bool:
     if not left or not right:
         return False
+    if _both_kana_only_short(left, right):
+        return True
     # 促音/长音在拟声词里没有语义差异；先抹平再比较，避免“カリッ/カリ”误报。
     left = left.replace("ッ", "").replace("ー", "")
     right = right.replace("ッ", "").replace("ー", "")
