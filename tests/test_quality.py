@@ -847,8 +847,8 @@ class T1InventedNameTests(unittest.TestCase):
         )
 
     def test_forbidden_spelling_of_example_name_also_fires(self) -> None:
-        # fix1 复跑取证（2026-10-31，同一份 曲目5）：コーリ 全部落成“赤音……”，
-        # 而“赤音”正是 V4 明令禁止的写法——补的是哪个写法不影响判定。
+        # 复跑取证：同一份语料里 コーリ 全部落成“赤音……”，而“赤音”正是提示词
+        # 明令禁止的写法——补的是哪个写法不影响判定（取证细节见 变更历史 §53）。
         self.assertEqual(
             [
                 issue.code
@@ -869,7 +869,7 @@ class T1InventedNameTests(unittest.TestCase):
             strip_example_names("茜音……", "コーリ", self.DOCUMENT), "……"
         )
         self.assertEqual(strip_example_names("茜音", "コーリ", self.DOCUMENT), "……")
-        # 反复填空（fix1b 的 #53 形态）同样收敛成一个省略号。
+        # 同一条里反复填空（“赤音……赤音……赤音……”）同样收敛成一个省略号。
         self.assertEqual(
             strip_example_names("赤音……赤音……赤音……", "コーリ", self.DOCUMENT),
             "……",
