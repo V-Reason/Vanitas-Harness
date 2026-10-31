@@ -257,7 +257,7 @@ def identify_suspicious_cues(
     1. 正文残留 [#N]；
     2. 非空原文对应空译文；
     3. 非空原文对应极短译文（明显漏译）；
-    4. 当前译文整段复用历史前文（跨窗复制，例如 396 -> 411）；
+    4. 当前译文整段复用历史前文（跨窗复制）；
     5. 同窗两行：源文不同却得到相同/互相包含的长译文。
 
     第 5 类必须**成对**标记：模型把不同原文译成同一句时，无法判定是谁抄了
@@ -313,7 +313,7 @@ def _window_translation_is_suspicious(
 ) -> bool:
     """检测结构完整但语义明显错位的窗口，避免把相邻行译文写进当前 cue。
 
-    兼容包装：完整窗口判定的布尔结果与 P1 之前逐条等价，由
+    兼容包装：完整窗口判定的布尔结果与旧布尔接口逐条等价，由
     ``identify_suspicious_cues`` 是否命中任何 cue 决定。
     """
     return bool(identify_suspicious_cues(window, aligned, history))

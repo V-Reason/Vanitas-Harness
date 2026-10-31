@@ -7,7 +7,7 @@
 ``tail``，右 cue 用 ``replacement`` 替换其 ``head``。
 
 约束：
-- 纯标准库，不 import ``translate.py``；规则表与 timing 解析放在本模块，
+- 纯标准库，不 import ``vanitas.translate``；规则表与 timing 解析放在本模块，
   由 ``asr_repair`` 复用，避免两份实现漂移。
 - 表仍为 3 列 TSV（``left_tail<TAB>right_head<TAB>replacement``），
   注释/空行跳过，坏行与重复键带 ``文件:行号`` 抛 ``TranslateError``。

@@ -59,8 +59,9 @@ from .window import (
     strip_window_id_prefix,
 )
 
-# T1 预算按候选级：整包最多 5 次、单文件最多 2 次（514 口径 5/514=0.97%）；
-# 由 CLI 创建一个 T1Budget 跨文件共享，translate_srt 每次文件 begin_file。
+# T1 预算按候选级：整包 max(5, round(total_cues*1%))、单文件
+# max(2, ceil(file_cues*1%))；由 CLI 创建一个 T1Budget 跨文件共享，
+# translate_srt 每次文件 begin_file。
 T1_NEARBY_RADIUS = 3
 
 SINGLE_RETRY_HINT = (

@@ -1,6 +1,6 @@
 """翻译实况看板与终态统计（UI 层）。
 
-`translate.py` 只发 `SegmentStat` 事件，本模块负责环形缓冲、ANSI 局部重绘
+`vanitas.translate` 只发 `SegmentStat` 事件，本模块负责环形缓冲、ANSI 局部重绘
 与最终汇总；业务层不反向依赖终端渲染细节。非 TTY/未启用着色时只保留
 终态统计，避免污染管道与 CI 日志。
 """
