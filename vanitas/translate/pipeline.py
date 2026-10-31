@@ -37,6 +37,7 @@ from ..quality import (
     detect_register,
     normalize_compare,
     repair_first_person_name,
+    repair_organ_swap,
     repair_quote_private,
     strip_example_names,
 )
@@ -368,7 +369,7 @@ def translate_srt(
         source_text: str,
         entity: DynamicEntityEngine | None = None,
     ) -> str:
-        """统一的 cue 级后处理顺序：清洗 → 示例专名 → 锁定名 → 术语 → 人称 → 窄修复。"""
+        """统一的 cue 级后处理顺序：清洗 → 示例专名 → 锁定名 → 术语 → 人称 → 器官 → 窄修复。"""
         text_out = postprocess_cue_text(
             zh_text, source_text, strip_trailing_period=strip_trailing_periods
         )
@@ -381,6 +382,9 @@ def translate_srt(
         if glossary is not None:
             text_out = glossary.apply(source_text, text_out)
         text_out = apply_pronoun_policy(text_out, profile)
+        # 只在“源文有耳词且没有阴道词”时生效：模型会把 お耳の中 写成“小穴里”，
+        # 这是灌不进去的领域习惯，用确定性改写兜底，不再花一次重译。
+        text_out = repair_organ_swap(source_text, text_out)
         # 仅“下の名前で呼んであげて”场景：模型固执输出“我的名字/让我/叫我”，
         # 在 validate 前做确定性第三人称收敛；其余源文原样返回。
         text_out = repair_first_person_name(source_text, text_out)

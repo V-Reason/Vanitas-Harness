@@ -153,6 +153,30 @@ INTIMATE_WORDS = (
     "添い寝",
     "気持ちいい",
 )
+# 明确性行为词：出现即可定性，但仍让位于服务语域。提示词的口径是“纯服务
+# 场景可保留敬称，一旦有身体互动全篇用你”，所以只加这一条强证据通道，
+# 不改“单句撒娇不足以定性”的阈值（见 detect_register）。
+ACT_WORDS = (
+    "射精",
+    "勃起",
+    "肉棒",
+    "おっぱい",
+    "おまんこ",
+    "まんこ",
+    "おちんちん",
+    "ちんちん",
+    "ちんぽ",
+    "亀頭",
+    "膣",
+    "絶頂",
+    "中出し",
+    "フェラ",
+    "手コキ",
+    "パイズリ",
+    "イッちゃう",
+    "SEX",
+    "えっち",
+)
 REGISTER_SERVICE = "service"
 REGISTER_INTIMATE = "intimate"
 REGISTER_NEUTRAL = "neutral"
@@ -171,6 +195,11 @@ def detect_register(sources) -> str:
 
     “命中的不同词”各计 1，同一词重复出现不累积；总分 < 2、同分或差值
     不足 1 都判 neutral，避免单句敬语/单句撒娇把整篇带偏。
+
+    强证据通道：出现明确性行为词、且整篇没有任何服务词时判 intimate。
+    这类文本的敬称口径由提示词硬性规定为“你”，不能因为“只有一个 distinct
+    情感词”就落回 neutral（S2/V2 的 ``02``/``01_`` 正是这样漏掉的）；
+    带 お客様/ご奉仕 的服务文件仍走原判定，敬称豁免不被抹平。
     """
     texts = [str(text) for text in sources]
     service = sum(
@@ -179,6 +208,9 @@ def detect_register(sources) -> str:
     intimate = sum(
         1 for word in INTIMATE_WORDS if any(word in text for text in texts)
     )
+    act = sum(1 for word in ACT_WORDS if any(word in text for text in texts))
+    if act and not service:
+        return REGISTER_INTIMATE
     if service + intimate < 2:
         return REGISTER_NEUTRAL
     if service == intimate or abs(service - intimate) < 1:
@@ -195,6 +227,45 @@ def apply_pronoun_policy(text: str, profile: TranslationProfile) -> str:
     if profile.pronoun != "你" or not text:
         return text
     return text.replace("您", "你")
+
+
+# --------------------------------------------------------------------------- #
+# 器官错位（耳 → 阴道类词）
+# --------------------------------------------------------------------------- #
+
+# 模型把“耳朵里面”写成“小穴里面”是固定翻车形态（全出现在耳部场景的 R18
+# 作品）。判定与改写共用同一个 guard：**本条**源文出现耳词、且完全没有
+# 阴道类词；同时提到两处器官的 cue 一律不动，避免改写合法译法。
+ORGAN_EAR_SOURCE_TERMS = ("お耳", "耳かき", "耳掻き", "耳の中", "耳")
+ORGAN_VAGINA_SOURCE_TERMS = ("おまんこ", "まんこ", "膣", "小穴")
+ORGAN_VAGINA_ZH_TERMS = ("小穴", "阴道", "私处", "花穴", "秘处", "蜜壶", "蜜穴")
+ORGAN_EAR_ZH = "耳朵"
+
+
+def detect_organ_swap(source: str, translation: str) -> str | None:
+    """源文只有耳、译文却出现阴道类词时返回证据串，否则 ``None``。"""
+    text = str(translation or "")
+    src = str(source or "")
+    if not text or not src:
+        return None
+    if not any(term in src for term in ORGAN_EAR_SOURCE_TERMS):
+        return None
+    if any(term in src for term in ORGAN_VAGINA_SOURCE_TERMS):
+        return None
+    used = [term for term in ORGAN_VAGINA_ZH_TERMS if term in text]
+    if not used:
+        return None
+    return f"源=耳 译={used[0]}"
+
+
+def repair_organ_swap(source: str, translation: str) -> str:
+    """把“耳 → 阴道词”的错位译词收敛成“耳朵”；guard 不成立时原样返回。"""
+    if detect_organ_swap(source, translation) is None:
+        return translation
+    result = str(translation)
+    for term in ORGAN_VAGINA_ZH_TERMS:
+        result = result.replace(term, ORGAN_EAR_ZH)
+    return result
 
 
 # --------------------------------------------------------------------------- #
