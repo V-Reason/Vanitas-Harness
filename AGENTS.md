@@ -106,7 +106,7 @@ Get-ChildItem vanitas -Recurse -Filter *.py | ForEach-Object { python -m py_comp
 Get-ChildItem tests\test_*.py, scripts\*.py | ForEach-Object { python -m py_compile $_.FullName }
 # 1b) 注释门（与语法门同级）：拦取证外泄/幽灵符号/悬空 §锚/复读钉死值
 python scripts\check_comments.py
-# 2) 单测（当前 890 例）
+# 2) 单测（当前 905 例）
 python -m unittest discover -s tests
 python -m unittest tests.test_agent_parser
 python -m unittest tests.test_proactive_defense
@@ -147,7 +147,7 @@ python -m vanitas stop
 - 翻译上下文：`TranslationEngine._history` 是文档级状态，CLI 在每个输入文件前 `reset_history()`，多文件不得继承上一文件的标题、摘要或人名。ASMR 合流构建文档级 `DynamicEntityEngine`：只以敬称名、`という名`/`役` 明确姓名和共同前缀汉字姓名为种子；裸片假名/拟声词/普通名词不建实体，停用表拦截 `トラック`/`セックス`/`バイバイ`/`コショコショ` 等。`capture_translations` 只保存洁净示例，`_extract_locked_name` 只锁高置信裸名，`enforce_locks` 只清未翻译日文专名并用单遍正则交替 + 哨兵遮蔽防止「梅地先生先生」级联。
 - 窗口协议：`sanitize_translation_output` 只清围栏/外层引号/重复句号/开头标点，不再删 `[#N]`；编号由 cue 边界清理。`validate_cue_translation` 拒绝空行、假名、`SEXPAR`/`Track`、中日文斜杠与乱码替换符，批次失败整窗回退，单句失败按「原因回灌重译一次 → 填回候选 → 无候选才留原文」三级兜底。`align_window_response` 判三态，`identify_suspicious_cues` 逐 cue 定位（正文残留 `[#N]`、空译、超短、跨窗复制、同窗同译成对），只重译损坏项；结构灾难或损坏项 ≥ 半数才整窗熔断，禁止对 1..M 残缺前缀做位置猜测（历史见 变更历史 §45）。
 - T1 确定性守卫：`ASMR_T1_CODES` 闭集 5 个——`short_duplicate`/`address_term`/`invented_tool`/`invented_name`/`under_translation`，只在 `asmr_guard=True` 时参与，只报 issue，由 `audit_retry()` 每 cue 最多一次定点重译；CLI 在 `prompts.is_asmr_task()` 时自动启用，没有 `--no-t1`。预算 `T1Budget.for_corpus=max(5, round(cues×1%))`、`begin_file.per_file=max(2, ceil(file_cues×1%))`；事件 `t1_events.jsonl`/`t1_budget.json` 与 `translation_meta.json` 写到 `~/.vanitas/translate/<stamp>/`。`invented_name` 只登记提示词示例专名，`under_translation` 只判「源文 ≥10 字、译文 ≤2 字」，刻意不做比例判定（历史见 变更历史 §42、§53）。
-- QC：`scripts\qc_srt.py` 是薄 CLI，判定在 `vanitas\qc.py`；severity 三档 `block`/`review`/`info`，`block` 必重跑、`review` 人工看、`info` 不进退出码；标定集与 P/R 口径见 变更历史 §56。
+- QC：`scripts\qc_srt.py` 是薄 CLI，判定在 `vanitas\qc.py`；severity 三档 `block`/`review`/`info`（5/18/3 共 26 个 code），`block` 必重跑、`review` 人工看、`info` 不进退出码。语义 review 里 `organ_mismatch`（源文只有耳词却写成小穴）与 `pronoun_mixed`（同文件 您/你 各 ≥2 条且切换 ≥3 次，锚定首个切换条）是 §57 新增；`staging` 的 QC 口径比生产端宽——生产 `cleaner` 只删「耳边/轻抚」白名单，避免误删「（笑）」。标定集与 P/R 口径见 变更历史 §57。
 - 环境与续传：`translate --env production|experimental`，默认 production；experimental 仅覆盖 ASMR，其它 preset 直接 `ConfigError`、不 fallback；T1/glossary/join_rules 两环境一致。生产路径走 `stream_chat` SSE + `StreamingAbortDetector`，窗口批次异常降级逐句；SRT 按窗口写 `<输出>.part.srt`，`--resume` 只按 `(序号, 时间轴)` 校验，源文改字但时间轴不变时会套旧译文（已知限制）。`critique_budget` 两阶段复审默认关闭，CLI 未接开关（历史见 变更历史 §46–§49）。
 - CLI 相对路径（`translate` 输入/`--out-dir`、`batch` JSONL、`--system`、`--config-dir`）统一按 `VANITAS_ORIG_CWD` 解析；`vanitas.bat` 切仓库根不影响启动目录语义。`--jobs>1` 只并行解析，请求始终串行。
 - Agent 工具：`read_file`/`read_file_range`/`grep_workspace`/`patch_file`/`write_file`/`move_file`/`delete_path`（`delete_file` 兼容）/`list_dir`/`run_shell_ro` 全部过 `_require_path` 与 `is_inside_workspace`；`patch_file` 需确认，两个只读查询自动放行。批量逐项执行，失败不回滚已成功项，不是事务。重命名/改扩展名只允许 `move_file(src,dst)`。
