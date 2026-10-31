@@ -717,6 +717,17 @@ class TranslateTests(unittest.TestCase):
         # 多行字幕的合法单换行不是空行，不能误杀。
         self.assertIsNone(validate_cue_translation("A\nB"))
 
+    def test_replacement_char_is_stripped_and_rejected(self) -> None:
+        # 真实取证：曲目5 #39 落盘成 "\ufffd茜音……"（llama-server 吐出被截断的
+        # 多字节 UTF-8，engine 的 decode(errors="replace") 兜成 U+FFFD）。
+        self.assertEqual(postprocess_cue_text("\ufffd茜音……", "コーリ"), "茜音……")
+        self.assertEqual(postprocess_cue_text("沙沙\ufffd……", "コショコショ"), "沙沙……")
+        # 整条只有乱码：与"整条只有协议残渣"同样置空，让重译信号触发。
+        self.assertEqual(postprocess_cue_text("\ufffd", "コーリ"), "")
+        self.assertIn("乱码", validate_cue_translation("A\ufffdB") or "")
+        self.assertIn("乱码", validate_cue_translation("\ufffd茜音……") or "")
+        self.assertIsNone(validate_cue_translation("茜音……"))
+
     def test_translate_srt_accepts_repeated_short_source_lines(self) -> None:
         source = self.write(
             "repeat.srt",
@@ -3217,6 +3228,62 @@ class QualityGuardTests(unittest.TestCase):
         self.assertTrue(
             any("候选未通过" in str(item.message) for item in caught)
         )
+
+    def test_invented_name_only_cue_becomes_ellipsis_without_retry(self) -> None:
+        # 真实取证：曲目5 #39「コーリ」被译成“茜音……”，而全篇源文没有あかね。
+        # 整条只有示例专名 → 确定性降级成省略号，**不再花一次重译**。
+        client = ScriptedTranslationClient(["茜音……"])
+        _engine, output, failures = self.run_translate(
+            client, "コーリ", window_size=1, asmr_guard=True
+        )
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(failures, [])
+        self.assertEqual(self.block_texts(output), ["……"])
+
+    def test_invented_name_inside_sentence_retries_once(self) -> None:
+        # 名字嵌在正常句子里时不降级（会把句子删残），改走一次定点重译。
+        client = ScriptedTranslationClient(["茜音，我们先开始吧", "那我们开始吧"])
+        _engine, output, failures = self.run_translate(
+            client, "コーリ", window_size=1, asmr_guard=True
+        )
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(failures, [])
+        self.assertEqual(self.block_texts(output), ["那我们开始吧"])
+
+    def test_invented_name_persistent_violation_keeps_original(self) -> None:
+        client = ScriptedTranslationClient(
+            ["茜音，我们先开始吧", "茜音，我们先开始吧"]
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _engine, output, failures = self.run_translate(
+                client, "コーリ", window_size=1, asmr_guard=True
+            )
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(failures, [])
+        self.assertEqual(self.block_texts(output), ["茜音，我们先开始吧"])
+        self.assertTrue(
+            any("候选未通过" in str(item.message) for item in caught)
+        )
+
+    def test_invented_name_silent_when_document_mentions_name(self) -> None:
+        client = ScriptedTranslationClient(["[#1] 茜音，早上好\n[#2] 茜音……"])
+        _engine, output, failures = self.run_translate(
+            client, "あかねちゃん、おはよう", "コーリ", asmr_guard=True
+        )
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(failures, [])
+        self.assertEqual(self.block_texts(output), ["茜音，早上好", "茜音……"])
+
+    def test_under_translation_retries_when_whole_sentence_is_lost(self) -> None:
+        # 真实取证：⑤#23「たのも知ってましたけど。」→"哦"。
+        client = ScriptedTranslationClient(["哦", "我也知道你在偷看啦"])
+        _engine, output, failures = self.run_translate(
+            client, "たのも知ってましたけど。", window_size=1, asmr_guard=True
+        )
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(failures, [])
+        self.assertEqual(self.block_texts(output), ["我也知道你在偷看啦"])
 
     def test_invented_tool_retries_once_and_keeps_single_block(self) -> None:
         client = ScriptedTranslationClient(

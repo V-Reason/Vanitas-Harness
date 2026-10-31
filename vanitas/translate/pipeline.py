@@ -38,6 +38,7 @@ from ..quality import (
     normalize_compare,
     repair_first_person_name,
     repair_quote_private,
+    strip_example_names,
 )
 from .types import (
     ASR_HALLUCINATION_PATTERNS,
@@ -366,10 +367,14 @@ def translate_srt(
         source_text: str,
         entity: DynamicEntityEngine | None = None,
     ) -> str:
-        """统一的 cue 级后处理顺序：清洗 → 锁定名 → 术语 → 人称 → 窄修复。"""
+        """统一的 cue 级后处理顺序：清洗 → 示例专名 → 锁定名 → 术语 → 人称 → 窄修复。"""
         text_out = postprocess_cue_text(
             zh_text, source_text, strip_trailing_period=strip_trailing_periods
         )
+        if asmr_enabled:
+            # 整条只有“提示词示例专名”时降级成省略号（拟声位被填人名的形态）；
+            # 必须早于审计：这一步是确定性的，不该再花一次重译去问模型。
+            text_out = strip_example_names(text_out, source_text, document_text)
         if entity is not None:
             text_out = entity.enforce_locks(text_out)
         if glossary is not None:
@@ -405,6 +410,9 @@ def translate_srt(
     cue_positions = {
         cue: position for position, (cue, _text) in enumerate(all_cues)
     }
+    # 整篇源文拼一份给审计用：invented_name 要判断“这个专名整篇到底有没有出现过”，
+    # 只查当前 cue 会把“别的 cue 确实提到过人名”误判成漏译/渗漏。
+    document_text = "\n".join(text for _cue, text in all_cues)
 
     # 断点续传：先把快照里已完成的 cue 回填进 blocks/索引/历史，后续只跑剩余项。
     # 回填顺序必须与文档顺序一致，否则 _history 的“最近 N 条”语义会错位。
@@ -459,6 +467,7 @@ def translate_srt(
             window_index=window_index,
             nearby_sources=nearby_sources,
             asmr_guard=asmr_enabled,
+            document_text=document_text,
         )
 
     def candidate_ok(

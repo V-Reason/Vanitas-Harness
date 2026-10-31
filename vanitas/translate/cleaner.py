@@ -98,6 +98,12 @@ TRAILING_QUOTE_PERIOD_RE = re.compile(r"。(?=[」』”\"'’）)]*$)")
 MAX_TRAILING_PERIOD_CHARS = 30
 
 UNTRANSLATED_KANA_RE = re.compile(r"[\u3040-\u30ff]")
+# 乱码替换符：llama-server 偶发吐出被截断的多字节 UTF-8，``engine._iter_sse`` 用
+# ``decode("utf-8", "replace")`` 容错，于是落成一个 U+FFFD。它不是假名、不是空行、
+# 也不是斜杠，既有硬校验一条都拦不住（S2/V1 实测 1 条：曲目 5 第 39 条
+# ``\ufffd茜音……``）。这里做两层：后处理先剥掉，硬校验再兜住绕过 postprocess
+# 的写回路径（单句裸文本出口）。
+REPLACEMENT_CHARS_RE = re.compile("[\ufffd\ufffe\uffff]")
 ARTIFACT_LATIN_RE = re.compile(r"(?:SEXPAR|SEXXPAR|TRACK)", re.IGNORECASE)
 SLASH_ALTERNATIVE_RE = re.compile(
     r"[\u4e00-\u9fffA-Za-z]/[\u4e00-\u9fffA-Za-z]"
@@ -236,11 +242,16 @@ def postprocess_cue_text(
     # 残渣本身可能带换行，先折叠会把一行残渣拆成两个 block 的边界。
     stripped_ids = WINDOW_ID_ANY_RE.sub("", zh_text)
     text = _collapse_blank_lines(stripped_ids).strip()
+    # 乱码替换符在分块之前剥掉：它可能正好夹在协议残渣与正文之间，
+    # 先折叠空行会让替换符自己占一行，破坏多行字幕的行结构。
+    garbled = bool(REPLACEMENT_CHARS_RE.search(text))
+    if garbled:
+        text = REPLACEMENT_CHARS_RE.sub("", text).strip()
     if not text:
-        # 整条 cue 只有一个协议标签（真实语料里出现过整行就是 ``#84]``）：
-        # 清掉之后本该是空。这里**不能**回退成原文，否则残渣照样落盘，
+        # 整条 cue 只有一个协议标签（真实语料里出现过整行就是 ``#84]``）或只有乱码：
+        # 清掉之后本该是空。这里**不能**回退成原文，否则残渣/乱码照样落盘，
         # 而"非空原文→空译文"的重译/QC 信号永远不会触发。
-        if stripped_ids.strip() != zh_text.strip():
+        if garbled or stripped_ids.strip() != zh_text.strip():
             return ""
         return original
     text = text.translate(TRADITIONAL_TO_SIMPLIFIED_MAP)
@@ -264,13 +275,17 @@ def postprocess_cue_text(
 def validate_cue_translation(text: str) -> str | None:
     """写回前的硬校验；返回原因，None 表示可写回。
 
-    只拒绝确定会破坏中文字幕的伪影：空行、假名、SEXPAR 类臆造词、中日文斜杠
-    并列。空行在 ``postprocess_cue_text`` 之后仍要再拦一次：任何绕过后处理的
-    写回路径都会把单条 cue 拆成两个 SRT block，破坏 cue 数/序号/时间轴。
+    只拒绝确定会破坏中文字幕的伪影：空行、假名、乱码替换符、SEXPAR 类臆造词、
+    中日文斜杠并列。空行在 ``postprocess_cue_text`` 之后仍要再拦一次：任何绕过后
+    处理的写回路径都会把单条 cue 拆成两个 SRT block，破坏 cue 数/序号/时间轴。
+    乱码同理由此兜底：``postprocess_cue_text`` 已经剥过，但单句裸文本出口不经过
+    它，U+FFFD 一旦落盘就是肉眼可见的坏字符。
     其他拉丁词（曲名/人名）交给 QC 的 actionable 检查，避免误杀。
     """
     if BLANK_LINE_RUN_RE.search(text):
         return "译文含空行"
+    if REPLACEMENT_CHARS_RE.search(text):
+        return "译文含乱码替换符"
     if UNTRANSLATED_KANA_RE.search(text):
         return "译文残留日文假名"
     if ARTIFACT_LATIN_RE.search(text):

@@ -457,10 +457,17 @@ def audit_duplicate(
 # T1：ASMR 确定性守卫（只报不替换；重译/预算由 translate.py 统一管）
 # --------------------------------------------------------------------------- #
 
-# 三个 code 是 T1 的唯一闭集：translate.py 用它们做 ASMR 门控、每 cue 一次
-# 重译与每文件 5 次上限；新 code 必须同时进 candidate_ok.semantic_codes。
+# 五个 code 是 T1 的唯一闭集：translate.py 用它们做 ASMR 门控、每 cue 一次
+# 重译与每文件预算上限；新 code 必须同时进 candidate_ok.semantic_codes
+# （pipeline 用 ``*ASMR_T1_CODES`` 展开，加到这里即自动生效）。
 ASMR_T1_CODES = frozenset(
-    {"short_duplicate", "address_term", "invented_tool"}
+    {
+        "short_duplicate",
+        "address_term",
+        "invented_tool",
+        "invented_name",
+        "under_translation",
+    }
 )
 
 # short_duplicate：只抓“短源文却得到同一个长译文”的跨 cue 复用。
@@ -662,6 +669,155 @@ def audit_invented_tool(
                 "原文及前后 ±3 条都没有道具词；"
                 "不要凭场景补“掏耳勺/棉签/梵天”等道具，按原文直译"
             ),
+        )
+    ]
+
+
+# 提示词 <language_and_voice> 第 5 条用「茜音（あかね）」「日和（ひより）」举例说明
+# “汉字人名必须保留汉字”。模型会把这些示例当成“本作已知人名”，在原文根本没有名字的
+# 拟声/语气位上直接补出来：S2/V1 实测 6 条（曲目 5 #39/#40/#41/#47 原文「コーリ」→
+# “茜音……”，#53「で、くる、くる…」→“茜音……”，曲目 3 #183「カーリー」→“茜音”），
+# 而这两个文件的源文从头到尾没有 あかね/アカネ/茜音/ひより/日和。
+# 只在“本条 + 全篇源文都没有该写法”时才报：换一份真有茜音的作品不会误伤。
+# tests/test_quality.py 有耦合测试钉死“提示词里的示例专名必须登记在这里”。
+PROMPT_EXAMPLE_NAMES: tuple[tuple[str, str], ...] = (
+    ("茜音", "あかね"),
+    ("日和", "ひより"),
+)
+
+# 同一示例名在译文里出现过的错误汉字写法。模型不只会写成提示词给的正字“茜音”，
+# 也会写 V4 明令禁止的“赤音”：`fix1` 复跑（2026-10-31，同一份 曲目5）里
+# `コーリ` 全部落成“赤音……”，而 `#53` 落成“赤音……赤音……赤音……”。
+# 名字本身没有对错，但“源文没有名字却补了名字”这件事与写法无关，必须一并认。
+PROMPT_EXAMPLE_NAME_SPELLINGS: dict[str, tuple[str, ...]] = {
+    "茜音": ("茜音", "赤音", "阿卡涅"),
+    "日和": ("日和",),
+}
+
+# 片假名折叠成平假名：源文里的 アカネ / ヒヨリ 与提示词示例的 あかね / ひより
+# 是同一个人名，直接比对会漏配（靶场 CAT_C_003「ミサキヒヨリという名のサクラ」
+# 就差点被误报成渗漏）。
+_KATAKANA_TO_HIRAGANA = {
+    code: code - 0x60 for code in range(0x30A1, 0x30F7)
+}
+
+
+def _fold_kana(text: str) -> str:
+    return str(text).translate(_KATAKANA_TO_HIRAGANA)
+
+
+def _example_name_is_absent(haystack: str, zh_name: str, kana: str) -> bool:
+    """整篇源文（已折平假名）里是否确实没有这个示例专名的任何写法。"""
+    spellings = PROMPT_EXAMPLE_NAME_SPELLINGS.get(zh_name, (zh_name,))
+    if any(item in haystack for item in spellings):
+        return False
+    return _fold_kana(kana) not in haystack
+
+
+# 只剩标点/符号（没有汉字、假名、字母、数字）时视为“占位”，可以整条降级成省略号。
+_PUNCT_ONLY_RE = re.compile(r"^[^\u4e00-\u9fff\u3040-\u30ffA-Za-z0-9]*$")
+
+
+def strip_example_names(
+    translation: str, source: str, document_text: str = ""
+) -> str:
+    """把“整条只有一个提示词示例专名”的译文确定性降级成省略号。
+
+    为什么需要这一步：模型在 `コーリ` 这类拟声位上会固执地补人名，重译请求
+    也改不掉（`fix1b` 实测 cue 39/40 两次重译仍输出“茜音”，候选被拒、原译
+    保留）。但既然整篇源文根本没有这个名字，这个字就**只可能来自提示词示例**，
+    删掉它是确定性的，不需要再问模型。
+
+    只在“删完只剩标点”时生效——那正是拟声/气息位被填空的形态
+    （“茜音……”、“赤音……赤音……赤音……”）。名字嵌在正常句子里的
+    （“说不出来呢，日和的两次连续……”）原样返回，交给 `audit_invented_name`
+    做一次定点重译，避免把句子删残。
+    """
+    text = str(translation or "")
+    if not text or not str(source or "").strip():
+        return translation
+    haystack = _fold_kana(f"{source}\n{document_text}")
+    removed = False
+    result = text
+    for zh_name, kana in PROMPT_EXAMPLE_NAMES:
+        if not _example_name_is_absent(haystack, zh_name, kana):
+            continue
+        for item in PROMPT_EXAMPLE_NAME_SPELLINGS.get(zh_name, (zh_name,)):
+            if item in result:
+                result = result.replace(item, "")
+                removed = True
+    if not removed:
+        return translation
+    if _PUNCT_ONLY_RE.match(result):
+        return "……"
+    return translation
+
+
+def audit_invented_name(
+    source: str, translation: str, cue: int | str, document_text: str = ""
+) -> list[AuditIssue]:
+    """译文出现提示词示例专名、而整篇源文没有该名字的任何写法时报告。
+
+    ``document_text`` 是同一文件全部原始源文的拼接（不含译文）。空串时退化为
+    只查本条源文，单句路径没有文档表时仍能拦住最明显的渗漏。比对前先把片假名
+    折成平假名，アカネ/あかね、ヒヨリ/ひより 视为同一写法。
+    """
+    if not str(source).strip() or not str(translation).strip():
+        return []
+    haystack = _fold_kana(f"{source}\n{document_text}")
+    for zh_name, kana in PROMPT_EXAMPLE_NAMES:
+        spellings = PROMPT_EXAMPLE_NAME_SPELLINGS.get(zh_name, (zh_name,))
+        used = next((item for item in spellings if item in translation), "")
+        if not used:
+            continue
+        if not _example_name_is_absent(haystack, zh_name, kana):
+            continue
+        return [
+            AuditIssue(
+                code="invented_name",
+                cue=cue,
+                message=f"译文出现源文没有的提示词示例专名“{used}”",
+                hint=(
+                    f"原文没有出现任何人物名（{zh_name}/{kana} 都没有）；"
+                    "拟声、语气、指示位都不要填人名，只按本条原文重译"
+                ),
+            )
+        ]
+    return []
+
+
+# 漏译阈值：源文归一化 ≥10 字却只译出 ≤2 字——几乎整句丢失。S2/V1 实测 1739 条里
+# 只命中 1 条且是真错：⑤#23「たのも知ってましたけど。」→“哦”（前半句被并进上一条）。
+# **刻意不做“译文/源文比例”判定**：日译中的合法压缩（お客様から私たちに触れることは
+# 禁止となっております 25 字 → “禁止客人触碰我们哦” 9 字，比例 0.36）与真漏译
+# （①序幕#15 23 字 → 8 字，比例 0.35）不可分，0.40 阈值在靶场 80 条金标里误报 2 条。
+# 比例类漏译只能靠人工/语义复审，宁漏不错。
+UNDER_TRANSLATION_MIN_SOURCE = 10
+UNDER_TRANSLATION_MAX_TRANSLATION = 2
+
+
+def audit_under_translation(
+    source: str, translation: str, cue: int | str
+) -> list[AuditIssue]:
+    """源文够长却几乎没译出来时报告（吞句、整句丢失）。"""
+    if not str(source).strip() or not str(translation).strip():
+        return []
+    if is_onomatopoeia_or_reduplication(source):
+        return []
+    source_length = len(normalize_compare(source))
+    if source_length < UNDER_TRANSLATION_MIN_SOURCE:
+        return []
+    translation_length = len(normalize_compare(translation))
+    if translation_length > UNDER_TRANSLATION_MAX_TRANSLATION:
+        return []
+    return [
+        AuditIssue(
+            code="under_translation",
+            cue=cue,
+            message=(
+                f"源文 {source_length} 字只译出 {translation_length} 字，疑似漏译"
+            ),
+            hint="按本条原文完整译出，不要只留一个叹词，也不要把后半句并到上一条",
         )
     ]
 
@@ -901,16 +1057,19 @@ def audit_translation(
     window_index: DuplicateIndex | None = None,
     nearby_sources: tuple[str, ...] = (),
     asmr_guard: bool = False,
+    document_text: str = "",
 ) -> list[AuditIssue]:
     """按固定优先级汇总文档级、P2a 与 T1 审计；不调用模型。
 
     固定顺序：duplicate → short_duplicate → customer_direction →
     quote_private → negative_question → first_person → tag_question →
-    address_term → invented_tool → honorific。T1 三个 code 只在
-    ``asmr_guard=True`` 时参与；``short_duplicate`` 需要调用方提供
-    每文件独立的 ``short_index``（min_chars=8 / translation_ratio=0.85），
-    合流批次还可传 ``window_index`` 覆盖当前窗口内已接受 cue；两者最多
-    报一条，避免同 cue 重复计费。
+    address_term → invented_name → invented_tool → under_translation →
+    honorific。T1 五个 code 只在 ``asmr_guard=True`` 时参与；
+    ``short_duplicate`` 需要调用方提供每文件独立的 ``short_index``
+    （min_chars=8 / translation_ratio=0.85），合流批次还可传 ``window_index``
+    覆盖当前窗口内已接受 cue；两者最多报一条，避免同 cue 重复计费。
+    ``document_text`` 是该文件全部原始源文的拼接，供 invented_name 判断
+    “整篇到底有没有这个名字”；不传时退化为只查本条源文。
     """
     issues = [*audit_duplicate(source, translation, cue, index)]
     if asmr_guard:
@@ -931,10 +1090,14 @@ def audit_translation(
     if asmr_guard:
         issues.extend(audit_address_term(source, translation, cue))
         issues.extend(
+            audit_invented_name(source, translation, cue, document_text)
+        )
+        issues.extend(
             audit_invented_tool(
                 source, translation, cue, nearby_sources=nearby_sources
             )
         )
+        issues.extend(audit_under_translation(source, translation, cue))
     issues.extend(audit_honorific(translation, profile, cue))
     return issues
 
