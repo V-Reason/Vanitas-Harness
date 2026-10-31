@@ -100,9 +100,8 @@ MAX_TRAILING_PERIOD_CHARS = 30
 UNTRANSLATED_KANA_RE = re.compile(r"[\u3040-\u30ff]")
 # 乱码替换符：llama-server 偶发吐出被截断的多字节 UTF-8，``engine._iter_sse`` 用
 # ``decode("utf-8", "replace")`` 容错，于是落成一个 U+FFFD。它不是假名、不是空行、
-# 也不是斜杠，既有硬校验一条都拦不住（S2/V1 实测 1 条：曲目 5 第 39 条
-# ``\ufffd茜音……``）。这里做两层：后处理先剥掉，硬校验再兜住绕过 postprocess
-# 的写回路径（单句裸文本出口）。
+# 也不是斜杠，既有硬校验一条都拦不住。这里做两层：后处理先剥掉，硬校验再兜住
+# 绕过 postprocess 的写回路径（单句裸文本出口）。
 REPLACEMENT_CHARS_RE = re.compile("[\ufffd\ufffe\uffff]")
 ARTIFACT_LATIN_RE = re.compile(r"(?:SEXPAR|SEXXPAR|TRACK)", re.IGNORECASE)
 SLASH_ALTERNATIVE_RE = re.compile(

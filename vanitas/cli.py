@@ -460,7 +460,7 @@ def _write_translation_meta(
     model_id: str,
     started_at: str,
 ) -> Path:
-    """写 A/B 元数据；只含环境/模板/预设/模型，不含正文或 blind 标识。"""
+    """写运行元数据（环境/模板/预设/模型），供 A/B 归因；不含正文或 blind 标识。"""
     prompt_path = Path(prompt_dir) / f"task_{task_template}.md"
     raw = prompt_path.read_bytes()
     payload = {

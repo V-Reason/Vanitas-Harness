@@ -31,7 +31,7 @@ class TranslationFailure:
 
 @dataclass(frozen=True)
 class T1Event:
-    """一条 T1 守卫命中记录；P4 用 (source, cue) join 评委结果。"""
+    """一条 T1 守卫命中记录；按 (source, cue) 与语料/评委结果 join。"""
 
     cue: int | str
     code: str
@@ -59,9 +59,9 @@ class T1Budget:
 
     @classmethod
     def for_corpus(cls, total_cues: int | None) -> "T1Budget":
-        """按整包非空 cue 数缩放整包预算；未知/非正数回退 5/514 默认值。
+        """按整包非空 cue 数缩放整包预算；未知/非正数回退默认 5/2。
 
-        514 → round(5.14)=5（保持预注册 5/514）；1404 → round(14.04)=14。
+        514 → max(5, round(5.14))=5；1404 → max(5, round(14.04))=14。
         """
         try:
             cues = int(total_cues) if total_cues is not None else 0
