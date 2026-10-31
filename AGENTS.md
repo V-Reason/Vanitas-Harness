@@ -127,7 +127,7 @@ vanitas\
 Get-ChildItem vanitas -Recurse -Filter *.py | ForEach-Object { python -m py_compile $_.FullName }
 Get-ChildItem tests\test_*.py, scripts\*.py | ForEach-Object { python -m py_compile $_.FullName }
 
-# 2) 单测（当前 816 例）
+# 2) 单测（当前 838 例）
 python -m unittest discover -s tests
 python -m unittest tests.test_agent_parser
 python -m unittest tests.test_proactive_defense
@@ -204,6 +204,7 @@ python -m vanitas stop
 - Agent 路径约束是参数级沙盒，不是 OS 级隔离；程序内部自行写文件仍需人工判断。
 - 混合换行的 `.srt` 已修复：`parse_srt` 使用 `splitlines()`，`rebuild_srt` 统一目标 EOL（见现状第 17 节）。
 - HY-MT2 显存余量约 500 MiB，是本机最紧的模型。
+- S2/V1 体检后的确定性修复（2026-10-31，`fix/v4-defects` 分支）：① `cleaner.REPLACEMENT_CHARS_RE` 在 `postprocess_cue_text` 里剥掉 U+FFFD/U+FFFE/U+FFFF（llama-server 偶发截断多字节 UTF-8，`engine._iter_sse` 的 `decode(errors="replace")` 会兜成替换符），`validate_cue_translation` 新增“译文含乱码替换符”兜住绕过 postprocess 的单句出口；整条只有乱码时与“整条只有协议残渣”同样返回空串。② `quality.strip_example_names`（确定性、在 `finalize` 里早于全部审计）：整条译文只有提示词示例专名时降级成 `……`——模型在 `コーリ` 这类拟声位上会固执补人名，连重译都改不掉（`fix1b` 实测 cue 39/40 两次重译仍输出“茜音”、候选被拒后原译保留），但既然整篇源文没有该名字的任何写法，这个字只可能来自提示词示例。只在“删完只剩标点”时生效，名字嵌在正常句子里时原样返回。同时新增 T1 code `invented_name` 兜“嵌在句子里”的形态（真机未观察到该形态，仅单测覆盖）。③ T1 闭集 3 → **5**：`invented_name` + `under_translation`（源文规范化 ≥10 字却只译出 ≤2 字，S2/V1 实测 1 条真错）。**刻意不做“译文/源文比例”判定**：日译中合法压缩 0.36 与真漏译 0.35 不可分，0.40 阈值在 80 条金标里误报 2 条。`audit_translation(..., document_text="")` 新增整篇源文参数（pipeline 用 `all_cues` 拼一份，续传回填前建表）；两个 code 共用既有 T1 预算通道。④ QC `duplicate_translation` 新增豁免：两侧都是 **≤10 字全假名**时不计 error（S2/V1 的 22 条 error 里 18 条是 `さらさら/さわさわ/サワー` 同译，不产生可修复信号）；剩余 5 条中 4 条是真错、1 条是 `伊賀崎綾香/彩香` 专名归一误报。⑤ `config/glossary/asmr.tsv` 14 → **17** 条，补“战区 4 拟声机械音译”：`コショコショ→沙沙`、`ごしょごしょ→咕叽`、`くにくに→揉捏`（forbidden 均为 `咕噜`）。真机验证（`曲目5` 143 cue）：修复前 `茜音/赤音` 5 处、`咕噜` 0~5 处，修复后**示例专名 0、咕噜 0、T1 事件从 5 降到 1**（`fix1c`）。测试 817 → **838 例 / OK / 1 skip**；本批**未改提示词**（仍 V4 / 12,427 B / `A5E05880`），V5 提示词迭代另派子 Agent（见 §53）。
 - 完整清单与取证见 [docs/项目现状.md](docs/项目现状.md) 第 5、6 节；不得把未验证项写成已结论。
 
 ---
