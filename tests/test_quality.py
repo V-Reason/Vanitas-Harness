@@ -14,6 +14,9 @@ if str(ROOT) not in sys.path:
 
 from vanitas.errors import TranslateError  # noqa: E402
 from vanitas.quality import (  # noqa: E402
+    ASMR_T1_CODES,
+    PROMPT_EXAMPLE_NAMES,
+    strip_example_names,
     AuditIssue,
     DuplicateIndex,
     DuplicateMatch,
@@ -25,12 +28,14 @@ from vanitas.quality import (  # noqa: E402
     audit_duplicate,
     audit_first_person,
     audit_honorific,
+    audit_invented_name,
     audit_invented_tool,
     audit_negative_question,
     audit_quote_private,
     audit_short_duplicate,
     audit_tag_question,
     audit_translation,
+    audit_under_translation,
     combine_hints,
     detect_register,
     is_onomatopoeia_or_reduplication,
@@ -800,6 +805,177 @@ class T1InventedToolTests(unittest.TestCase):
                 )
 
 
+class T1InventedNameTests(unittest.TestCase):
+    DOCUMENT = "お耳の\nコリコリ固いところを\nほぐしていきます\nコーリ\nいかがですか"
+
+    def test_example_name_without_any_source_name_fires(self) -> None:
+        # 真实取证：曲目5 #39 源文「コーリ」，译文「茜音……」，全篇没有あかね。
+        issues = audit_invented_name("コーリ", "茜音……", 39, self.DOCUMENT)
+        self.assertEqual([issue.code for issue in issues], ["invented_name"])
+        self.assertIn("茜音", issues[0].message)
+        self.assertIn("人名", issues[0].hint)
+
+    def test_document_containing_kana_name_is_clean(self) -> None:
+        # 同一篇别处真的出现过 あかね 时，本条补名不算渗漏（宁漏不错）。
+        self.assertEqual(
+            audit_invented_name(
+                "コーリ", "茜音……", 39, "あかねちゃん、おはよう"
+            ),
+            [],
+        )
+        # 片假名写法同样算"出现过"：靶场 CAT_C_003「ミサキヒヨリ」不能误报。
+        self.assertEqual(
+            audit_invented_name(
+                "コーリ", "日和……", 39, "ミサキヒヨリという名のサクラです"
+            ),
+            [],
+        )
+
+    def test_source_with_han_name_is_clean(self) -> None:
+        self.assertEqual(audit_invented_name("茜音ちゃん", "茜音……", 3), [])
+
+    def test_other_example_name_and_empty_inputs_are_clean(self) -> None:
+        self.assertEqual(audit_invented_name("こんにちは", "你好", 3), [])
+        self.assertEqual(audit_invented_name("", "茜音……", 3), [])
+        # 日和/ひより 同样是提示词示例，同样只在整篇没有时才算渗漏。
+        self.assertEqual(
+            [issue.code for issue in audit_invented_name("コーリ", "日和……", 3)],
+            ["invented_name"],
+        )
+        self.assertEqual(
+            audit_invented_name("コーリ", "日和……", 3, "日和って呼んで"), []
+        )
+
+    def test_forbidden_spelling_of_example_name_also_fires(self) -> None:
+        # fix1 复跑取证（2026-10-31，同一份 曲目5）：コーリ 全部落成“赤音……”，
+        # 而“赤音”正是 V4 明令禁止的写法——补的是哪个写法不影响判定。
+        self.assertEqual(
+            [
+                issue.code
+                for issue in audit_invented_name(
+                    "コーリ", "赤音……", 39, self.DOCUMENT
+                )
+            ],
+            ["invented_name"],
+        )
+        # 源文真的写成“赤音”（ASR 汉字写法）时不算渗漏。
+        self.assertEqual(
+            audit_invented_name("赤音、おはよう", "赤音……", 3), []
+        )
+
+    def test_strip_example_names_only_when_whole_cue_is_the_name(self) -> None:
+        # 拟声位被填人名：删完只剩标点 → 确定性降级成省略号。
+        self.assertEqual(
+            strip_example_names("茜音……", "コーリ", self.DOCUMENT), "……"
+        )
+        self.assertEqual(strip_example_names("茜音", "コーリ", self.DOCUMENT), "……")
+        # 反复填空（fix1b 的 #53 形态）同样收敛成一个省略号。
+        self.assertEqual(
+            strip_example_names("赤音……赤音……赤音……", "コーリ", self.DOCUMENT),
+            "……",
+        )
+        # 名字嵌在正常句子里：原样返回，交给 audit_invented_name 重译，不删残。
+        self.assertEqual(
+            strip_example_names(
+                "说不出来呢，日和的两次连续……", "言えないヒヨノア2連続"
+            ),
+            "说不出来呢，日和的两次连续……",
+        )
+        # 整篇真出现过该名字时不动。
+        self.assertEqual(
+            strip_example_names("茜音……", "コーリ", "あかねちゃん、おはよう"),
+            "茜音……",
+        )
+        self.assertEqual(strip_example_names("", "コーリ"), "")
+
+    def test_prompt_example_names_stay_in_sync_with_template(self) -> None:
+        # 提示词换示例专名时，PROMPT_EXAMPLE_NAMES 必须同步，否则审计形同虚设。
+        template = (
+            ROOT / "config" / "prompts" / "task_translate_asmr.md"
+        ).read_text(encoding="utf-8")
+        for zh_name, kana in PROMPT_EXAMPLE_NAMES:
+            with self.subTest(name=zh_name):
+                self.assertIn(zh_name, template)
+                self.assertIn(kana, template)
+                self.assertIn(f"「{zh_name}（{kana}）」", template)
+
+
+class T1UnderTranslationTests(unittest.TestCase):
+    def test_single_word_for_long_source_fires(self) -> None:
+        # 真实取证：⑤#23「たのも知ってましたけど。」→"哦"（前半句被并进上一条）。
+        issues = audit_under_translation(
+            "たのも知ってましたけど。", "哦", 23
+        )
+        self.assertEqual([issue.code for issue in issues], ["under_translation"])
+        self.assertIn("漏译", issues[0].message)
+
+    def test_legit_compression_is_clean(self) -> None:
+        # 金标 CAT_A_001：25 字 → 9 字（比例 0.36）是合法压缩，不是漏译。
+        # 这条否掉了"按比例判漏译"的设计：真漏译 0.35 与合法压缩 0.36 不可分。
+        self.assertEqual(
+            audit_under_translation(
+                "お客様から私たちに触れることは禁止となっております",
+                "禁止客人触碰我们哦",
+                1,
+            ),
+            [],
+        )
+        self.assertEqual(
+            audit_under_translation(
+                "お客様、ゆっくりと仰向けになっていただけますでしょうか。",
+                "客人，可以请您慢慢躺平吗？",
+                16,
+            ),
+            [],
+        )
+
+    def test_onomatopoeia_and_short_sources_are_clean(self) -> None:
+        for source, translation in (
+            ("さらさら、さらさら", "滑溜溜的，好滑溜溜的~"),  # 拟声按设计短译
+            ("ふわふわ", "柔软柔软的~"),
+            ("はい", "嗯……"),  # 源文不足 10 字
+            ("もう先生", "已经硬得这么厉害了……"),
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(
+                    audit_under_translation(source, translation, 7), []
+                )
+
+    def test_empty_inputs_are_clean(self) -> None:
+        self.assertEqual(audit_under_translation("", "", 1), [])
+        self.assertEqual(audit_under_translation("あ" * 20, "", 1), [])
+
+
+class T1CodeSetTests(unittest.TestCase):
+    def test_t1_closed_set_has_five_codes(self) -> None:
+        self.assertEqual(
+            ASMR_T1_CODES,
+            frozenset(
+                {
+                    "short_duplicate",
+                    "address_term",
+                    "invented_tool",
+                    "invented_name",
+                    "under_translation",
+                }
+            ),
+        )
+
+    def test_new_codes_are_gated_by_asmr_guard(self) -> None:
+        index = DuplicateIndex()
+        # 不传 asmr_guard 时，两个新 code 都不参与汇总。
+        issues = audit_translation(
+            "コーリ",
+            "茜音……",
+            1,
+            index=index,
+            profile=TranslationProfile(register="intimate", pronoun="auto"),
+        )
+        self.assertEqual(
+            [issue.code for issue in issues if issue.code in ASMR_T1_CODES], []
+        )
+
+
 class AuditAggregatorTests(unittest.TestCase):
     def test_combine_hints_deduplicates_and_limits(self) -> None:
         issues = [
@@ -890,3 +1066,5 @@ class AuditAggregatorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

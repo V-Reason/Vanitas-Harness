@@ -89,6 +89,27 @@ class QcSrtTests(unittest.TestCase):
         )
         self.assertFalse(any(item.code == "duplicate_translation" for item in result.errors))
 
+    def test_duplicate_kana_only_short_pair_is_not_error(self) -> None:
+        # 真实取证：曲目5 里 さらさら/さわさわ/サワーサワー 一起被译成"滑溜溜的"，
+        # S2/V1 有 18 条 error 是这一类；全假名短句不产生可修复信号。
+        result = self.pair(
+            srt("さらさら、さらさら", "サワーサワー"),
+            srt("滑溜溜的，好滑溜溜的~", "滑溜溜的，好滑溜溜的~"),
+        )
+        self.assertFalse(
+            any(item.code == "duplicate_translation" for item in result.errors)
+        )
+
+    def test_duplicate_kana_pair_with_long_source_is_still_error(self) -> None:
+        # 豁免只覆盖 ≤10 字全假名短句；长假名句复用同一译文仍是错位信号。
+        result = self.pair(
+            srt("かきくけこさしすせそあ", "なにぬねのたちつてとあ"),
+            srt("这是一条完全相同的中文长译文", "这是一条完全相同的中文长译文"),
+        )
+        self.assertTrue(
+            any(item.code == "duplicate_translation" for item in result.errors)
+        )
+
     def test_duplicate_source_substring_is_not_error(self) -> None:
         result = self.pair(
             srt("好き好きとは言ってないけど", "好き好き"),
