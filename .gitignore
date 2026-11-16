@@ -2,15 +2,37 @@
 /bin/
 /models/
 
+# 本机私有语料与评测结果
+/tests/private/
+/tests/data/private/
+
 # 评测运行产物
 /tests/reports/
 
 # Python 缓存
 __pycache__/
 *.pyc
+*.pyo
+.venv/
+venv/
 
 # 临时日志
 *.log
+
+# 本机环境与凭据
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+
+# 编辑器与操作系统文件
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
 
 # 旧提示词本地快照（不属发布物）
 /config/prompts/archive/

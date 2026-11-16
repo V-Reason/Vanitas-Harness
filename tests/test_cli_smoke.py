@@ -135,7 +135,7 @@ class CliSmokeTests(unittest.TestCase):
         with clean_env():
             code, out, _err = run(["--version"])
         self.assertEqual(code, 0)
-        self.assertIn("vanitas 0.4.2", out)
+        self.assertIn("vanitas 0.4.3", out)
 
     def test_models_lists_config(self) -> None:
         with clean_env():

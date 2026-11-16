@@ -142,10 +142,10 @@ class AgentTests(unittest.TestCase):
     def test_plain_text_finishes_without_confirmation(self) -> None:
         plans: list[str] = []
         repl, runner = self.make_repl(
-            ["我在 T:\\demo"], confirm=lambda plan: plans.append(plan) or True
+            ["我在 <WORKSPACE>\\demo"], confirm=lambda plan: plans.append(plan) or True
         )
         _value, out, _err = quiet_run(lambda: repl._chat("我在哪个目录？"))
-        self.assertIn("我在 T:\\demo", out)
+        self.assertIn("我在 <WORKSPACE>\\demo", out)
         self.assertEqual(plans, [])
         self.assertEqual(len(runner.calls), 1)
         self.assertEqual(runner.calls[0][0], "run")
@@ -521,10 +521,10 @@ class AgentTests(unittest.TestCase):
 
 class ActionParserTests(unittest.TestCase):
     def test_repairs_untranslated_windows_backslashes(self) -> None:
-        raw = r'{"action":"list_dir","parameters":{"path":"<WORKSPACE>"}}'
+        raw = r'{"action":"list_dir","parameters":{"path":"A:\workspace"}}'
         actions = parse_actions(raw)
         self.assertIsNotNone(actions)
-        self.assertEqual(actions[0].parameters["path"], r"<WORKSPACE>")
+        self.assertEqual(actions[0].parameters["path"], r"A:\workspace")
 
     def test_repairs_backslashes_in_batch_paths(self) -> None:
         raw = (
@@ -537,10 +537,10 @@ class ActionParserTests(unittest.TestCase):
         self.assertEqual(actions[0].parameters["dst"], r"<WORKSPACE>\a.srt")
 
     def test_valid_double_backslashes_remain_single_literal(self) -> None:
-        raw = '{"action":"list_dir","parameters":{"path":"T:\\\\TMP\\\\test"}}'
+        raw = '{"action":"list_dir","parameters":{"path":"A:\\\\workspace"}}'
         actions = parse_actions(raw)
         self.assertIsNotNone(actions)
-        self.assertEqual(actions[0].parameters["path"], r"<WORKSPACE>")
+        self.assertEqual(actions[0].parameters["path"], r"A:\workspace")
 
     def test_extracts_action_block_after_prose(self) -> None:
         raw = (

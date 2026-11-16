@@ -668,7 +668,7 @@ def _rate_cell(hit: int, total: int) -> str:
 
 
 def render_dashboard(report: BenchmarkReport) -> str:
-    title = "Vanitas-Harness 语义质量基准评测报告 (ASMR 80-cue)"
+    title = "Vanitas-Harness 合成语义契约评测报告 (ASMR 80-cue)"
     in_critique = report.mode == "critique"
 
     def final_cell(row: dict[str, Any]) -> str:

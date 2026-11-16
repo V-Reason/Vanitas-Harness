@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible defect
+title: "[bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, private subtitles, model files, or local absolute paths.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: v0.4.3 or commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and sanitized logs
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Windows version, Python version, GPU, and model ID. Do not include secrets.
+    validations:
+      required: true

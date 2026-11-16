@@ -146,7 +146,7 @@
 - 外推 primary decided 107（95% 57–177）< 360；V4 nondecided 407 > 154。
 - secondary decided_diff 107 < 262.5。
 - candidate 工程面：0 failure、结构 100%、QC error 0、actionable 7、245s、97 请求、vram 6560。
-- 红旗：b05 cue122 语义不符；7 条“您”语域；T1 1 命中（b03 cue41 invented_tool acceptable）。
+- 红旗：b05 cue122 语义不符；7 条“您”语域；T1 1 命中（b03 cue41 <SYNTHETIC_EXAMPLE> acceptable）。
 
 ### 校准
 
@@ -160,7 +160,7 @@
 ### 已合入默认
 
 1. **E0**：在 `postprocess_cue_text`、`validate_cue_translation`、单句裸文本出口折叠连续空行；防止 1 cue → 2 block。
-2. **T1**：`short_duplicate` / `address_term` / `invented_tool`；`audit_retry()` 定点重译；`T1Budget.for_corpus`/`begin_file`：
+2. **T1**：`<SYNTHETIC_EXAMPLE>` / `<SYNTHETIC_EXAMPLE>` / `<SYNTHETIC_EXAMPLE>`；`audit_retry()` 定点重译；`T1Budget.for_corpus`/`begin_file`：
    - `max_total = max(5, round(total_cues*1%))`（514→5，1404→14）；
    - `per_file = max(2, ceil(file_cues*1%))`（712→8）。
    - `t1_events.jsonl` / `t1_budget.json` 旁路。

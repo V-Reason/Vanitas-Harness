@@ -119,7 +119,7 @@ class PromptTests(unittest.TestCase):
             "目录 {cwd} / {input}",
             {"cwd": r"<WORKSPACE>\demo", "input": "x"},
         )
-        self.assertEqual(rendered, "目录 T:\\demo / x")
+        self.assertEqual(rendered, "目录 <WORKSPACE>\\demo / x")
 
     def test_task_chat_is_minimal(self) -> None:
         text = prompts.load_task(self.prompt_dir, "chat")
