@@ -278,6 +278,10 @@ def selftest(root: Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except AttributeError:
+        pass
     parser = argparse.ArgumentParser(description="注释门：拦注释腐化")
     parser.add_argument("--root", default=str(ROOT_DEFAULT))
     parser.add_argument("--json", action="store_true")
