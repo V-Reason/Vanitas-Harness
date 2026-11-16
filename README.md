@@ -1,6 +1,11 @@
 # Vanitas-Harness
 
+[![CI](https://github.com/V-Reason/Vanitas-Harness/actions/workflows/ci.yml/badge.svg)](https://github.com/V-Reason/Vanitas-Harness/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 单机本地推理 CLI：为 RTX 4060 Laptop（8 GB）准备 llama.cpp 启动器、单实例守卫、交互式 REPL、受控 Agent 闭环、批量翻译与批处理。模型、端口、上下文与 KV 类型全部由 `config/` 驱动。
+
+> 本仓库只分发代码、提示词、文档和原创合成测试数据。`bin/`、GGUF 模型权重、上游 llama.cpp 二进制、私有字幕与真实评测语料均不随仓库发布。使用者需自行取得这些资产并遵守各自许可。
 
 - 代码主力：Qwen2.5-Coder-7B-Instruct Q6_K（4060，Agent 默认）
 - 通用备胎：Qwen2.5-7B-Instruct Q6_K（4063，chat/batch 默认，2 分片只传首片）
@@ -13,7 +18,7 @@
 
 1. 把 llama.cpp CUDA 预编译包**完整解压**到 `bin/`（需 `llama-server.exe`、`llama.dll`、`ggml-base.dll`、`ggml-cuda.dll`）。
 2. 把 GGUF 按 `config/models.json` 的路径放入 `models/`。7B 两片必须同名同目录，启动只传 `-00001-of-00002.gguf`。
-3. `python -m pip install prompt_toolkit`（唯一第三方依赖；未安装会自动降级为 `input()`，功能不受阻）。
+3. 使用 Python 3.13，执行 `python -m pip install -r requirements.txt`（仅 `prompt_toolkit`；未安装会自动降级为 `input()`，功能不受阻）。
 4. 从仓库根运行 `vanitas.bat`；默认进入 Agent 闭环，无服务端时引导启动模型。
 
 ```bat
@@ -67,9 +72,15 @@ vanitas.bat stop
 
 字幕纪律：Agent 可以跑 `translate`/`serve`/`stop`，但**不得手写或改写任何字幕正文**（润色、补译、“修正版/补丁版”都算）——发现译文有问题只能改提示词/术语表/后处理/审计，再重跑让模型产出。细则见 [AGENTS.md §5.1](AGENTS.md)，来龙去脉见 [变更历史 §58–§59](docs/变更历史.md)。
 
+公开测试数据仅用于验证解析、窗口、QC 与评测接口，均为原创合成样本；它不代表真实字幕质量，也不能复现历史私有语料上的评测数字。贡献规则见 [CONTRIBUTING.md](CONTRIBUTING.md)，第三方边界见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
 ---
 
 ## 版本
 
-- 当前版本：`v0.4.2`（2026-10-31）
-- v0.4.2：ASMR 翻译管线封版于 V6 里程碑；已知边界与残留见 [变更历史 §61](docs/变更历史.md)。
+- 当前版本：`v0.4.3`（2026-11-16）
+- v0.4.3：完成 GitHub 公开发布治理、项目更名与合成公开基准；运行时契约延续 v0.4.2。
+
+## 许可
+
+本项目以 [MIT License](LICENSE) 发布。

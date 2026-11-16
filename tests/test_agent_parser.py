@@ -96,13 +96,13 @@ class ExtractToolCallsTests(unittest.TestCase):
     def test_multiple_objects_with_raw_backslashes_are_recovered(self) -> None:
         raw = (
             r'{"action":"move_file","parameters":'
-            r'{"src":"T:\TMP\a.md","dst":"T:\TMP\a.srt"}},'
+            r'{"src":"A:\workspace\a.md","dst":"A:\workspace\a.srt"}},'
             r'{"action":"move_file","parameters":'
-            r'{"src":"T:\TMP\b.md","dst":"T:\TMP\b.srt"}}'
+            r'{"src":"A:\workspace\b.md","dst":"A:\workspace\b.srt"}}'
         )
         calls = agent.extract_tool_calls(raw)
         self.assertEqual(len(calls or []), 2)
-        self.assertEqual(calls[1]["parameters"]["src"], r"T:\TMP\b.md")  # type: ignore[index]
+        self.assertEqual(calls[1]["parameters"]["src"], r"A:\workspace\b.md")  # type: ignore[index]
 
     def test_plain_json_without_action_is_not_a_tool_call(self) -> None:
         self.assertIsNone(agent.extract_tool_calls('{"result":"ok"}'))

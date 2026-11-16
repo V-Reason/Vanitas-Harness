@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile Python sources
+        shell: pwsh
+        run: |
+          Get-ChildItem vanitas -Recurse -Filter *.py | ForEach-Object { python -m py_compile $_.FullName }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem tests -Recurse -Filter test_*.py | ForEach-Object { python -m py_compile $_.FullName }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem scripts -Filter *.py | ForEach-Object { python -m py_compile $_.FullName }
+          exit $LASTEXITCODE
+
+      - name: Comment gate
+        run: python scripts\check_comments.py
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests
+
+      - name: Static red lines
+        shell: pwsh
+        run: |
+          $src = (Get-ChildItem vanitas -Recurse -Filter *.py).FullName
+          $checks = @(
+            @(Select-String -Path $src -Pattern '8080|8081|8082'),
+            @(Select-String -Path $src -Pattern 'import (psutil|requests|httpx|rich|click)'),
+            @(Select-String -Path scripts\*.py -Pattern 'import (psutil|requests|httpx|rich|click|jieba|opencc)'),
+            @(Select-String -Path $src -Pattern '提示：|\[GUARD-|\[(SERVE|LAUNCH|META|HINT|ERROR|STATUS|STOP)\]')
+          )
+          foreach ($hits in $checks) {
+            if ($hits.Count -gt 0) {
+              $hits | Format-Table Path,LineNumber,Line -AutoSize
+              exit 1
+            }
+          }

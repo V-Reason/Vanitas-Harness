@@ -38,7 +38,7 @@ _VALID_JSON_ESCAPES = frozenset('"\\/bfnrt')
 def _escape_path_backslashes(value: str) -> str:
     """把路径字段里的 Windows 单反斜杠补成合法 JSON 转义。
 
-    模型经常输出 `T:\\TMP\\test`（源码里只有一个反斜杠），而 JSON 会把
+    模型经常输出 `<WORKSPACE>`（源码里只有一个反斜杠），而 JSON 会把
     `\\T` 判为非法；`\\t` 又会被误解析成制表符。路径字段按“字面反斜杠”
     处理：奇数个反斜杠补一个，偶数个保持不变（已经转义过的路径不重复加倍）。
     """

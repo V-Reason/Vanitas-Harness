@@ -2,7 +2,7 @@
 
 > 本文件约束所有在该仓库工作的智能体与人。**优先级**：用户当轮明确指令 > 本文件 > README > 其他文档。
 > 与运行态冲突时，以源码与测试断言为准，并立即同步回改文档。
-> 开发范式提炼自外部资料 `<PRIVATE_ROOT>\AI\Role 通用软件架构师 & 首席工程专家.md`，按本项目规模裁剪后固化于此，不随仓库分发原始长文。
+> 开发范式提炼自外部架构方法论文档，按本项目规模裁剪后固化于此，不随仓库分发原始长文。
 
 ## 模块目录
 ```text
@@ -128,7 +128,7 @@ Get-ChildItem vanitas -Recurse -Filter *.py | ForEach-Object { python -m py_comp
 Get-ChildItem tests\test_*.py, scripts\*.py | ForEach-Object { python -m py_compile $_.FullName }
 # 1b) 注释门（与语法门同级）：拦取证外泄/幽灵符号/悬空 §锚/复读钉死值
 python scripts\check_comments.py
-# 2) 单测（当前 973 例）
+# 2) 单测（当前 977 例）
 python -m unittest discover -s tests
 python -m unittest tests.test_agent_parser
 python -m unittest tests.test_proactive_defense
@@ -156,7 +156,7 @@ python -m vanitas stop
 跑真机是允许的（§5.1 只禁“手写/改写字幕正文”）；未跑真机时必须注明「未实际验证」，不得把单测通过当成端到端通过。跑真机产生的输出是工具产物，不得再用编辑器修改。
 
 ## 8. Git 规范
-- `main` 始终可用；改动走短生命周期分支，完成后 `--no-ff` 合并并打 annotated tag（当前 `v0.4.2`）。
+- `main` 始终可用；改动走短生命周期分支，完成后 `--no-ff` 合并并打 annotated tag（当前 `v0.4.3`）。
 - Conventional Commits + 中文主题：`feat(cli): …`、`fix(tools): …`、`docs(status): …`、`chore!:`（破坏性）。
 - 一次提交只做一件事；删除与替代文件放同一提交，保证一次 revert 可回退。
 - 回滚优先 `git revert`；禁止改写已推送历史；无远端时也不得滥用 `reset --hard` 丢失现场。

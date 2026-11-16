@@ -58,7 +58,7 @@ class SessionTests(unittest.TestCase):
                 "alias",
                 cwd=r"<WORKSPACE>\demo\workspace",
             )
-        self.assertIn("当前工作目录：T:\\demo\\workspace", message)
+        self.assertIn("当前工作目录：<WORKSPACE>\\demo", message)
         self.assertNotIn("{cwd}", message)
 
     def test_agent_later_user_message_uses_compact_template(self) -> None:
@@ -83,7 +83,7 @@ class SessionTests(unittest.TestCase):
                 "alias",
                 cwd=r"<WORKSPACE>\repo",
             )
-        self.assertIn("当前工作目录：T:\\test", message)
+        self.assertIn("当前工作目录：<WORKSPACE>", message)
 
     def test_agent_template_defaults_to_process_cwd(self) -> None:
         session = Session(system="sys", task="agent")
@@ -94,7 +94,7 @@ class SessionTests(unittest.TestCase):
             ),
         ):
             message = session.build_user_message("hello", self.prompt_dir, "alias")
-        self.assertIn("当前工作目录：T:\\fallback", message)
+        self.assertIn("当前工作目录：<WORKSPACE>\\fallback", message)
 
     def test_budget_helpers_are_reexported(self) -> None:
         self.assertEqual(context_budget(4096, 8192), 3584)

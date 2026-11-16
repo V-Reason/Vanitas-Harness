@@ -85,7 +85,7 @@ REASON_RETRY_HINT = (
 
 
 def _reason_retry_hint(reason: str, previous: str = "") -> str:
-    """拼装一次性的重译提示：通用假名提示 + 本次失败原因（+ 上一句译文）。"""
+    """拼装一次性的重译说明：通用假名说明 + 本次失败原因（+ 上一句译文）。"""
     hint = f"{SINGLE_RETRY_HINT}\n{REASON_RETRY_HINT.format(reason=reason)}"
     if previous and validate_cue_translation(previous) is None:
         hint += f" 上一句译文：{_clip(previous, 80)}"
